@@ -10,23 +10,25 @@ env:
 
 jobs:
   test:
+    name: format, compile, unit tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # Keep this pair in step with mise.toml and .devcontainer/Dockerfile.
+      # Versions come from .tool-versions, the same pin mise reads locally.
       - uses: erlef/setup-beam@v1
+        id: beam
         with:
-          otp-version: "28.5.0.4"
-          elixir-version: "1.20.2"
+          version-file: .tool-versions
+          version-type: strict
 
       - uses: actions/cache@v4
         with:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock') }}
-          restore-keys: ${{ runner.os }}-mix-
+          key: ${{ runner.os }}-mix-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
 
       - run: mix deps.get
 
