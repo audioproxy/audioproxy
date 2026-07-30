@@ -1,4 +1,4 @@
-# Elixir/OTP pinned to the same pair as mise.toml. ffmpeg and ffprobe are part
+# Elixir/OTP pinned to the same pair as .tool-versions. ffmpeg and ffprobe are
 # of the dev image because they are part of the product: the render pipeline
 # shells out to them, so tests tagged :ffmpeg need the real binaries.
 FROM hexpm/elixir:1.20.2-erlang-28.5.0.4-debian-trixie-20260713-slim

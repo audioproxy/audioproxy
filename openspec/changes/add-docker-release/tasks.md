@@ -2,7 +2,7 @@
 
 - [ ] 1.1 `mix release` config + `config/runtime.exs` (all `AP_*` reads moved/validated there, shared with dev boot path)
 - [ ] 1.2 Multi-stage `Dockerfile` (hexpm/elixir build → alpine runtime: ffmpeg, tini, non-root user, HEALTHCHECK), `.dockerignore`
-- [ ] 1.3 `VERSIONS.md`: alpine/elixir/OTP/ffmpeg pins mirroring `mise.toml`
+- [ ] 1.3 `VERSIONS.md`: alpine/elixir/OTP/ffmpeg pins mirroring `.tool-versions`
 
 ## 2. Verification
 

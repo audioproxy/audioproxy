@@ -12,7 +12,7 @@ CLAUDE.md fixes the shape: multi-stage, `mix release` + bundled ERTS, `apk add f
 
 ## Decisions
 
-- **Build stage `hexpm/elixir:<ver>-erlang-<ver>-alpine-<ver>`** (exact tags mirror `mise.toml`); runtime stage plain `alpine:<ver>` with `apk add --no-cache ffmpeg` — ffmpeg version pinned by the alpine minor, recorded in a repo `VERSIONS.md` and asserted by a CI step (`ffmpeg -version` grep).
+- **Build stage `hexpm/elixir:<ver>-erlang-<ver>-alpine-<ver>`** (exact tags mirror `.tool-versions`); runtime stage plain `alpine:<ver>` with `apk add --no-cache ffmpeg` — ffmpeg version pinned by the alpine minor, recorded in a repo `VERSIONS.md` and asserted by a CI step (`ffmpeg -version` grep).
 - **PID 1 = tini** (`apk add tini`, `ENTRYPOINT ["/sbin/tini","--"]`): the release's beam handles SIGTERM, tini reaps any orphaned-zombie edge cases — belt and braces for a subprocess-heavy app.
 - **`config/runtime.exs` is the only config entry point** — same `AudioProxy.Config` boot validation runs in release and dev; container dies loudly on bad config.
 - **Healthcheck** via `wget -qO- localhost:$PORT/health` (busybox wget, no curl needed).

@@ -4,6 +4,22 @@ An imgproxy-style on-the-fly audio transcoding proxy. Reads source files from S3
 
 The full API design lives in `docs/audio-proxy-api-v1.md` — read it before touching URL parsing, options, or response semantics. It is the source of truth for endpoints, processing options, cache-key rules, headers, and error codes.
 
+## Worktree gate — check this before the first edit of any task
+
+**Never edit files while `main` is checked out.** Every change — feature, fix, docs, config, OpenSpec artifacts — starts on its own worktree.
+
+Before your first write or edit of a task, run `git branch --show-current`. If it prints `main`, stop and create the worktree first:
+
+```bash
+wt switch --create <change-name>   # then work in ../audioproxy.<change-name>
+```
+
+This is a precondition, not a preference. "It's only a config file", "it's just docs", and "I'll branch once I know what to change" are all violations. Reading, searching, and running the suite on `main` are fine; writing is not.
+
+The only writes permitted on `main`: resolving a merge, and the commit `/opsx:archive` produces for an already-merged change.
+
+Workflow mechanics (devcontainer, ports, hooks) are under *Dev workflow* below.
+
 ## Stack — decided, don't relitigate
 
 - **Elixir**, Plug + **Bandit** (no Phoenix — no HTML, no channels needed)
@@ -18,12 +34,12 @@ Stay with the stdlib and core/OTP tooling as far as possible. GenStage is accept
 
 ## Dev workflow
 
-- **Every feature/slice starts on a fresh git worktree paired with a devcontainer**, managed with worktrunk (`wt`). This is the Elixir adaptation of the `/jr-rails-new` agentic-worktree workflow (see that skill's `reference/agentic-worktrees.md` for the principal pattern):
+- **Every feature/slice starts on a fresh git worktree paired with a devcontainer** (see *Worktree gate* above — that rule is the enforcement, this is the mechanism), managed with worktrunk (`wt`). This is the Elixir adaptation of the `/jr-rails-new` agentic-worktree workflow (see that skill's `reference/agentic-worktrees.md` for the principal pattern):
   - `.config/wt.toml`: `post-create` runs `bin/agent-setup` (deps + compile inside the devcontainer), `post-start` runs `PORT={{ branch | hash_port }} bin/agent-server`, `pre-remove` runs `bin/agent-cleanup`, `post-remove` kills the branch's listener.
   - `bin/agent-server` boots the app on the branch's hashed port (Bandit reads `PORT`). No per-branch database exists — the app is stateless, so worktree isolation is just directory + port.
   - Devcontainer image carries Elixir/OTP + ffmpeg/ffprobe (mirrors runtime deps); `postCreateCommand` is `bin/agent-setup`. Use `devcontainer up` / `devcontainer exec`, not raw `docker compose`.
 - One OpenSpec change per worktree; merge back when its tasks are checked off and tests are green.
-- Local toolchain (outside containers) is pinned with mise (`mise.toml` / `.tool-versions`), Elixir/OTP as a matched pair.
+- Toolchain pin lives in `.tool-versions`, Elixir/OTP as a matched pair. It is the single source of truth: mise reads it locally, `erlef/setup-beam` reads it in CI. Bumping a version means editing that one file (and the devcontainer/release image tags by hand).
 - Keep the README current: every slice that changes behavior, options, config, or workflow updates it in the same change.
 
 ## Architecture decisions
