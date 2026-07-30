@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git worktree:*)",
+      "Bash(git branch:*)",
+      "Bash(wt:*)",
+      "Bash(bin/agent-setup:*)",
+      "Bash(bin/agent-server:*)",
+      "Bash(bin/agent-exec:*)",
+      "Bash(bin/agent-cleanup:*)",
+      "Bash(devcontainer:*)",
+      "Bash(docker compose:*)",
+      "Bash(mix:*)",
+      "Bash(mise:*)"
+    ]
+  }
+}

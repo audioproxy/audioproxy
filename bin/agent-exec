@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+#
+# bin/agent-exec — Run a command inside this worktree's devcontainer.
+#
+# Usage:
+#   bin/agent-exec mix test
+#   bin/agent-exec mix format --check-formatted
+#   bin/agent-exec ffprobe -version
+#
+# Runs on the HOST. Uses `devcontainer exec` rather than `docker exec` so that
+# containerEnv and the remote user from devcontainer.json are applied.
+
+set -euo pipefail
+
+if [ "${DEVCONTAINER:-}" = "1" ]; then
+  echo "Error: bin/agent-exec runs on the host, not inside the container." >&2
+  echo "Run the command directly instead: $*" >&2
+  exit 1
+fi
+
+if [ $# -eq 0 ]; then
+  echo "Usage: bin/agent-exec <command> [args...]" >&2
+  exit 1
+fi
+
+WORKSPACE_FOLDER="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Forward PORT when set, so the app inside binds this worktree's hashed port.
+remote_env=()
+if [ -n "${PORT:-}" ]; then
+  remote_env+=(--remote-env "PORT=$PORT")
+fi
+
+exec devcontainer exec \
+  --workspace-folder "$WORKSPACE_FOLDER" \
+  "${remote_env[@]}" \
+  "$@"

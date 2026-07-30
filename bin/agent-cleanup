@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+#
+# bin/agent-cleanup — Tear down this worktree's container before wt removes it.
+#
+# There is no per-branch state to drop: the app holds no database and the
+# variant cache lives in S3 under content-addressed keys shared by every
+# worktree. So all this does is remove the worktree's devcontainer, which
+# would otherwise linger after the directory is gone.
+#
+# Invoked by wt's [pre-remove] hook.
+
+set -euo pipefail
+
+if [ "${DEVCONTAINER:-}" = "1" ]; then
+  echo "Error: bin/agent-cleanup runs on the host, not inside the container." >&2
+  exit 1
+fi
+
+WORKSPACE_FOLDER="$(cd "$(dirname "$0")/.." && pwd)"
+
+echo "==> Removing devcontainer for $(basename "$WORKSPACE_FOLDER")"
+
+# The devcontainer CLI labels containers with the workspace folder it built them
+# from, which is how we find this worktree's container and no other's.
+containers="$(docker ps -aq \
+  --filter "label=devcontainer.local_folder=$WORKSPACE_FOLDER" 2>/dev/null || true)"
+
+if [ -n "$containers" ]; then
+  # shellcheck disable=SC2086
+  docker rm --force --volumes $containers >/dev/null
+  echo "==> Removed"
+else
+  echo "==> No container found; nothing to do"
+fi

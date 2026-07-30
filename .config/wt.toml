@@ -1,0 +1,21 @@
+# worktrunk configuration — one worktree (and one devcontainer) per work slice.
+#
+# The app is stateless, so isolation is only directory + port. `hash_port` gives
+# each branch a deterministic port in 10000-19999, and the same value is passed
+# at container-create time (so it can be published) and at boot time.
+
+[list]
+url = "http://localhost:{{ branch | hash_port }}"
+
+[post-create]
+# Creates the worktree's devcontainer; its postCreateCommand runs deps + compile.
+setup = "PORT={{ branch | hash_port }} AGENT_WORKSPACE={{ branch | sanitize }} bin/agent-setup"
+
+[post-start]
+server = "PORT={{ branch | hash_port }} bin/agent-server"
+
+[pre-remove]
+cleanup = "AGENT_WORKSPACE={{ branch | sanitize }} bin/agent-cleanup"
+
+[post-remove]
+kill-server = "lsof -ti :{{ branch | hash_port }} -sTCP:LISTEN | xargs kill 2>/dev/null || true"
