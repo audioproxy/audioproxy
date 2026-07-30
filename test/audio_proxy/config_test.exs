@@ -53,10 +53,18 @@ defmodule AudioProxy.ConfigTest do
     end
 
     test "hex key and salt are decoded to binaries" do
-      config = Config.build!(%{"AP_KEY" => "deadBEEF", "AP_SALT" => "00ff"})
+      key_hex = String.duplicate("ab", 32)
+      config = Config.build!(%{"AP_KEY" => key_hex, "AP_SALT" => "00ff"})
 
-      assert config.key == <<0xDE, 0xAD, 0xBE, 0xEF>>
+      assert config.key == String.duplicate(<<0xAB>>, 32)
       assert config.salt == <<0x00, 0xFF>>
+    end
+
+    test "AP_KEY shorter than 32 bytes aborts, naming the variable" do
+      error = assert_raise Error, fn -> Config.build!(%{"AP_KEY" => "deadBEEF"}) end
+
+      assert error.message =~ "AP_KEY"
+      assert error.message =~ "at least 32 bytes"
     end
 
     test "booleans accept the usual spellings, case-insensitively" do
