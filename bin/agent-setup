@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+#
+# bin/agent-setup — Prepare this worktree for work.
+#
+# Runs in two places, and branches on DEVCONTAINER to tell them apart:
+#
+#   * on the host  — creates/starts this worktree's devcontainer. The container's
+#                    postCreateCommand then re-enters this script inside it.
+#   * in container — fetches deps and compiles for dev and test.
+#
+# Invoked by wt's [post-create] hook (host side) and by devcontainer.json's
+# postCreateCommand (container side).
+
+set -euo pipefail
+
+WORKSPACE_FOLDER="$(cd "$(dirname "$0")/.." && pwd)"
+
+if [ "${DEVCONTAINER:-}" = "1" ]; then
+  echo "==> Fetching deps"
+  mix local.hex --force --if-missing
+  mix local.rebar --force --if-missing
+  mix deps.get
+
+  echo "==> Compiling (dev)"
+  mix compile
+
+  echo "==> Compiling (test)"
+  MIX_ENV=test mix compile
+
+  echo "==> Ready"
+  exit 0
+fi
+
+# The listener port must be published when the container is created, so it has to
+# be known here. wt passes the branch's hashed port; a manual run gets 4000.
+export PORT="${PORT:-4000}"
+
+echo "==> Starting devcontainer for $(basename "$WORKSPACE_FOLDER") on port $PORT"
+exec devcontainer up --workspace-folder "$WORKSPACE_FOLDER"

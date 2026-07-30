@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+#
+# bin/agent-server — Boot the app on this worktree's port.
+#
+# Usage:
+#   bin/agent-server                       # from the host; runs in the container
+#   wt start init-project-scaffold         # same, via the [post-start] hook
+#
+# The app is stateless — no database, no per-branch migrations — so worktree
+# isolation is just directory plus port. Bandit reads PORT via AudioProxy.Config.
+
+set -euo pipefail
+
+WORKSPACE_FOLDER="$(cd "$(dirname "$0")/.." && pwd)"
+export PORT="${PORT:-4000}"
+
+if [ "${DEVCONTAINER:-}" = "1" ]; then
+  echo "==> Booting audio_proxy on port $PORT"
+  exec mix run --no-halt
+fi
+
+exec "$WORKSPACE_FOLDER/bin/agent-exec" bin/agent-server

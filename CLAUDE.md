@@ -47,11 +47,13 @@ signature verification plug → options parser (options string = normalized cach
 - ffmpeg arg construction must be injection-safe: argv lists only, never shell strings.
 - Kill the ffmpeg process on client disconnect and on `AP_RENDER_TIMEOUT`; no orphans.
 - **Typing:** Elixir ≥ 1.20 — the built-in set-theoretic checker plus `mix compile --warnings-as-errors` in CI is the type gate; no Dialyzer/dialyxir. Write `@type t` / `@spec` on public seams only (`Options`, `Source`, `Signature`, `Command`, the `S3` behaviour) for ExDoc/LSP; skip private plumbing. Migrate to native typed structs/contracts when they land (1.21+).
+- **Commits are atomic and follow [Conventional Commits](https://www.conventionalcommits.org).** One logical change per commit, each compiling with `mix test` green on its own — never a broken intermediate state that a later commit repairs. Scopes track the module or area touched (`feat(config):`, `feat(http):`, `build(devcontainer):`). Prefer a vertical slice (code plus its tests) over splitting code from the tests that cover it. Types in use: `feat`, `fix`, `refactor`, `perf`, `test`, `docs`, `build`, `ci`, `chore`.
 
 ## Open questions (decide as they come up)
 
-- Project/binary name.
+- ~~Project/binary name~~ — settled for now: OTP app `audio_proxy`, still a working title. Renaming is a cheap find/replace while the project is small.
 - `ex_aws_s3` vs hand-rolled signing with `req`.
 - Peaks output: exact JSON schema (audiowaveform compatibility?).
 - Single-pass `loudnorm` accuracy — good enough for previews, revisit for masters.
+- **Distro ffmpeg vs compiled from source.** Currently distro packages: devcontainer is `apt install ffmpeg` on debian trixie (7.1.5), the release image will be `apk add ffmpeg` on alpine. Building from source would buy an exact pinned version identical in dev and prod, a `--disable-everything` codec set trimmed to what the API actually offers (smaller image, smaller attack surface), and access to encoders Debian/Alpine omit on licensing grounds (`libfdk_aac`). It costs a long build stage, a hand-maintained codec list, and the security-patch duty that distro packaging otherwise handles. Decide in `add-docker-release`; if the answer is yes, the devcontainer must build the same way or dev and prod diverge on codec behaviour.
 - HLS (v2): URL space is reserved, nothing else designed.
