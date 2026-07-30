@@ -1,0 +1,26 @@
+{
+  "name": "audio_proxy",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "workspaceFolder": "/workspaces/audio_proxy",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/audio_proxy,type=bind,consistency=cached",
+  "remoteUser": "dev",
+  "containerEnv": {
+    // bin/agent-* branch on this to tell "inside the container" from "on the
+    // host", so they never recurse through devcontainer exec.
+    "DEVCONTAINER": "1"
+  },
+  // Deps + compile. Runs once, when the container is first created.
+  "postCreateCommand": "bin/agent-setup",
+  // forwardPorts is ignored by the devcontainer CLI (VS Code only), so the
+  // listener port is published via appPort below; wt overrides it per worktree
+  // through PORT in .devcontainer/.env.
+  "appPort": ["${localEnv:PORT:4000}:${localEnv:PORT:4000}"],
+  "customizations": {
+    "vscode": {
+      "extensions": ["JakeBecker.elixir-ls", "editorconfig.editorconfig"]
+    }
+  }
+}
