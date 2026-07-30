@@ -255,4 +255,74 @@ defmodule AudioProxy.OptionsTest do
       end
     end
   end
+
+  # Regression: these compared as IEEE floats before, and 0.1 + 0.2 is
+  # 0.30000000000000004, so a fade that exactly filled its trim was rejected.
+  describe "validate/1 — fade boundary is exact" do
+    test "a fade that exactly fills its trim is accepted, whatever the split" do
+      assert {:ok, _} = Options.parse("t:0:0.3/fade:0.1:0.2")
+      assert {:ok, _} = Options.parse("t:0:0.3/fade:0.2:0.1")
+      assert {:ok, _} = Options.parse("t:0:0.3/fade:0.15:0.15")
+      assert {:ok, _} = Options.parse("t:0:0.1/fade:0.07:0.03")
+      assert {:ok, _} = Options.parse("t:0:1/fade:0.001:0.999")
+    end
+
+    test "a fade one millisecond too long is still rejected" do
+      assert {:error, %OptionError{reason: :fade_exceeds_duration}} =
+               Options.parse("t:0:0.3/fade:0.1:0.201")
+    end
+  end
+
+  describe "parse/1 — opaque values reject control characters" do
+    test "dl and cb refuse control bytes" do
+      for value <- ["a\nb", "a\rb", "a\0b", "a\tb", "a\x7fb"] do
+        assert {:error, %OptionError{reason: :control_character}} =
+                 Options.parse("dl:" <> value)
+
+        assert {:error, %OptionError{reason: :control_character}} =
+                 Options.parse("cb:" <> value)
+      end
+    end
+
+    # This is what makes AudioProxy.CacheKey's newline separator sound.
+    test "a normalized string can never contain a newline" do
+      assert {:error, %OptionError{segment: "cb:a\nb", reason: :control_character}} =
+               Options.parse("cb:a\nb")
+    end
+
+    test "ordinary percent-encoded filenames still pass" do
+      assert {:ok, %Options{download: "my%20piece%2Ffinal.mp3"}} =
+               Options.parse("dl:my%20piece%2Ffinal.mp3")
+    end
+  end
+
+  # normalize/1 is public, so it must be total over the struct — not only over
+  # structs that parse/1 produced.
+  describe "normalize/1 — hand-built structs" do
+    test "renders a half-set pair instead of crashing or dropping it" do
+      assert Options.normalize(%Options{fade_in: 0.5}) == "f:mp3/fade:0.5:0"
+      assert Options.normalize(%Options{fade_out: 1.0}) == "f:mp3/fade:0:1"
+      assert Options.normalize(%Options{trim_duration: 30.0}) == "f:mp3/t:0:30"
+      assert Options.normalize(%Options{trim_start: 5.0}) == "f:mp3/t:5"
+    end
+
+    test "sub-millisecond values render as re-parseable zero, not a bare dot" do
+      normalized = Options.normalize(%Options{trim_start: 0.0004})
+
+      assert normalized == "f:mp3/t:0"
+      assert {:ok, _} = Options.parse(normalized)
+    end
+
+    test "every normalized string re-parses" do
+      for opts <- [
+            %Options{fade_in: 0.5},
+            %Options{fade_out: 1.0},
+            %Options{trim_duration: 30.0},
+            %Options{trim_start: 0.0004},
+            %Options{format: :peaks}
+          ] do
+        assert {:ok, _} = Options.parse(Options.normalize(opts))
+      end
+    end
+  end
 end

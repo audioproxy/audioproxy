@@ -7,11 +7,16 @@ defmodule AudioProxy.CacheKey do
 
       lowercase-hex(SHA-256(normalized-options ‖ "\\n" ‖ canonical-source))
 
-  The newline separates the two halves unambiguously — a normalized options
-  string never contains one, so no options/source pair can be confused with
-  another. Equal variants therefore share a key regardless of segment order,
-  and any differing option (`cb` included, since it survives normalization)
-  yields a different one.
+  The newline separates the two halves unambiguously. That is only sound
+  because a normalized options string cannot contain one:
+  `AudioProxy.Options` rejects control characters in `dl` and `cb`, the only
+  two options whose values are opaque, and every other value is drawn from a
+  fixed alphabet. Without the separator, `("", "/gain:3")` and `("gain:3", "")`
+  would hash identical bytes.
+
+  Equal variants therefore share a key regardless of segment order, and any
+  differing option (`cb` included, since it survives normalization) yields a
+  different one.
 
   The digest is flat and length-bounded, which is what an S3 object key wants;
   a human-debuggable prefix was considered and rejected (design).
@@ -33,9 +38,10 @@ defmodule AudioProxy.CacheKey do
   Derives the cache key for `options` rendered from `source`.
 
   `options` may be an options string, a pre-split segment list, or an already
-  parsed `t:AudioProxy.Options.t/0`; the first two are parsed and validated
-  first, so an invalid options string surfaces its `OptionError` here rather
-  than producing a key for a variant that cannot be rendered.
+  parsed `t:AudioProxy.Options.t/0`. Every form is validated before it is
+  hashed — including the struct, which is not assumed to have come from
+  `AudioProxy.Options.parse/1` — so no options that describe an unrenderable
+  variant can acquire a cache key.
 
   `source` is the canonical source identity produced by the source resolver
   (e.g. `"s3://bucket/key"`) — this module does not canonicalize it.
@@ -43,7 +49,9 @@ defmodule AudioProxy.CacheKey do
   @spec derive(Options.t() | String.t() | [String.t()], String.t()) ::
           {:ok, t()} | {:error, OptionError.t()}
   def derive(%Options{} = options, source) when is_binary(source) do
-    {:ok, digest(Options.normalize(options), source)}
+    with {:ok, options} <- Options.validate(options) do
+      {:ok, digest(Options.normalize(options), source)}
+    end
   end
 
   def derive(options, source) when is_binary(source) do

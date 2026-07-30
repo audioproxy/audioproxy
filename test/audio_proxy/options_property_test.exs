@@ -68,6 +68,31 @@ defmodule AudioProxy.OptionsPropertyTest do
     end
   end
 
+  # The boundary the old generator could not reach. Any split summing to the
+  # duration must be accepted; one millisecond more must not.
+  property "a fade summing exactly to the trim duration is always accepted" do
+    check all(
+            duration <- integer(2..300_000),
+            fade_in <- integer(0..duration)
+          ) do
+      fade_out = duration - fade_in
+      trim = "t:0:#{decimal(duration)}"
+
+      assert {:ok, _} = Options.parse("#{trim}/fade:#{decimal(fade_in)}:#{decimal(fade_out)}")
+
+      assert {:error, %AudioProxy.OptionError{reason: :fade_exceeds_duration}} =
+               Options.parse("#{trim}/fade:#{decimal(fade_in)}:#{decimal(fade_out + 1)}")
+    end
+  end
+
+  # The grammar property AudioProxy.CacheKey's newline separator rests on.
+  property "a normalized string never contains a control character" do
+    check all(segments <- option_segments()) do
+      assert {:ok, normalized} = Options.normalize_string(segments)
+      refute normalized =~ ~r/[\x00-\x1f\x7f]/
+    end
+  end
+
   ## Generators
 
   # A valid options segment list, built format-first so that the cross-key
@@ -84,8 +109,8 @@ defmodule AudioProxy.OptionsPropertyTest do
           depth <- bit_depth(format),
           {trim, duration_ms} <- trim(),
           fade <- fade(duration_ms),
-          gain <- maybe(gain()),
-          norm <- maybe(norm()),
+          gain <- maybe(gain(format)),
+          norm <- maybe(norm(format)),
           peaks <- peaks(format),
           delivery <- delivery(),
           segments <-
@@ -147,23 +172,26 @@ defmodule AudioProxy.OptionsPropertyTest do
     )
   end
 
+  # Splits the whole trim budget between the two halves rather than capping
+  # each at half of it, so asymmetric splits that sum EXACTLY to the duration
+  # are reachable. The old halve-each bound could only ever hit the boundary
+  # symmetrically, which is the one case IEEE addition gets right — it hid a
+  # real bug (0.1 + 0.2 > 0.3).
   defp fade(duration_ms) do
     maybe(
       gen all(
-            fade_in <- millis(0..div(duration_ms, 2)),
-            fade_out <- millis(0..div(duration_ms, 2))
+            fade_in <- millis(0..duration_ms),
+            fade_out <- millis(0..(duration_ms - fade_in))
           ) do
         ["fade:#{decimal(fade_in)}:#{decimal(fade_out)}"]
       end
     )
   end
 
-  defp gain do
-    map(millis(-30_000..30_000), &["gain:#{decimal(&1)}"])
-  end
+  defp gain(_format), do: map(millis(-30_000..30_000), &["gain:#{decimal(&1)}"])
 
   # Partial forms exercise the documented per-target defaults.
-  defp norm do
+  defp norm(_format) do
     gen all(
           i <- integer(-70..-5),
           tp <- integer(-9..0),

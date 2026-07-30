@@ -56,8 +56,19 @@ defmodule AudioProxy.CacheKeyTest do
     end
 
     test "the separator keeps options and source from bleeding into each other" do
-      # Without a separator, these two would hash identical bytes.
-      assert CacheKey.derive("cb:ab", "s3://x") != CacheKey.derive("cb:a", "bs3://x")
+      # This pair genuinely collides without the separator: concatenated raw,
+      # both sides are "f:mp3/gain:3". Asserted directly against the digest so
+      # the test fails if @separator is ever dropped.
+      assert :crypto.hash(:sha256, "f:mp3" <> "/gain:3") ==
+               :crypto.hash(:sha256, "f:mp3/gain:3" <> "")
+
+      assert CacheKey.derive("", "/gain:3") != CacheKey.derive("gain:3", "")
+    end
+
+    test "a control character can never reach the digest input" do
+      # The separator argument holds only because these cannot parse.
+      assert {:error, _} = CacheKey.derive("cb:a\nb", @source)
+      assert {:error, _} = CacheKey.derive("dl:a\rb.mp3", @source)
     end
 
     test "accepts an already-parsed struct" do
@@ -68,6 +79,11 @@ defmodule AudioProxy.CacheKeyTest do
     test "invalid options surface here rather than producing a key" do
       assert {:error, %OptionError{reason: :mutually_exclusive}} =
                CacheKey.derive("br:128/q:5", @source)
+    end
+
+    test "an invalid hand-built struct is validated too, not trusted" do
+      assert {:error, %OptionError{reason: :mutually_exclusive}} =
+               CacheKey.derive(%Options{bitrate: 96, quality: 5.0}, @source)
     end
   end
 

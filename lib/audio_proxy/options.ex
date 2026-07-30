@@ -60,6 +60,12 @@ defmodule AudioProxy.Options do
   # Lossy encoders gain nothing above 48 kHz; §3.1 caps them there.
   @lossy_sample_rate_cap 48_000
 
+  # `dl` and `cb` are opaque, but not arbitrary: a control byte in `dl` reaches
+  # a `Content-Disposition` header, and any control byte would break the
+  # newline separator that `AudioProxy.CacheKey` relies on to keep the options
+  # half and the source half of its digest input unambiguous.
+  @control_char_re ~r/[\x00-\x1f\x7f]/
+
   # loudnorm's documented input ranges.
   @norm_i_range {-70.0, -5.0}
   @norm_tp_range {-9.0, 0.0}
@@ -146,10 +152,11 @@ defmodule AudioProxy.Options do
   @doc """
   Checks the cross-key rules that per-key parsing cannot see.
 
-  Run by `parse/1`; public so a hand-built struct can be checked too. Rules,
-  in the order they are reported: `br` excludes `q`; `bd` needs a lossless
-  format; `pts`/`pk_fmt` need `f:peaks`; `sr` is capped at 48 kHz for lossy
-  formats; a fade must fit inside a bounded trim.
+  Run by `parse/1`; public so a hand-built struct can be checked too. Rules, in
+  the order they are reported: `br` excludes `q`; `bd` needs a lossless format;
+  `f:peaks` refuses encoding and loudness options; `pts`/`pk_fmt` need
+  `f:peaks`; `sr` is capped at 48 kHz for lossy formats; a fade must fit inside
+  a bounded trim.
   """
   @spec validate(t()) :: {:ok, t()} | {:error, OptionError.t()}
   def validate(%__MODULE__{} = opts) do
@@ -332,12 +339,25 @@ defmodule AudioProxy.Options do
     end
   end
 
-  # `dl` and `cb` are opaque: still percent-encoded here, and part of the
-  # cache key verbatim.
-  defp parse_value("dl", ""), do: {:error, :invalid_value}
-  defp parse_value("dl", value), do: {:ok, download: value}
-  defp parse_value("cb", ""), do: {:error, :invalid_value}
-  defp parse_value("cb", value), do: {:ok, cache_buster: value}
+  # `dl` and `cb` are opaque — still percent-encoded here, and part of the
+  # cache key verbatim — but control bytes are refused: see @control_char_re.
+  defp parse_value("dl", value) do
+    with {:ok, value} <- opaque(value), do: {:ok, download: value}
+  end
+
+  defp parse_value("cb", value) do
+    with {:ok, value} <- opaque(value), do: {:ok, cache_buster: value}
+  end
+
+  defp opaque(""), do: {:error, :invalid_value}
+
+  defp opaque(value) do
+    if Regex.match?(@control_char_re, value) do
+      {:error, :control_character}
+    else
+      {:ok, value}
+    end
+  end
 
   defp build_norm(i, tp, lra) do
     with {:ok, i} <- norm_target(i, @norm_i_range), do: {:ok, norm: {i, tp, lra}}
@@ -442,16 +462,24 @@ defmodule AudioProxy.Options do
   defp validate_sample_rate(_opts), do: :ok
 
   defp validate_fade(%{trim_duration: nil}), do: :ok
-  defp validate_fade(%{fade_in: nil}), do: :ok
+  defp validate_fade(%{fade_in: nil, fade_out: nil}), do: :ok
 
+  # Compared in integer milliseconds, not floats. Parsing pins every value to
+  # a three-decimal grid, but that grid is not exact in binary: 0.1 + 0.2 is
+  # 0.30000000000000004, so `t:0:0.3/fade:0.1:0.2` — a fade that exactly fills
+  # its trim — would be rejected as too long. Milliseconds are exact.
   defp validate_fade(opts) do
-    if opts.fade_in + opts.fade_out > opts.trim_duration do
+    fade = millis(opts.fade_in || 0.0) + millis(opts.fade_out || 0.0)
+
+    if fade > millis(opts.trim_duration) do
       {:error,
        OptionError.new(render_key("fade", opts), :fade_exceeds_duration, render_key("t", opts))}
     else
       :ok
     end
   end
+
+  defp millis(seconds), do: round(seconds * 1000)
 
   ## Normalization
 
@@ -472,17 +500,26 @@ defmodule AudioProxy.Options do
   defp render_key("bd", %{bit_depth: nil}), do: nil
   defp render_key("bd", opts), do: "bd:" <> Map.fetch!(@bit_depth_tokens, opts.bit_depth)
 
-  defp render_key("t", %{trim_start: nil}), do: nil
-  defp render_key("t", %{trim_duration: nil} = opts), do: "t:" <> render_number(opts.trim_start)
+  # `t` and `fade` each render from a pair of fields. `parse/1` always sets a
+  # pair together, but `normalize/1` is public and must stay total: a struct
+  # built by hand with only one half set renders with the other defaulted to
+  # zero rather than crashing or silently dropping the half that was set.
+  defp render_key("t", %{trim_start: nil, trim_duration: nil}), do: nil
 
-  defp render_key("t", opts) do
-    "t:" <> render_number(opts.trim_start) <> ":" <> render_number(opts.trim_duration)
+  defp render_key("t", %{trim_duration: nil} = opts) do
+    "t:" <> render_number(opts.trim_start || 0.0)
   end
 
-  defp render_key("fade", %{fade_in: nil}), do: nil
+  defp render_key("t", opts) do
+    "t:" <>
+      render_number(opts.trim_start || 0.0) <> ":" <> render_number(opts.trim_duration)
+  end
+
+  defp render_key("fade", %{fade_in: nil, fade_out: nil}), do: nil
 
   defp render_key("fade", opts) do
-    "fade:" <> render_number(opts.fade_in) <> ":" <> render_number(opts.fade_out)
+    "fade:" <>
+      render_number(opts.fade_in || 0.0) <> ":" <> render_number(opts.fade_out || 0.0)
   end
 
   defp render_key("gain", %{gain: nil}), do: nil
@@ -533,6 +570,11 @@ defmodule AudioProxy.Options do
       number
       |> :erlang.float_to_binary(decimals: @max_decimals)
       |> String.trim_trailing("0")
+      # A sub-millisecond value rounds to "0.000", and trimming zeros would
+      # leave a bare "0." that does not re-parse. Only reachable from a
+      # hand-built struct — parsing rejects that precision — but normalize/1
+      # promises its output is always re-parseable.
+      |> String.trim_trailing(".")
     end
   end
 end

@@ -27,6 +27,7 @@ defmodule AudioProxy.OptionError do
           | :excessive_precision
           | :invalid_value
           | :out_of_range
+          | :control_character
           | :mutually_exclusive
           | :requires_lossless_format
           | :requires_peaks_format
@@ -66,6 +67,7 @@ defmodule AudioProxy.OptionError do
       :excessive_precision -> "#{inspect(error.segment)} exceeds millisecond precision"
       :invalid_value -> "#{inspect(error.segment)} is not a supported value"
       :out_of_range -> "#{inspect(error.segment)} is out of range"
+      :control_character -> "#{inspect(error.segment)} contains a control character"
       :mutually_exclusive -> "#{inspect(error.segment)} conflicts with #{inspect(error.related)}"
       :requires_lossless_format -> "#{inspect(error.segment)} requires a lossless format"
       :requires_peaks_format -> "#{inspect(error.segment)} requires f:peaks"
