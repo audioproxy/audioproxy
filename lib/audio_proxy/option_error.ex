@@ -31,6 +31,7 @@ defmodule AudioProxy.OptionError do
           | :mutually_exclusive
           | :requires_lossless_format
           | :requires_peaks_format
+          | :unsupported_for_peaks
           | :sample_rate_above_lossy_cap
           | :fade_exceeds_duration
 
@@ -71,6 +72,7 @@ defmodule AudioProxy.OptionError do
       :mutually_exclusive -> "#{inspect(error.segment)} conflicts with #{inspect(error.related)}"
       :requires_lossless_format -> "#{inspect(error.segment)} requires a lossless format"
       :requires_peaks_format -> "#{inspect(error.segment)} requires f:peaks"
+      :unsupported_for_peaks -> "#{inspect(error.segment)} is not supported with f:peaks"
       :sample_rate_above_lossy_cap -> "#{inspect(error.segment)} exceeds the 48 kHz lossy cap"
       :fade_exceeds_duration -> "#{inspect(error.segment)} is longer than the trimmed region"
     end

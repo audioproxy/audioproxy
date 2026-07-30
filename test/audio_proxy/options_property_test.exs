@@ -123,6 +123,9 @@ defmodule AudioProxy.OptionsPropertyTest do
     end
   end
 
+  # Peaks refuse every encoding and loudness option, so generate none of them.
+  defp encoding("peaks"), do: constant([])
+
   # `br` and `q` are mutually exclusive, so at most one is ever emitted.
   defp encoding(format) do
     gen all(
@@ -188,7 +191,10 @@ defmodule AudioProxy.OptionsPropertyTest do
     )
   end
 
+  defp gain("peaks"), do: constant([])
   defp gain(_format), do: map(millis(-30_000..30_000), &["gain:#{decimal(&1)}"])
+
+  defp norm("peaks"), do: constant([])
 
   # Partial forms exercise the documented per-target defaults.
   defp norm(_format) do

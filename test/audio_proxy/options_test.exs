@@ -296,6 +296,42 @@ defmodule AudioProxy.OptionsTest do
     end
   end
 
+  describe "parse/1 — upper bounds" do
+    test "values are bounded above as well as below" do
+      assert {:error, %OptionError{segment: "br:10001", reason: :out_of_range}} =
+               Options.parse("br:10001")
+
+      assert {:error, %OptionError{reason: :out_of_range}} = Options.parse("f:wav/sr:384001")
+      assert {:error, %OptionError{reason: :out_of_range}} = Options.parse("f:peaks/pts:100001")
+      assert {:error, %OptionError{reason: :out_of_range}} = Options.parse("gain:100.001")
+
+      assert {:ok, _} = Options.parse("br:10000")
+      assert {:ok, _} = Options.parse("f:wav/sr:384000")
+      assert {:ok, _} = Options.parse("f:peaks/pts:100000")
+      assert {:ok, _} = Options.parse("gain:-100")
+    end
+  end
+
+  describe "validate/1 — peaks ignore encoding and loudness options" do
+    test "every encoding and loudness option is refused under f:peaks" do
+      for {options, segment} <- [
+            {"f:peaks/br:96", "br:96"},
+            {"f:peaks/q:5", "q:5"},
+            {"f:peaks/sr:48000", "sr:48000"},
+            {"f:peaks/bd:16", "bd:16"},
+            {"f:peaks/gain:-3", "gain:-3"},
+            {"f:peaks/norm:ebu", "norm:ebu:-16:-1.5:11"}
+          ] do
+        assert {:error, %OptionError{segment: ^segment, reason: :unsupported_for_peaks}} =
+                 Options.parse(options)
+      end
+    end
+
+    test "the options peaks do respect are still accepted" do
+      assert {:ok, _} = Options.parse("f:peaks/t:10:5/ch:1/pts:2000/pk_fmt:dat/dl:p.json/cb:v2")
+    end
+  end
+
   # normalize/1 is public, so it must be total over the struct — not only over
   # structs that parse/1 produced.
   describe "normalize/1 — hand-built structs" do

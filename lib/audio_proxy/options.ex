@@ -26,12 +26,13 @@ defmodule AudioProxy.Options do
       iex> AudioProxy.Options.normalize(opts)
       "br:96/f:opus"
 
-  ## Not enforced here
+  ## Known limits
 
-  Peaks ignore encoding options rather than reject them (§3.3), so
-  `f:peaks/br:96` parses and keeps `br` in its cache key — a distinct key for
-  an identical rendering. Callers that care should drop encoding options
-  before building peaks URLs.
+  Semantic no-ops keep their own identity: `t:0` (a trim from zero to the end),
+  `fade:0:0` and `gain:0` render exactly what the bare options render, but
+  normalize to distinct strings and therefore distinct cache keys. The mapping
+  from options to key is syntactic on purpose; collapsing no-ops is tracked as
+  follow-up work rather than done silently here.
   """
 
   alias AudioProxy.OptionError
@@ -59,6 +60,19 @@ defmodule AudioProxy.Options do
 
   # Lossy encoders gain nothing above 48 kHz; §3.1 caps them there.
   @lossy_sample_rate_cap 48_000
+
+  # Upper bounds so a mistyped signed URL fails here, as a 422 naming the
+  # segment, rather than downstream as an encoder error or an allocation the
+  # size of `pts`. Chosen well above any real request.
+  @max_bitrate 10_000
+  @max_sample_rate 384_000
+  @max_peak_count 100_000
+  @max_gain 100.0
+
+  # Encoding options (§3.1) plus the loudness stages: peaks are computed from
+  # the decoded source and ignore all of them (§3.3), so carrying them would
+  # mean distinct cache keys for byte-identical peaks output. Rejected instead.
+  @peaks_unsupported ~w(br q sr bd gain norm)
 
   # `dl` and `cb` are opaque, but not arbitrary: a control byte in `dl` reaches
   # a `Content-Disposition` header, and any control byte would break the
@@ -162,6 +176,7 @@ defmodule AudioProxy.Options do
   def validate(%__MODULE__{} = opts) do
     with :ok <- validate_bitrate_quality(opts),
          :ok <- validate_bit_depth(opts),
+         :ok <- validate_peaks_only(opts),
          :ok <- validate_peak_options(opts),
          :ok <- validate_sample_rate(opts),
          :ok <- validate_fade(opts) do
@@ -241,7 +256,8 @@ defmodule AudioProxy.Options do
   end
 
   defp parse_value("br", value) do
-    with {:ok, bitrate} <- positive_integer(value), do: {:ok, bitrate: bitrate}
+    with {:ok, bitrate} <- bounded_integer(value, @max_bitrate),
+         do: {:ok, bitrate: bitrate}
   end
 
   defp parse_value("q", value) do
@@ -249,7 +265,8 @@ defmodule AudioProxy.Options do
   end
 
   defp parse_value("sr", value) do
-    with {:ok, rate} <- positive_integer(value), do: {:ok, sample_rate: rate}
+    with {:ok, rate} <- bounded_integer(value, @max_sample_rate),
+         do: {:ok, sample_rate: rate}
   end
 
   defp parse_value("ch", "1"), do: {:ok, channels: 1}
@@ -300,7 +317,9 @@ defmodule AudioProxy.Options do
   end
 
   defp parse_value("gain", value) do
-    with {:ok, gain} <- decimal(value), do: {:ok, gain: gain}
+    with {:ok, gain} <- decimal(value) do
+      if abs(gain) <= @max_gain, do: {:ok, gain: gain}, else: {:error, :out_of_range}
+    end
   end
 
   # `norm:ebu[:I[:TP[:LRA]]]` — omitted targets take the §3.2 defaults.
@@ -329,7 +348,8 @@ defmodule AudioProxy.Options do
   end
 
   defp parse_value("pts", value) do
-    with {:ok, count} <- positive_integer(value), do: {:ok, peak_count: count}
+    with {:ok, count} <- bounded_integer(value, @max_peak_count),
+         do: {:ok, peak_count: count}
   end
 
   defp parse_value("pk_fmt", value) do
@@ -376,11 +396,14 @@ defmodule AudioProxy.Options do
     end
   end
 
-  defp positive_integer(value) do
+  # Bounded above as well as below: `String.to_integer/1` is arbitrary
+  # precision, so without a ceiling `pts:10000000000` parses happily and
+  # becomes an allocation two slices later.
+  defp bounded_integer(value, max) do
     if Regex.match?(@non_negative_integer_re, value) do
       case String.to_integer(value) do
-        0 -> {:error, :out_of_range}
-        integer -> {:ok, integer}
+        integer when integer in 1..max//1 -> {:ok, integer}
+        _out_of_range -> {:error, :out_of_range}
       end
     else
       {:error, :invalid_integer}
@@ -422,12 +445,30 @@ defmodule AudioProxy.Options do
   end
 
   defp validate_bit_depth(%{bit_depth: nil}), do: :ok
+  defp validate_bit_depth(%{format: :peaks}), do: :ok
   defp validate_bit_depth(%{format: format}) when format in @lossless, do: :ok
 
   defp validate_bit_depth(opts) do
     {:error,
      OptionError.new(render_key("bd", opts), :requires_lossless_format, render_key("f", opts))}
   end
+
+  # Peaks are computed from the decoded source: they respect `t` and `ch` and
+  # ignore everything about encoding and loudness (§3.3). Carrying an option
+  # that cannot change the output would mean two cache keys for one result, so
+  # those options are refused outright rather than silently ignored.
+  defp validate_peaks_only(%{format: :peaks} = opts) do
+    case Enum.find(@peaks_unsupported, &render_key(&1, opts)) do
+      nil ->
+        :ok
+
+      key ->
+        {:error,
+         OptionError.new(render_key(key, opts), :unsupported_for_peaks, render_key("f", opts))}
+    end
+  end
+
+  defp validate_peaks_only(_opts), do: :ok
 
   defp validate_peak_options(%{format: :peaks}), do: :ok
 
