@@ -13,7 +13,7 @@ jobs:
     name: format, compile, unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Versions come from .tool-versions, the same pin mise reads locally.
       - uses: erlef/setup-beam@v1
@@ -42,7 +42,7 @@ jobs:
     name: ffmpeg-tagged tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install ffmpeg
         run: |
