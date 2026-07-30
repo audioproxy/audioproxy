@@ -1,0 +1,8 @@
+# Elixir and Erlang/OTP are pinned as a matched pair: the elixir version string
+# carries the OTP major it was compiled against, so bumping one means bumping
+# both. Keep these in step with the devcontainer image
+# (.devcontainer/Dockerfile) and with the release image once add-docker-release
+# lands.
+[tools]
+erlang = "28.5.0.4"
+elixir = "1.20.2-otp-28"
