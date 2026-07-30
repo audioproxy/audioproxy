@@ -155,9 +155,12 @@ Hex packages and GitHub Actions. Minor and patch updates are grouped into one PR
 per ecosystem; majors come individually. Every one of them is gated by the
 workflow above.
 
-**Branch protection is a repo setting, not a file**, so it does not travel with
-a clone. On GitHub, under *Settings → Branches → Add rule* for `main`, require
-status checks to pass and select both `test` and `test-ffmpeg`.
+`main` is protected: pull requests cannot merge until both jobs pass, and the
+branch rejects force-pushes and deletion. **Branch protection is a repo setting,
+not a file**, so it does not travel with a clone — a fork has to set it up
+again, under *Settings → Branches → Add rule* for `main`, requiring the checks
+named **format, compile, unit tests** and **ffmpeg-tagged tests** (GitHub lists
+status checks by job name, not by the job's key in the YAML).
 
 ---
 
