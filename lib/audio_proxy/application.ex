@@ -15,6 +15,12 @@ defmodule AudioProxy.Application do
   def start(_type, _args) do
     config = AudioProxy.Config.load!()
 
+    if config.allow_insecure do
+      Logger.warning(
+        "AP_ALLOW_INSECURE is enabled — /insecure/ URLs bypass signature verification; never enable in production"
+      )
+    end
+
     children = listener(config)
 
     Logger.info("audio_proxy #{vsn()} starting (serve_mode: #{config.serve_mode})")
