@@ -1,5 +1,7 @@
 # audio_proxy
 
+[![CI](https://github.com/audioproxy/audioproxy/actions/workflows/ci.yml/badge.svg)](https://github.com/audioproxy/audioproxy/actions/workflows/ci.yml)
+
 An imgproxy-style on-the-fly audio transcoding proxy.
 
 > **Status: early.** What exists today is the application skeleton — OTP app,
@@ -39,8 +41,10 @@ semantics.
 
 ## Toolchain
 
-Elixir and Erlang/OTP are pinned as a matched pair in [`mise.toml`](mise.toml);
-bump them together.
+Elixir and Erlang/OTP are pinned as a matched pair in
+[`.tool-versions`](.tool-versions); bump them together. That file is the single
+source of truth — mise reads it locally and `erlef/setup-beam` reads it in CI,
+so CI cannot drift from your shell.
 
 ```bash
 mise install
@@ -100,9 +104,16 @@ mix test
 mix format --check-formatted
 ```
 
-Both are the CI gate — a change is not done until both pass. The suite drives
-the router through `Plug.Test` and binds no socket, so several copies can run
-concurrently.
+Both are part of the CI gate — a change is not done until both pass. The suite
+drives the router through `Plug.Test` and binds no socket, so several copies can
+run concurrently.
+
+Tests tagged `:ffmpeg` shell out to the real binaries and are excluded by
+default. Run them explicitly, on a machine that has ffmpeg installed:
+
+```bash
+mix test --only ffmpeg
+```
 
 Property tests use [StreamData](https://github.com/whatyouhide/stream_data),
 which is a test-only dependency. Every processing option must round-trip
@@ -114,6 +125,39 @@ Tests that need config other than the defaults use
 restores it on exit; such tests must set `async: false`. Prefer
 `AudioProxy.Config.build!/1` — pure and async-safe — when you only need to check
 parsing or validation.
+
+## Continuous integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to
+`main` and every pull request, in two jobs:
+
+| Job | Runs | Notes |
+|---|---|---|
+| `test` | `mix format --check-formatted`, `mix compile --warnings-as-errors`, `mix test` | No external binaries — the untagged suite must pass on a bare runner |
+| `test-ffmpeg` | `mix test --only ffmpeg` | Installs ffmpeg first; no-ops green until the first `:ffmpeg`-tagged test exists |
+
+Compilation runs with warnings as errors because the compiler's set-theoretic
+type checker reports through warnings — that flag is what makes the type gate a
+gate rather than a suggestion.
+
+Both jobs read Elixir and Erlang/OTP from [`.tool-versions`](.tool-versions),
+so bumping the pin is a one-file change that CI follows automatically. The
+`deps`/`_build` cache is keyed on the resolved versions plus `mix.lock`, so a
+toolchain bump misses the cache rather than restoring BEAM files built by a
+different compiler.
+
+Later slices extend this workflow rather than adding parallel ones — the image
+build and smoke tests from `add-docker-release`, and MinIO as a service
+container from `add-s3-client` — so there stays exactly one check to require.
+
+[`.github/dependabot.yml`](.github/dependabot.yml) opens update PRs weekly for
+Hex packages and GitHub Actions. Minor and patch updates are grouped into one PR
+per ecosystem; majors come individually. Every one of them is gated by the
+workflow above.
+
+**Branch protection is a repo setting, not a file**, so it does not travel with
+a clone. On GitHub, under *Settings → Branches → Add rule* for `main`, require
+status checks to pass and select both `test` and `test-ffmpeg`.
 
 ---
 
@@ -151,8 +195,8 @@ the hooks in [`.config/wt.toml`](.config/wt.toml).
 
 The devcontainer image
 ([`.devcontainer/Dockerfile`](.devcontainer/Dockerfile)) pins the same
-Elixir/OTP pair as `mise.toml`, plus `ffmpeg`/`ffprobe` — they are part of the
-product, so the `:ffmpeg`-tagged tests need the real binaries.
+Elixir/OTP pair as `.tool-versions`, plus `ffmpeg`/`ffprobe` — they are part of
+the product, so the `:ffmpeg`-tagged tests need the real binaries.
 
 The binstubs are host/container dual-purpose — they branch on the `DEVCONTAINER`
 env var so they never recurse through `devcontainer exec`:
