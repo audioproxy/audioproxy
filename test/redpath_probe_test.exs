@@ -1,7 +1,7 @@
 defmodule RedpathProbeTest do
   use ExUnit.Case, async: true
 
-  test "deliberately failing test to prove CI goes red" do
-    assert 1 == 2
+  test "badly formatted but passing" do
+        assert    1 ==   1
   end
 end
