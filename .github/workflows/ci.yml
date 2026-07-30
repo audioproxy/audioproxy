@@ -37,3 +37,42 @@ jobs:
       - run: mix compile --warnings-as-errors
 
       - run: mix test
+
+  test-ffmpeg:
+    name: ffmpeg-tagged tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version
+          ffprobe -version
+
+      - uses: erlef/setup-beam@v1
+        id: beam
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
+
+      - run: mix deps.get
+
+      # `mix test --only` exits non-zero when the filter matches nothing, so
+      # this job stays green until the first `@tag :ffmpeg` test lands.
+      - name: Run :ffmpeg-tagged tests
+        run: |
+          if grep -rqE '@(module)?tag[ (]+:ffmpeg' test; then
+            mix test --only ffmpeg
+          else
+            echo "No :ffmpeg-tagged tests yet - nothing to run."
+          fi
