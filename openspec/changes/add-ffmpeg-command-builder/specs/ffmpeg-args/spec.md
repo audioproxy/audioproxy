@@ -22,6 +22,14 @@ The system SHALL construct arguments exclusively as argv lists; no shell interpr
 - **WHEN** trim/fade/gain/norm options are rendered into filter strings
 - **THEN** only validated numeric renderings appear in the filter expression
 
+#### Scenario: Opaque options stay out of the command
+- **WHEN** `dl` or `cb` are present
+- **THEN** the argv is identical to the same request without them — neither describes the render
+
+#### Scenario: Argv elements are complete arguments
+- **WHEN** building any valid options
+- **THEN** the argv is a flat list of non-empty binaries, so no element can be split or dropped by the exec layer
+
 ### Requirement: Options map to correct ffmpeg arguments
 The system SHALL map each processing option to its ffmpeg form per API doc §3: trims as input-side `-ss`/`-t`, fades inside the trimmed region, `norm` as single-pass `loudnorm` (default `I=-16:TP=-1.5:LRA=11`), `sr` via `aresample`, `ch` via downmix, `br` as `-b:a`, `q` as codec-appropriate VBR flag, fragmented MP4 with `-movflags frag_keyframe+empty_moov`.
 
@@ -32,6 +40,22 @@ The system SHALL map each processing option to its ffmpeg form per API doc §3: 
 #### Scenario: Fragmented MP4
 - **WHEN** building `f:m4a`
 - **THEN** argv includes `-movflags` with `frag_keyframe+empty_moov` (streamable, no seekable output required)
+
+#### Scenario: Filter order
+- **WHEN** `norm`, `gain`, `sr` and `fade` are all present
+- **THEN** the filtergraph runs `loudnorm` before `volume` (normalize, then offset), `aresample` after `loudnorm` (which outputs 192 kHz), and `afade` last
+
+#### Scenario: Loudness normalization without an explicit sample rate
+- **WHEN** building `norm:ebu` with no `sr`
+- **THEN** argv appends `aresample=48000`, since single-pass `loudnorm` would otherwise emit 192 kHz
+
+#### Scenario: Quality maps to the knob the codec has
+- **WHEN** building `q` for mp3, ogg, aac or m4a
+- **THEN** argv uses `-q:a`; for opus and flac it uses `-compression_level`
+
+#### Scenario: Peaks extract raw PCM
+- **WHEN** building `f:peaks`
+- **THEN** argv decodes to interleaved `s16le` on stdout, honouring `t`, `ch` and `fade` and encoding nothing
 
 ### Requirement: Content-Type mapping
 The system SHALL expose the correct Content-Type for every output format (e.g., `audio/mpeg`, `audio/ogg`, `audio/aac`, `audio/mp4`, `audio/flac`, `audio/wav`).
