@@ -12,7 +12,7 @@ Design principles, in order: URLs are the entire API (no request bodies, no stat
 GET /{signature}/{options}/{source}
 ```
 
-- **signature** — `base64url(HMAC-SHA256(key, salt ‖ path))` over everything after the signature segment. In dev mode the literal `insecure` is accepted (disabled by default in prod).
+- **signature** — `base64url(HMAC-SHA256(key, salt ‖ path))` over everything after the signature segment: the exact byte sequence following `/{signature}`, leading `/` included, taken from the raw (still percent-encoded) request path. Signatures are emitted unpadded; the canonical padded form (one trailing `=`) is accepted, but non-canonical spellings (over-padding, variant final characters) are rejected, so each signature has exactly two accepted spellings. In dev mode the literal `insecure` is accepted (disabled by default in prod).
 - **options** — ordered, `/`-separated `key:value` segments (see §3). Order is normalized before hashing into the cache key, so `f:opus/br:96` and `br:96/f:opus` yield the same variant.
 - **source** — one of:
   - `plain/s3://{bucket}/{key}` — S3 object (URL-escaped key)
@@ -143,7 +143,7 @@ Mid-stream render failure after `200` is signaled by abnormal termination of the
 
 | Var | Purpose |
 |---|---|
-| `AP_KEY`, `AP_SALT` | Hex-encoded HMAC key/salt |
+| `AP_KEY`, `AP_SALT` | Hex-encoded HMAC key/salt; key must decode to ≥ 32 bytes (generate: `openssl rand -hex 32`) |
 | `AP_ALLOW_INSECURE` | Accept unsigned URLs (dev only) |
 | `AP_SOURCE_ALLOWLIST` | Comma-separated bucket/host patterns |
 | `AP_VARIANT_BUCKET` | Write-back target; unset = no cache, always render |
