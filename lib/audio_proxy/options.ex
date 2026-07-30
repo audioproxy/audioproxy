@@ -41,6 +41,15 @@ defmodule AudioProxy.Options do
   @lossy ~w(mp3 opus ogg aac m4a)a
   @lossless ~w(flac wav)a
 
+  # Formats whose encoder exposes a quality scale for `q` to mean something:
+  # a VBR scale for the lossy four, `compression_level` for opus and flac.
+  # PCM has neither, so `q` with `f:wav` could only be ignored.
+  @quality_formats ~w(mp3 opus ogg aac m4a flac)a
+
+  # flac is integer-only (its encoder takes s16 and s32); a float bit depth
+  # exists in wav alone.
+  @float_bit_depth_formats [:wav]
+
   @bit_depths %{"16" => :bd16, "24" => :bd24, "32f" => :bd32f}
   @bit_depth_tokens Map.new(@bit_depths, fn {token, atom} -> {atom, token} end)
 
@@ -168,14 +177,19 @@ defmodule AudioProxy.Options do
 
   Run by `parse/1`; public so a hand-built struct can be checked too. Rules, in
   the order they are reported: `br` excludes `q`; `bd` needs a lossless format;
-  `f:peaks` refuses encoding and loudness options; `pts`/`pk_fmt` need
-  `f:peaks`; `sr` is capped at 48 kHz for lossy formats; a fade must fit inside
-  a bounded trim.
+  `br` needs a lossy format and `q` a format with a quality scale; `bd` needs
+  a lossless format, and `bd:32f` needs `f:wav`; `f:peaks` refuses encoding and
+  loudness options; `pts`/`pk_fmt` need `f:peaks`; `sr` is capped at 48 kHz for
+  lossy formats; a fade must fit inside a bounded trim, and a fade-out needs
+  that trim to be bounded at all.
   """
   @spec validate(t()) :: {:ok, t()} | {:error, OptionError.t()}
   def validate(%__MODULE__{} = opts) do
     with :ok <- validate_bitrate_quality(opts),
+         :ok <- validate_bitrate_format(opts),
+         :ok <- validate_quality_format(opts),
          :ok <- validate_bit_depth(opts),
+         :ok <- validate_bit_depth_format(opts),
          :ok <- validate_peaks_only(opts),
          :ok <- validate_peak_options(opts),
          :ok <- validate_sample_rate(opts),
@@ -444,6 +458,29 @@ defmodule AudioProxy.Options do
     {:error, OptionError.new(render_key("q", opts), :mutually_exclusive, render_key("br", opts))}
   end
 
+  # `br` and `q` reach ffmpeg as encoder settings, so they only mean something
+  # to an encoder that has them. `-b:a` on flac or PCM is accepted by ffmpeg
+  # and ignored, which would hand byte-identical output two cache keys — the
+  # same trap the peaks rule closes. Peaks fall to validate_peaks_only/1,
+  # which names the better reason.
+  defp validate_bitrate_format(%{bitrate: nil}), do: :ok
+  defp validate_bitrate_format(%{format: :peaks}), do: :ok
+  defp validate_bitrate_format(%{format: format}) when format in @lossy, do: :ok
+
+  defp validate_bitrate_format(opts) do
+    {:error,
+     OptionError.new(render_key("br", opts), :requires_lossy_format, render_key("f", opts))}
+  end
+
+  defp validate_quality_format(%{quality: nil}), do: :ok
+  defp validate_quality_format(%{format: :peaks}), do: :ok
+  defp validate_quality_format(%{format: format}) when format in @quality_formats, do: :ok
+
+  defp validate_quality_format(opts) do
+    {:error,
+     OptionError.new(render_key("q", opts), :unsupported_for_format, render_key("f", opts))}
+  end
+
   defp validate_bit_depth(%{bit_depth: nil}), do: :ok
   defp validate_bit_depth(%{format: :peaks}), do: :ok
   defp validate_bit_depth(%{format: format}) when format in @lossless, do: :ok
@@ -452,6 +489,16 @@ defmodule AudioProxy.Options do
     {:error,
      OptionError.new(render_key("bd", opts), :requires_lossless_format, render_key("f", opts))}
   end
+
+  # A 32-bit float depth has nowhere to go outside wav: flac encodes integers
+  # only, so `bd:32f/f:flac` would fail in ffmpeg rather than here.
+  defp validate_bit_depth_format(%{bit_depth: :bd32f} = opts)
+       when opts.format not in @float_bit_depth_formats do
+    {:error,
+     OptionError.new(render_key("bd", opts), :unsupported_for_format, render_key("f", opts))}
+  end
+
+  defp validate_bit_depth_format(_opts), do: :ok
 
   # Peaks are computed from the decoded source: they respect `t` and `ch` and
   # ignore everything about encoding and loudness (§3.3). Carrying an option
@@ -501,6 +548,17 @@ defmodule AudioProxy.Options do
   end
 
   defp validate_sample_rate(_opts), do: :ok
+
+  # A fade-out starts at `duration - out`, so it needs a duration to count
+  # back from. Without a bounded trim the only way to find one is to probe the
+  # source, which the argv builder deliberately cannot do — so an unbounded
+  # fade-out is a 422 here rather than an unbuildable command later. A
+  # fade-in needs no such thing: it starts at zero.
+  defp validate_fade(%{fade_out: out, trim_duration: nil} = opts)
+       when is_float(out) and out > 0 do
+    {:error,
+     OptionError.new(render_key("fade", opts), :requires_bounded_trim, render_key("t", opts))}
+  end
 
   defp validate_fade(%{trim_duration: nil}), do: :ok
   defp validate_fade(%{fade_in: nil, fade_out: nil}), do: :ok
@@ -599,12 +657,22 @@ defmodule AudioProxy.Options do
   defp render_key("cb", %{cache_buster: nil}), do: nil
   defp render_key("cb", opts), do: "cb:" <> opts.cache_buster
 
-  # Minimal canonical rendering: whole values lose their fraction entirely
-  # (`30`, not `30.0`), fractions keep at most the three places parsing
-  # allowed. Every number in a normalized string goes through here.
-  defp render_number(number) when is_integer(number), do: Integer.to_string(number)
+  @doc """
+  Renders a number in the canonical minimal form used across the round-trip.
 
-  defp render_number(number) when is_float(number) do
+  Whole values lose their fraction entirely (`30`, not `30.0`) and fractions
+  keep at most the three places parsing allowed. Every number in a normalized
+  options string goes through here, and so does every number
+  `AudioProxy.Ffmpeg.Command` puts in a filter expression — one rendering, so
+  the options string and the ffmpeg arguments cannot disagree about a value.
+
+      iex> AudioProxy.Options.render_number(30.0)
+      \"30\"
+  """
+  @spec render_number(number()) :: String.t()
+  def render_number(number) when is_integer(number), do: Integer.to_string(number)
+
+  def render_number(number) when is_float(number) do
     if number == trunc(number) do
       number |> trunc() |> Integer.to_string()
     else

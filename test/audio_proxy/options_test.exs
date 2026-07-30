@@ -74,7 +74,7 @@ defmodule AudioProxy.OptionsTest do
     test "bit depth accepts the three documented tokens" do
       assert {:ok, %Options{bit_depth: :bd16}} = Options.parse("f:flac/bd:16")
       assert {:ok, %Options{bit_depth: :bd24}} = Options.parse("f:flac/bd:24")
-      assert {:ok, %Options{bit_depth: :bd32f}} = Options.parse("f:flac/bd:32f")
+      assert {:ok, %Options{bit_depth: :bd32f}} = Options.parse("f:wav/bd:32f")
       assert {:error, %OptionError{reason: :invalid_value}} = Options.parse("f:flac/bd:8")
     end
 
@@ -87,7 +87,7 @@ defmodule AudioProxy.OptionsTest do
 
     test "an omitted out-fade is zero, not a mirror of the in-fade" do
       assert {:ok, %Options{fade_in: 0.5, fade_out: +0.0}} = Options.parse("fade:0.5")
-      assert {:ok, %Options{fade_in: 0.5, fade_out: 1.0}} = Options.parse("fade:0.5:1")
+      assert {:ok, %Options{fade_in: 0.5, fade_out: 1.0}} = Options.parse("t:0:10/fade:0.5:1")
     end
 
     test "gain is signed" do
@@ -197,9 +197,55 @@ defmodule AudioProxy.OptionsTest do
                 related: "t:1:2"
               }} = Options.parse("t:1:2/fade:2:2")
 
-      # An open-ended trim bounds nothing, so the fade is the renderer's problem.
-      assert {:ok, _} = Options.parse("t:1/fade:2:2")
       assert {:ok, _} = Options.parse("t:1:10/fade:2:2")
+    end
+
+    test "a fade-out needs a duration to count back from" do
+      assert {:error,
+              %OptionError{
+                segment: "fade:2:2",
+                reason: :requires_bounded_trim,
+                related: "t:1"
+              }} = Options.parse("t:1/fade:2:2")
+
+      assert {:error, %OptionError{reason: :requires_bounded_trim}} = Options.parse("fade:0:2")
+
+      # A fade-in starts at zero, so it needs no duration at all.
+      assert {:ok, _} = Options.parse("fade:2")
+      assert {:ok, _} = Options.parse("t:1/fade:2:0")
+    end
+
+    test "br and q reach encoders that have them" do
+      assert {:error,
+              %OptionError{
+                segment: "br:320",
+                reason: :requires_lossy_format,
+                related: "f:flac"
+              }} = Options.parse("f:flac/br:320")
+
+      assert {:error, %OptionError{reason: :requires_lossy_format}} =
+               Options.parse("f:wav/br:320")
+
+      # flac has no VBR scale but does have compression_level; PCM has neither.
+      assert {:ok, _} = Options.parse("f:flac/q:8")
+
+      assert {:error,
+              %OptionError{
+                segment: "q:8",
+                reason: :unsupported_for_format,
+                related: "f:wav"
+              }} = Options.parse("f:wav/q:8")
+    end
+
+    test "a float bit depth lives in wav alone" do
+      assert {:ok, _} = Options.parse("f:wav/bd:32f")
+
+      assert {:error,
+              %OptionError{
+                segment: "bd:32f",
+                reason: :unsupported_for_format,
+                related: "f:flac"
+              }} = Options.parse("f:flac/bd:32f")
     end
   end
 
@@ -247,7 +293,7 @@ defmodule AudioProxy.OptionsTest do
             "f:opus/br:96/t:12.5:30/fade:0.5:1",
             "f:peaks/t:0:10/ch:1",
             "norm:ebu:-14:-1:9/gain:-3/dl:piece.mp3/cb:v2",
-            "f:flac/bd:32f/sr:96000"
+            "f:wav/bd:32f/sr:96000"
           ] do
         assert {:ok, once} = Options.normalize_string(options)
         assert {:ok, twice} = Options.normalize_string(once)
@@ -352,7 +398,7 @@ defmodule AudioProxy.OptionsTest do
     test "every normalized string re-parses" do
       for opts <- [
             %Options{fade_in: 0.5},
-            %Options{fade_out: 1.0},
+            %Options{fade_out: 1.0, trim_duration: 30.0},
             %Options{trim_duration: 30.0},
             %Options{trim_start: 0.0004},
             %Options{format: :peaks}
