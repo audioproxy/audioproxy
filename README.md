@@ -6,9 +6,10 @@ An imgproxy-style on-the-fly audio transcoding proxy.
 
 > **Status: early.** What exists today is the application skeleton — OTP app,
 > supervision tree, `AudioProxy.Config`, URL signature generation/verification
-> (`AudioProxy.Signature` + `AudioProxy.Plugs.VerifySignature`), and the
-> unsigned `GET /health` endpoint. Rendering and S3 access arrive in the
-> slices tracked under `openspec/changes/`.
+> (`AudioProxy.Signature` + `AudioProxy.Plugs.VerifySignature`), the processing
+> options grammar and cache-key derivation (`AudioProxy.Options` +
+> `AudioProxy.CacheKey`), and the unsigned `GET /health` endpoint. Rendering and
+> S3 access arrive in the slices tracked under `openspec/changes/`.
 
 ## Design
 
@@ -85,6 +86,92 @@ test vector** used throughout the test suite; never use it as a real key.
 > makes the literal segment `insecure` pass as a signature
 > (`/insecure/f:opus/…/plain/…`). It exists for local development and smoke
 > tests; with it on, anyone who can reach the proxy can render anything.
+
+## Processing options
+
+The options segments describe the variant completely, and their normalized
+form *is* the cache key. `AudioProxy.Options` parses, validates, and normalizes
+them; `AudioProxy.CacheKey` hashes the result. Invalid or conflicting options
+are rejected with an `AudioProxy.OptionError` naming the offending segment,
+which the HTTP layer will render as a `422`.
+
+```elixir
+{:ok, opts} = AudioProxy.Options.parse("f:opus/br:96/t:12.5:30/fade:0.5:1")
+AudioProxy.Options.normalize(opts)
+# => "br:96/f:opus/fade:0.5:1/t:12.5:30"
+
+AudioProxy.CacheKey.derive!("br:96/f:opus", "s3://masters/piece.wav")
+# => "00d89ba1cbfecacd4450ae5ca912f7153f4740bb5e81d96609f6bfdfbfde4099"
+```
+
+### Supported options
+
+| Key | Value | Notes |
+|---|---|---|
+| `f` | `mp3` `opus` `ogg` `aac` `m4a` `flac` `wav` `peaks` | Output format; default `mp3` |
+| `br` | positive integer, kbps | CBR/ABR bitrate; excludes `q` |
+| `q` | number | VBR quality; excludes `br` |
+| `sr` | positive integer, Hz | Resample; default is the source rate. An explicit `sr` above 48 kHz is rejected for lossy formats; capping the *default* for lossy sources is the renderer's job (§3.1) |
+| `ch` | `1` \| `2` | Downmix |
+| `bd` | `16` \| `24` \| `32f` | Bit depth, lossless formats only |
+| `t` | `start[:duration]`, seconds | Trim. `t:30` runs to the end; `t:30:15` is 15 s from 30 s |
+| `fade` | `in[:out]`, seconds | Applied inside the trimmed region; an omitted out-fade is `0` |
+| `gain` | signed number, dB | Static gain |
+| `norm` | `ebu[:I[:TP[:LRA]]]` | Loudness normalization; targets default to `-16:-1.5:11`. v1 runs `loudnorm` single-pass — good enough for previews, not for masters (§3.2) |
+| `pts` | positive integer | Peaks: number of min/max pairs; default `800` |
+| `pk_fmt` | `json` \| `dat` | Peaks: output encoding; default `json` |
+| `dl` | filename | Sets `Content-Disposition: attachment` |
+| `cb` | opaque string | Cache-buster; participates in the cache key |
+
+Decimals are accepted to three places (millisecond precision) and rejected
+beyond that rather than silently rounded, so float formatting can never
+destabilize a cache key. `dl` and `cb` values stay percent-encoded and are
+treated as opaque bytes.
+
+### Validation rules
+
+Beyond each key's own value domain, five cross-key rules are enforced:
+
+- `br` and `q` are mutually exclusive.
+- `bd` requires a lossless format (`flac`, `wav`).
+- `pts` and `pk_fmt` require `f:peaks`.
+- `sr` is capped at 48 kHz for lossy formats.
+- A fade must fit inside the trimmed region when the trim is bounded.
+
+Peaks add a sixth rule: `f:peaks` refuses `br`, `q`, `sr`, `bd`, `gain` and
+`norm`. Peaks are computed from the decoded source and respect only `t` and
+`ch` (§3.3), so accepting an option that cannot change the output would hand
+byte-identical peaks two different cache keys. `f:peaks/br:96` is a 422.
+
+Unknown keys, repeated keys, empty segments, and valueless segments are
+rejected too — there is no last-write-wins and no silent ignoring, because
+either would let two different URLs mean the same variant. Values are also
+bounded above (`br` ≤ 10000, `sr` ≤ 384000, `pts` ≤ 100000, `|gain|` ≤ 100)
+so a mistyped URL fails here as a 422 rather than downstream as a render
+error, and `dl`/`cb` reject control characters — that last rule is what makes
+the cache key's separator sound (see below).
+
+### Cache-key semantics
+
+```
+lowercase-hex(SHA-256(normalized-options ‖ "\n" ‖ canonical-source))
+```
+
+Normalization is what makes this deterministic: keys are sorted
+lexicographically, applicable defaults are materialized (`f`, the `norm`
+targets when `norm` is present, `pts`/`pk_fmt` under `f:peaks`), and every
+number is rendered minimally (`30`, never `30.0`). So `f:opus/br:96` and
+`br:96/f:opus` are one variant with one key, while any genuine difference —
+`cb` included — yields a different one. The `"\n"` is load-bearing: without
+it, `("", "/gain:3")` and `("gain:3", "")` would hash identical bytes, which
+is why control characters are refused in the only two options whose values
+are opaque.
+
+Normalization is syntactic, not semantic: `t:0`, `fade:0:0` and `gain:0` are
+identity renders but keep their own keys, so those spellings cost duplicate
+cache objects. Collapsing them is tracked as follow-up work. The property suite
+(`test/audio_proxy/options_property_test.exs`) holds this line: normalization
+is idempotent, order-insensitive, and always re-parses.
 
 ## Stack
 

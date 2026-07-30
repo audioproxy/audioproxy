@@ -26,6 +26,29 @@ The system SHALL reject unknown keys, out-of-domain values, and conflicting comb
 - **WHEN** parsing `ch:3`, or `bd:24` with lossy `f:mp3`, or negative `t` start, or `pts:0`
 - **THEN** each fails with a structured domain error
 
+#### Scenario: Values above their upper bound
+- **WHEN** parsing `br:10001`, `sr:384001`, `pts:100001`, or `gain:100.001`
+- **THEN** each fails as out of range, so an unrenderable value cannot reach a later stage
+
+#### Scenario: Control characters in opaque values
+- **WHEN** parsing `dl:` or `cb:` with a value containing a control character (e.g. `cb:a\nb`)
+- **THEN** parsing fails, so a normalized options string can never contain one
+
+### Requirement: Peaks reject options they would ignore
+Because peaks are computed from the decoded source, the system SHALL reject encoding and loudness options under `f:peaks` (§3.3: peaks respect `t` and `ch` and ignore encoding options) rather than accepting options that cannot affect the output, which would give byte-identical peaks two cache keys.
+
+#### Scenario: Encoding option with peaks
+- **WHEN** parsing `f:peaks/br:96`, `f:peaks/q:5`, `f:peaks/sr:48000`, or `f:peaks/bd:16`
+- **THEN** each fails with a structured error naming the offending segment
+
+#### Scenario: Loudness option with peaks
+- **WHEN** parsing `f:peaks/gain:-3` or `f:peaks/norm:ebu`
+- **THEN** each fails with a structured error naming the offending segment
+
+#### Scenario: Options peaks do respect
+- **WHEN** parsing `f:peaks/t:10:5/ch:1/pts:2000/pk_fmt:dat`
+- **THEN** parsing succeeds
+
 ### Requirement: Normalization is canonical and order-insensitive
 The system SHALL normalize parsed options such that any two option strings describing the same variant produce identical normalized forms, with defaults (`f:mp3`, `pts:800`, norm targets `-16:-1.5:11`) made explicit.
 
