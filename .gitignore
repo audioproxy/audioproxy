@@ -29,3 +29,6 @@ audio_proxy-*.tar
 
 # Machine-local Claude Code settings.
 /.claude/settings.local.json
+
+# Second-opinion review working log (session artifact).
+/second-opinion.md

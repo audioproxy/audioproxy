@@ -9,6 +9,7 @@
 - [ ] 2.1 Ruby smoke script: build → boot with fake S3 → health → insecure end-to-end render → duration assertion → SIGTERM clean-exit + no-orphan check (final process table)
 - [ ] 2.2 Config tests in-container: env override effective; malformed `AP_KEY` exits nonzero with message
 - [ ] 2.3 Extend `.github/workflows/ci.yml`: image-build + smoke jobs (`needs: test`), `--only ffmpeg` integration against the image's ffmpeg, ffmpeg major-version assertion
+- [ ] 2.4 Smoke: signed URL containing percent-escapes over h2c (`curl --http2-prior-knowledge`) — Bandit's HTTP/2 path builds `request_path` separately from HTTP/1.1 (which the `:integration` tests cover), so the signed-escapes assertion must hold there too
 
 ## 3. Docs
 
