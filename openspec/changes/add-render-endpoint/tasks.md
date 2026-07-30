@@ -3,6 +3,7 @@
 - [ ] 1.1 `ParseOptions` + `ResolveSource` plugs bridging existing modules into `conn.assigns`; halt-with-error on failure
 - [ ] 1.2 `ErrorJSON`: structured-error → {status, body} table for 401/404/413/415/422/429/504; unit tests per mapping incl. `Retry-After` on 429
 - [ ] 1.3 Route `GET /:sig/*rest` in router (options/source split), keeping `/health` unsigned
+- [ ] 1.4 Router-level test: every signed route 401s without a valid signature (guards against mounting `VerifySignature` after `:dispatch` or omitting it on a new route)
 
 ## 2. Render action
 

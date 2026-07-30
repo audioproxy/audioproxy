@@ -5,10 +5,10 @@
 An imgproxy-style on-the-fly audio transcoding proxy.
 
 > **Status: early.** What exists today is the application skeleton — OTP app,
-> supervision tree, `AudioProxy.Config`, and the unsigned `GET /health`
-> endpoint. Everything below under *Design* describes the target, not working
-> code. Signing, rendering, and S3 access arrive in the slices tracked under
-> `openspec/changes/`.
+> supervision tree, `AudioProxy.Config`, URL signature generation/verification
+> (`AudioProxy.Signature` + `AudioProxy.Plugs.VerifySignature`), and the
+> unsigned `GET /health` endpoint. Rendering and S3 access arrive in the
+> slices tracked under `openspec/changes/`.
 
 ## Design
 
@@ -30,6 +30,61 @@ GET /{signature}/{options}/{source}
 truth** for the URL grammar, processing options, cache-key rules, response
 headers, and error codes. Read it before touching URL parsing or response
 semantics.
+
+## Signing URLs
+
+Every URL is signed: the first path segment is
+`base64url(HMAC-SHA256(key, salt ‖ rest-of-path))`, computed over the exact
+bytes after the signature segment, leading `/` included, taken from the raw
+(still percent-encoded) request path. Key and salt are the hex-decoded values
+of `AP_KEY`/`AP_SALT`. Signatures are emitted unpadded; the canonical padded
+form is accepted on verification, but non-canonical spellings (over-padding,
+variant final characters) are rejected — a signature cannot be respelled.
+
+`AudioProxy.Signature.sign/3` is the reference signer:
+
+```elixir
+key  = Base.decode16!("00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF")  # AP_KEY
+salt = Base.decode16!("FFEEDDCCBBAA99887766554433221100")  # AP_SALT
+rest = "/f:opus/br:96/plain/s3://masters/2026/piece-final.wav"
+
+AudioProxy.Signature.sign(rest, key, salt)
+# => "zfLTfPPhQ8kdeYYJOdagqPfog2nFk7KzDFUjtRAf_Ns"
+```
+
+→ the URL is `/<signature><rest>`, i.e.
+`/zfLTfPPhQ8kdeYYJOdagqPfog2nFk7KzDFUjtRAf_Ns/f:opus/br:96/plain/s3://masters/2026/piece-final.wav`.
+
+Sign the URL-escaped path exactly as it will be requested — verification runs
+over the raw request path, so re-encoding anything breaks the signature: a
+key with a space must appear as `a%20track.wav` in both the signature input
+and the request (or use the `enc/` source form, which exists precisely to
+avoid escaping headaches). For non-Elixir clients, the same three lines in
+Ruby:
+
+```ruby
+require "openssl"
+require "base64"
+
+key  = "00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF"  # AP_KEY (hex)
+salt = "FFEEDDCCBBAA99887766554433221100"  # AP_SALT (hex)
+path = "/f:opus/br:96/plain/s3://masters/2026/piece-final.wav"
+
+sig = Base64.urlsafe_encode64(
+  OpenSSL::HMAC.digest("SHA256", [key].pack("H*"), [salt].pack("H*") + path),
+  padding: false
+)
+# => "zfLTfPPhQ8kdeYYJOdagqPfog2nFk7KzDFUjtRAf_Ns"
+```
+
+Generate a real key with `openssl rand -hex 32` — `AP_KEY` must decode to at
+least 32 bytes or the proxy refuses to boot. **The key above is a published
+test vector** used throughout the test suite; never use it as a real key.
+
+> **Dev mode — never enable in production.** Setting `AP_ALLOW_INSECURE=true`
+> makes the literal segment `insecure` pass as a signature
+> (`/insecure/f:opus/…/plain/…`). It exists for local development and smoke
+> tests; with it on, anyone who can reach the proxy can render anything.
 
 ## Stack
 
@@ -81,7 +136,7 @@ so several of them are parsed and validated but not yet consumed by anything.
 
 | Variable | Type | Default | Purpose |
 |---|---|---|---|
-| `AP_KEY` | hex | unset | HMAC key for URL signatures |
+| `AP_KEY` | hex, ≥ 32 bytes decoded | unset | HMAC key for URL signatures |
 | `AP_SALT` | hex | unset | HMAC salt |
 | `AP_ALLOW_INSECURE` | boolean | `false` | Accept unsigned URLs (dev only) |
 | `AP_SOURCE_ALLOWLIST` | comma-separated | empty | Permitted source buckets/hosts |
@@ -115,6 +170,15 @@ default. Run them explicitly, on a machine that has ffmpeg installed:
 mix test --only ffmpeg
 ```
 
+Tests tagged `:integration` bind a real socket (Bandit on a fixed port) to
+verify adapter behavior end-to-end — currently that the signed request path
+reaches the verifier byte-identical to what the client sent. They are
+excluded by default but run in CI; locally:
+
+```bash
+mix test --include integration
+```
+
 Property tests use [StreamData](https://github.com/whatyouhide/stream_data),
 which is a test-only dependency. Every processing option must round-trip
 (parse → normalize → cache key → identical ffmpeg args), so option handling is
@@ -133,7 +197,7 @@ parsing or validation.
 
 | Job | Runs | Notes |
 |---|---|---|
-| `test` | `mix format --check-formatted`, `mix compile --warnings-as-errors`, `mix test` | No external binaries — the untagged suite must pass on a bare runner |
+| `test` | `mix format --check-formatted`, `mix compile --warnings-as-errors`, `mix test --include integration` | No external binaries — the untagged + `:integration` suite must pass on a bare runner |
 | `test-ffmpeg` | `mix test --only ffmpeg` | Installs ffmpeg first; no-ops green until the first `:ffmpeg`-tagged test exists |
 
 Compilation runs with warnings as errors because the compiler's set-theoretic

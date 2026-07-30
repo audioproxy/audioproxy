@@ -15,7 +15,7 @@ defmodule AudioProxy.Config do
 
   | Variable | Type | Default |
   |---|---|---|
-  | `AP_KEY` | hex-encoded binary | unset (`nil`) |
+  | `AP_KEY` | hex-encoded binary, ≥ 32 bytes decoded | unset (`nil`) |
   | `AP_SALT` | hex-encoded binary | unset (`nil`) |
   | `AP_ALLOW_INSECURE` | boolean | `false` |
   | `AP_SOURCE_ALLOWLIST` | comma-separated list | `[]` |
@@ -36,6 +36,11 @@ defmodule AudioProxy.Config do
   end
 
   @storage_key __MODULE__
+
+  # RFC 2104 §3 recommends an HMAC key at least as long as the hash output
+  # (32 bytes for SHA-256); a shorter key caps the effective security at its
+  # own length, so anything below the recommendation is rejected at boot.
+  @min_key_bytes 32
 
   @default_port 4000
   @default_queue_size 32
@@ -80,7 +85,7 @@ defmodule AudioProxy.Config do
   def build!(env) when is_map(env) do
     %{
       port: port(env),
-      key: hex(env, "AP_KEY"),
+      key: hex(env, "AP_KEY", @min_key_bytes),
       salt: hex(env, "AP_SALT"),
       allow_insecure: boolean(env, "AP_ALLOW_INSECURE", false),
       source_allowlist: list(env, "AP_SOURCE_ALLOWLIST"),
@@ -127,11 +132,16 @@ defmodule AudioProxy.Config do
     end
   end
 
-  defp hex(env, var) do
+  defp hex(env, var, min_bytes \\ 0) do
     with value when is_binary(value) <- fetch(env, var) do
       case Base.decode16(value, case: :mixed) do
         {:ok, decoded} ->
-          decoded
+          if byte_size(decoded) >= min_bytes do
+            decoded
+          else
+            raise Error,
+                  "#{var} must decode to at least #{min_bytes} bytes (≥ #{min_bytes * 2} hex characters), got #{byte_size(decoded)} bytes"
+          end
 
         :error ->
           raise Error,

@@ -36,7 +36,9 @@ jobs:
 
       - run: mix compile --warnings-as-errors
 
-      - run: mix test
+      # `--include integration` adds the socket-binding tests to the run;
+      # :ffmpeg stays excluded (that tag has its own job below).
+      - run: mix test --include integration
 
   test-ffmpeg:
     name: ffmpeg-tagged tests
