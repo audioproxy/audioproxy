@@ -1,0 +1,46 @@
+# Audio Proxy (working title)
+
+An imgproxy-style on-the-fly audio transcoding proxy. Reads source files from S3, renders variants (transcodes, trimmed previews, waveform peaks) on demand, streams them to the client, and writes them back to a variant bucket for cached, range-capable serving.
+
+The full API design lives in `docs/audio-proxy-api-v1.md` — read it before touching URL parsing, options, or response semantics. It is the source of truth for endpoints, processing options, cache-key rules, headers, and error codes.
+
+## Stack — decided, don't relitigate
+
+- **Elixir**, Plug + **Bandit** (no Phoenix — no HTML, no channels needed)
+- **ffmpeg via subprocess** (Port), not libav bindings. ffmpeg does all decoding/encoding; the Elixir side is orchestration only.
+- `ffprobe` for the `/info` endpoint.
+- **Single Docker container**: multi-stage build, `mix release` with bundled ERTS, `apk add ffmpeg` in the runtime stage. No sidecar, no external queue, no database.
+- S3 access via a minimal SDK (evaluate `ex_aws_s3` vs `req` + `aws_signature`); presigned URLs are essential (see below).
+
+## Dependency policy
+
+Stay with the stdlib and core/OTP tooling as far as possible. GenStage is acceptable (core-team-maintained) if a real demand-driven pipeline emerges; do NOT pull in Exile, Membrane, Broadway, or Phoenix without discussing it first. Prefer boring OTP: GenServer, Registry, Task, DynamicSupervisor.
+
+## Architecture decisions
+
+- **Input side:** never pipe source bytes through the BEAM. Generate a presigned S3 URL and pass it to ffmpeg as an HTTP input — ffmpeg does its own Range requests, so `-ss` seeks and trims read only the bytes they need. Also avoids the stdin/MP4-moov-atom trap.
+- **Output side:** ffmpeg writes encoded output progressively; only streamable containers by default (mp3, ADTS AAC, Ogg/Opus). MP4 family only as fragmented MP4 (`-movflags frag_keyframe+empty_moov`).
+- **Backpressure:** start with raw `Port` + a bounded-buffer GenServer (preview-sized outputs make mailbox pressure a non-issue). For full-length transcodes, the escalation path is the named-pipe (FIFO) pattern: ffmpeg writes to a `mkfifo` pipe, Elixir reads it passively with `File.open`/`IO.binread` in raw mode — OS pipe blocking gives true backpressure, zero deps. OTP ≥21 file reads run on dirty I/O schedulers.
+- **Render policy:** render at full speed into the S3 write-back; the client's chunked stream lags the render rather than throttling it (a slow client must not pin a CPU slot at listening speed).
+- **Concurrency:** semaphore/counting GenServer capping concurrent ffmpeg processes at `AP_MAX_CONCURRENCY` (default: schedulers online). Bounded wait queue → 429.
+- **Coalescing:** one render process per in-flight cache key via `Registry`; all concurrent requests for the same variant subscribe to its chunk broadcast; late joiners catch up from the partial data.
+- **Cache semantics:** MISS = 200 chunked (no Range) + tee to variant bucket; HIT = 302 to presigned variant URL (default) so S3/CDN serves Range/206. All per the API doc §5.
+
+## Module shape (target, not gospel)
+
+signature verification plug → options parser (options string = normalized cache key) → source resolver / S3 layer → render supervisor + coalescing registry → ffmpeg pipeline (Port wrapper) → chunked delivery / redirect.
+
+## Conventions
+
+- Config via env vars only, `AP_`-prefixed, per API doc §6.
+- Every processing option must round-trip: parse → normalize → cache key → identical ffmpeg args. Property-test this.
+- ffmpeg arg construction must be injection-safe: argv lists only, never shell strings.
+- Kill the ffmpeg process on client disconnect and on `AP_RENDER_TIMEOUT`; no orphans.
+
+## Open questions (decide as they come up)
+
+- Project/binary name.
+- `ex_aws_s3` vs hand-rolled signing with `req`.
+- Peaks output: exact JSON schema (audiowaveform compatibility?).
+- Single-pass `loudnorm` accuracy — good enough for previews, revisit for masters.
+- HLS (v2): URL space is reserved, nothing else designed.
