@@ -3,5 +3,5 @@
 # both. This file is the single source of truth — mise reads it locally, and
 # erlef/setup-beam reads it in CI. Keep the devcontainer image
 # (.devcontainer/Dockerfile) and the release image in step with it by hand.
-erlang 28.5.0.4
-elixir 1.20.2-otp-28
+erlang 28.5.0.3
+elixir 1.20.1-otp-28
