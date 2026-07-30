@@ -32,10 +32,3 @@ The container SHALL propagate SIGTERM to the release, terminate in-flight render
 #### Scenario: SIGTERM during render
 - **WHEN** the container receives SIGTERM while a render streams
 - **THEN** the container exits cleanly and no ffmpeg process survives in the container's final process table
-
-### Requirement: CI verifies the image
-CI SHALL build the image on every change and run the smoke suite against the built container, including one end-to-end render, plus the ffmpeg-tagged integration tests against the image's ffmpeg.
-
-#### Scenario: Smoke test gate
-- **WHEN** CI runs on a branch
-- **THEN** image build + container smoke render must pass for the pipeline to be green

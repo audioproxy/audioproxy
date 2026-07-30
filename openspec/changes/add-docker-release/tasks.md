@@ -8,7 +8,7 @@
 
 - [ ] 2.1 Ruby smoke script: build → boot with fake S3 → health → insecure end-to-end render → duration assertion → SIGTERM clean-exit + no-orphan check (final process table)
 - [ ] 2.2 Config tests in-container: env override effective; malformed `AP_KEY` exits nonzero with message
-- [ ] 2.3 CI workflow: mix test (unit) + image build + smoke + `--only ffmpeg` integration against the image's ffmpeg; ffmpeg major-version assertion
+- [ ] 2.3 Extend `.github/workflows/ci.yml`: image-build + smoke jobs (`needs: test`), `--only ffmpeg` integration against the image's ffmpeg, ffmpeg major-version assertion
 
 ## 3. Docs
 

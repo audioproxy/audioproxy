@@ -46,6 +46,7 @@ signature verification plug → options parser (options string = normalized cach
 - Every processing option must round-trip: parse → normalize → cache key → identical ffmpeg args. Property-test this.
 - ffmpeg arg construction must be injection-safe: argv lists only, never shell strings.
 - Kill the ffmpeg process on client disconnect and on `AP_RENDER_TIMEOUT`; no orphans.
+- **Typing:** Elixir ≥ 1.20 — the built-in set-theoretic checker plus `mix compile --warnings-as-errors` in CI is the type gate; no Dialyzer/dialyxir. Write `@type t` / `@spec` on public seams only (`Options`, `Source`, `Signature`, `Command`, the `S3` behaviour) for ExDoc/LSP; skip private plumbing. Migrate to native typed structs/contracts when they land (1.21+).
 
 ## Open questions (decide as they come up)
 

@@ -1,7 +1,7 @@
 ## 1. Project skeleton
 
 - [ ] 1.1 `mix new audio_proxy --sup` layout committed at repo root; `.formatter.exs`, `.gitignore`
-- [ ] 1.2 Pin toolchain with mise: `mise.toml` (or `.tool-versions`) with a matching Elixir/OTP pair; note in README
+- [ ] 1.2 Pin toolchain with mise: `mise.toml` (or `.tool-versions`) with a matching Elixir/OTP pair — Elixir ≥ 1.20 (built-in gradual type checking is the project's type gate, per CLAUDE.md conventions); note in README
 - [ ] 1.3 Add deps: `plug`, `bandit`; test-only: `stream_data`
 - [ ] 1.4 Supervision tree starting Bandit with `AudioProxy.Router`; listener port from `PORT` (worktree workflow) falling back to default
 
@@ -28,4 +28,4 @@
 ## 5. Verification & docs
 
 - [ ] 5.1 `mix test` and `mix format --check-formatted` pass; document both as the CI gate
-- [ ] 5.2 Update README: project intro, toolchain (mise), worktree/devcontainer workflow (`wt start`), config vars, test commands
+- [ ] 5.2 Update README: project intro, toolchain (mise, Elixir ≥ 1.20 typing rationale), worktree/devcontainer workflow (`wt start`), config vars, test commands
