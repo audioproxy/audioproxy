@@ -90,6 +90,21 @@ defmodule AudioProxy.OptionsTest do
       assert {:ok, %Options{fade_in: 0.5, fade_out: 1.0}} = Options.parse("t:0:10/fade:0.5:1")
     end
 
+    test "a signed zero is collapsed at parse time" do
+      # -0.0 renders as "0" and so cannot be told apart in a cache key; letting
+      # it into the struct would let it be told apart in the argv.
+      assert {:ok, %Options{gain: gain}} = Options.parse("gain:-0")
+      refute gain === -0.0
+      assert gain === 0.0
+
+      assert {:ok, %Options{fade_in: fade_in, fade_out: fade_out}} = Options.parse("fade:-0:-0")
+      assert fade_in === 0.0
+      assert fade_out === 0.0
+
+      assert {:ok, %Options{trim_start: start}} = Options.parse("t:-0")
+      assert start === 0.0
+    end
+
     test "gain is signed" do
       assert {:ok, %Options{gain: -3.5}} = Options.parse("gain:-3.5")
       assert {:ok, %Options{gain: 6.0}} = Options.parse("gain:6")
@@ -235,6 +250,46 @@ defmodule AudioProxy.OptionsTest do
                 reason: :unsupported_for_format,
                 related: "f:wav"
               }} = Options.parse("f:wav/q:8")
+    end
+
+    test "q must sit inside its codec's range" do
+      # The one that ffmpeg itself refuses: "invalid compression level: 13".
+      assert {:error,
+              %OptionError{
+                segment: "q:13",
+                reason: :out_of_range_for_format,
+                related: "f:flac"
+              }} = Options.parse("f:flac/q:13")
+
+      assert {:ok, _} = Options.parse("f:flac/q:12")
+
+      # Each codec's scale is its own; the same number is not valid everywhere.
+      assert {:ok, _} = Options.parse("f:mp3/q:9")
+
+      assert {:error, %OptionError{reason: :out_of_range_for_format}} =
+               Options.parse("f:mp3/q:10")
+
+      assert {:ok, _} = Options.parse("f:opus/q:10")
+
+      assert {:error, %OptionError{reason: :out_of_range_for_format}} =
+               Options.parse("f:opus/q:11")
+
+      assert {:ok, _} = Options.parse("f:ogg/q:-1")
+
+      assert {:error, %OptionError{reason: :out_of_range_for_format}} =
+               Options.parse("f:ogg/q:-2")
+
+      assert {:ok, _} = Options.parse("f:aac/q:1.5")
+      assert {:error, %OptionError{reason: :out_of_range_for_format}} = Options.parse("f:aac/q:5")
+    end
+
+    test "peaks report the peaks rule, whichever option is at fault" do
+      # Every sibling rule defers to validate_peaks_only/1 so that the 422 names
+      # the reason that actually explains the refusal.
+      for segment <- ~w(br:96 q:5 sr:48000 bd:16 bd:32f gain:-3 norm:ebu) do
+        assert {:error, %OptionError{reason: :unsupported_for_peaks}} =
+                 Options.parse("f:peaks/#{segment}")
+      end
     end
 
     test "a float bit depth lives in wav alone" do

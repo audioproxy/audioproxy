@@ -79,10 +79,60 @@ defmodule AudioProxy.Ffmpeg.CommandFfmpegTest do
   defp assert_renders(options, source, minimum_bytes \\ 1_000) do
     {output, status} = render(options, source)
 
-    assert status == 0, "#{options} exited #{status}: #{inspect(binary_part(output, 0, 400))}"
+    # binary_slice/3, not binary_part/3: ffmpeg's diagnostics are usually well
+    # under 400 bytes, and binary_part/3 raises on a short binary — so the one
+    # line whose whole job is to explain the failure would raise instead.
+    assert status == 0, "#{options} exited #{status}: #{inspect(binary_slice(output, 0, 400))}"
     assert byte_size(output) >= minimum_bytes, "#{options} produced #{byte_size(output)} bytes"
 
     output
+  end
+
+  defp count_boxes(binary, name) do
+    binary
+    |> :binary.matches(name)
+    |> length()
+  end
+
+  # Renders with a realtime-paced input and reports how long the first bytes
+  # took to arrive. A container that buffers to EOF returns ~the source length.
+  defp time_to_first_bytes(options, source) do
+    {:ok, opts} = Options.parse(options)
+    argv = Command.build(opts, source)
+    started = System.monotonic_time(:millisecond)
+
+    port =
+      Port.open({:spawn_executable, System.find_executable("ffmpeg")}, [
+        :binary,
+        :exit_status,
+        args: ["-re" | quiet(argv)]
+      ])
+
+    elapsed =
+      receive do
+        {^port, {:data, _chunk}} -> System.monotonic_time(:millisecond) - started
+        {^port, {:exit_status, _status}} -> System.monotonic_time(:millisecond) - started
+      after
+        60_000 -> flunk("ffmpeg emitted nothing within 60s for #{options}")
+      end
+
+    safe_close(port)
+
+    elapsed / 1000
+  end
+
+  # Closing the port mid-render leaves ffmpeg writing into a dead pipe, which
+  # it reports at `error` level. Expected, and not worth printing over the
+  # suite, so this one helper turns the level down.
+  defp quiet(argv) do
+    index = Enum.find_index(argv, &(&1 == "-loglevel"))
+    List.replace_at(argv, index + 1, "quiet")
+  end
+
+  defp safe_close(port) do
+    if Port.info(port), do: Port.close(port)
+  rescue
+    ArgumentError -> :ok
   end
 
   describe "every format encodes" do
@@ -135,12 +185,30 @@ defmodule AudioProxy.Ffmpeg.CommandFfmpegTest do
       assert byte_size(output) == 5 * @sample_rate * 2
     end
 
-    test "fragmented mp4 needs no seekable output", %{source: source} do
+    test "fragmented mp4 needs no seekable output, and really does fragment",
+         %{source: source} do
       output = assert_renders("f:m4a/br:96", source)
 
       # An empty moov up front is what makes the stream playable as it
       # arrives; a plain mp4 would have failed on pipe:1 long before this.
-      assert binary_part(output, 0, 12) =~ "ftyp"
+      assert binary_slice(output, 0, 12) =~ "ftyp"
+
+      # The assertion that matters. `frag_keyframe` produced exactly one moof
+      # for an audio-only stream — a valid file that ffmpeg flushed at EOF, so
+      # it wrote nothing until the render finished. Counting the fragments is
+      # how that regression stays fixed: a 20 s source cut at 1 s must yield
+      # well more than one.
+      assert count_boxes(output, "moof") >= @duration - 2
+    end
+
+    test "peaks and mp3 start emitting before the source is exhausted",
+         %{source: source} do
+      # `-re` feeds the input at playback speed, which is the only way a
+      # buffered container is distinguishable from a streaming one.
+      for options <- ["f:mp3/br:96", "f:m4a/br:96"] do
+        assert time_to_first_bytes(options, source) < @duration / 2,
+               "#{options} produced nothing until the source ran out"
+      end
     end
 
     test "a hostile filename is data, not syntax", %{source: source} do

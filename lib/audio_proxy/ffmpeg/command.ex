@@ -60,6 +60,14 @@ defmodule AudioProxy.Ffmpeg.Command do
       not know.
     * `afade` last, so the fade shape survives the stages above it.
 
+  ## What the builder does not know
+
+  `build/3` takes an optional `t:source/0` because one decision genuinely
+  cannot be made from the options alone: with no `bd`, a lossless variant
+  should follow the source's own bit depth, the way `sr` follows its sample
+  rate (§3.1). Until the `/info` probe exists to supply it, the fallback is
+  16-bit — documented, not silent.
+
   ## Peaks
 
   `f:peaks` builds raw interleaved `s16le` PCM on stdout — the input to the
@@ -70,6 +78,20 @@ defmodule AudioProxy.Ffmpeg.Command do
   """
 
   alias AudioProxy.Options
+
+  @typedoc """
+  What the builder needs to know about the source itself.
+
+  Empty today: the probe that fills it belongs to the `/info` slice. The one
+  key it carries, `:bit_depth`, exists because a lossless variant cannot pick
+  a sane default without knowing the source's depth. Passing nothing keeps the
+  documented fallback.
+
+  This does not weaken the round-trip invariant. The cache key hashes the
+  normalized options *and* the source, so equal keys already imply the same
+  source — and therefore the same source metadata, and the same argv.
+  """
+  @type source :: [bit_depth: Options.bit_depth()]
 
   @baseline ~w(-nostdin -hide_banner -loglevel error)
 
@@ -130,6 +152,9 @@ defmodule AudioProxy.Ffmpeg.Command do
   # loudnorm's output rate; see the moduledoc's filter-order note.
   @loudnorm_output_rate 48_000
 
+  # Fragment length for `f:m4a`, in microseconds. See `container_args/1`.
+  @fragment_duration_us "1000000"
+
   @doc """
   Builds the ffmpeg argument vector for `options` reading from `input_url`.
 
@@ -145,15 +170,22 @@ defmodule AudioProxy.Ffmpeg.Command do
       iex> {:ok, opts} = AudioProxy.Options.parse("f:wav/bd:24")
       iex> AudioProxy.Ffmpeg.Command.build(opts, "s3://b/k.aif") |> Enum.take(-6)
       ["-vn", "-c:a", "pcm_s24le", "-f", "wav", "pipe:1"]
+
+  With no `bd`, a lossless variant follows the source when its depth is known:
+
+      iex> {:ok, opts} = AudioProxy.Options.parse("f:wav")
+      iex> AudioProxy.Ffmpeg.Command.build(opts, "s3://b/k.aif", bit_depth: :bd24)
+      ...> |> Enum.take(-5)
+      ["-c:a", "pcm_s24le", "-f", "wav", "pipe:1"]
   """
-  @spec build(Options.t(), String.t()) :: [String.t()]
-  def build(%Options{} = options, input_url) when is_binary(input_url) do
+  @spec build(Options.t(), String.t(), source()) :: [String.t()]
+  def build(%Options{} = options, input_url, source \\ []) when is_binary(input_url) do
     @baseline ++
       input_args(options) ++
       ["-i", input_url, "-vn"] ++
       filter_args(options) ++
       channel_args(options) ++
-      output_args(options) ++
+      output_args(options, source) ++
       ["-f", muxer(options), "pipe:1"]
   end
 
@@ -256,21 +288,32 @@ defmodule AudioProxy.Ffmpeg.Command do
 
   # Peaks are decoded samples, not an encode: no bitrate, no quality, no
   # container flags — just interleaved PCM for the reducer to chew on.
-  defp output_args(%Options{format: :peaks}), do: ["-c:a", @default_pcm_codec]
+  defp output_args(%Options{format: :peaks}, _source), do: ["-c:a", @default_pcm_codec]
 
-  defp output_args(%Options{} = options) do
-    ["-c:a", codec(options)] ++
+  defp output_args(%Options{} = options, source) do
+    ["-c:a", codec(options, source)] ++
       bitrate_args(options) ++
       quality_args(options) ++
       sample_format_args(options) ++
       container_args(options)
   end
 
-  defp codec(%Options{format: :wav} = options) do
-    Map.get(@pcm_codecs, options.bit_depth, @default_pcm_codec)
+  # `bd` wins; otherwise wav follows the source, exactly as `sr` does (§3.1),
+  # and falls back to 16-bit only when the source's depth is unknown. Without
+  # this, `f:wav` on a 24-bit master silently returned 16-bit while `f:flac`
+  # on the same master returned 24 — two lossless formats, two answers.
+  defp codec(%Options{format: :wav, bit_depth: nil}, source) do
+    case Keyword.get(source, :bit_depth) do
+      nil -> @default_pcm_codec
+      depth -> Map.get(@pcm_codecs, depth, @default_pcm_codec)
+    end
   end
 
-  defp codec(%Options{format: format}), do: Map.fetch!(@codecs, format)
+  defp codec(%Options{format: :wav} = options, _source) do
+    Map.fetch!(@pcm_codecs, options.bit_depth)
+  end
+
+  defp codec(%Options{format: format}, _source), do: Map.fetch!(@codecs, format)
 
   # `br` is kbps in the URL grammar; `k` makes that explicit to ffmpeg rather
   # than relying on it reading a bare 96 as bits per second.
@@ -293,8 +336,21 @@ defmodule AudioProxy.Ffmpeg.Command do
 
   # Plain MP4 needs a seekable output to write its moov atom; stdout is not
   # one. Fragmented MP4 streams instead, which is the only reason `m4a` can
-  # be offered at all.
-  defp container_args(%Options{format: :m4a}), do: ["-movflags", "frag_keyframe+empty_moov"]
+  # be offered at all — but only if it really fragments. `frag_keyframe`
+  # starts a fragment at each video keyframe, and an audio-only stream has
+  # none, so `empty_moov` alone produces one fragment flushed at EOF: on a
+  # 20 s source the first byte arrives after 19.7 s. `-frag_duration` cuts on
+  # time instead, which is what audio needs; `default_base_moof` is the
+  # companion flag players expect on a fragmented stream.
+  #
+  # One second is the trade: 1 s to first byte, and 327275 bytes against the
+  # unfragmented 328218 for a 20 s 128k render, i.e. the fragment headers cost
+  # nothing measurable. Fragmenting per frame would cut latency to 0.2 s and
+  # add 33%.
+  defp container_args(%Options{format: :m4a}) do
+    ["-movflags", "empty_moov+default_base_moof", "-frag_duration", @fragment_duration_us]
+  end
+
   defp container_args(%Options{}), do: []
 
   defp number(number), do: Options.render_number(number)

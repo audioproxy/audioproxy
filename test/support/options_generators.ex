@@ -21,7 +21,17 @@ defmodule AudioProxy.OptionsGenerators do
 
   @formats ~w(mp3 opus ogg aac m4a flac wav peaks)
   @lossy ~w(mp3 opus ogg aac m4a)
-  @quality_formats ~w(mp3 opus ogg aac m4a flac)
+  # Each codec's `q` domain, mirroring @quality_ranges in AudioProxy.Options.
+  # Expressed in thousandths so the generator can walk the whole range,
+  # fractional values included — aac's band is barely one unit wide.
+  @quality_ranges %{
+    "mp3" => 0..9_000,
+    "ogg" => -1_000..10_000,
+    "aac" => 100..2_000,
+    "m4a" => 100..2_000,
+    "opus" => 0..10_000,
+    "flac" => 0..12_000
+  }
 
   @doc "A shuffled list of segments describing one valid variant."
   def option_segments do
@@ -64,11 +74,12 @@ defmodule AudioProxy.OptionsGenerators do
   defp bitrate(format) when format in @lossy, do: [map(integer(32..320), &["br:#{&1}"])]
   defp bitrate(_format), do: []
 
-  defp quality(format) when format in @quality_formats do
-    [map(integer(0..10), &["q:#{&1}.000"])]
+  defp quality(format) do
+    case Map.fetch(@quality_ranges, format) do
+      {:ok, range} -> [map(integer(range), &["q:#{decimal(&1)}"])]
+      :error -> []
+    end
   end
-
-  defp quality(_format), do: []
 
   defp sample_rate(format) when format in @lossy do
     map(member_of([8000, 16_000, 22_050, 32_000, 44_100, 48_000]), &["sr:#{&1}"])
@@ -88,6 +99,7 @@ defmodule AudioProxy.OptionsGenerators do
   defp trim do
     one_of([
       constant({[], nil}),
+      constant({["t:-0"], nil}),
       map(millis(0..600_000), fn start -> {["t:#{decimal(start)}"], nil} end),
       gen all(start <- millis(0..600_000), duration <- millis(1_000..300_000)) do
         {["t:#{decimal(start)}:#{decimal(duration)}"], duration}
@@ -99,13 +111,17 @@ defmodule AudioProxy.OptionsGenerators do
   # so only the in-fade is reachable — in both its spellings.
   defp fade(nil) do
     maybe(
-      gen all(fade_in <- millis(0..5_000), explicit_out <- boolean()) do
-        if explicit_out do
-          ["fade:#{decimal(fade_in)}:0"]
-        else
-          ["fade:#{decimal(fade_in)}"]
-        end
-      end
+      one_of([
+        gen all(fade_in <- millis(0..5_000), explicit_out <- boolean()) do
+          if explicit_out do
+            ["fade:#{decimal(fade_in)}:0"]
+          else
+            ["fade:#{decimal(fade_in)}"]
+          end
+        end,
+        constant(["fade:-0"]),
+        constant(["fade:-0:-0"])
+      ])
     )
   end
 
@@ -116,17 +132,30 @@ defmodule AudioProxy.OptionsGenerators do
   # real bug (0.1 + 0.2 > 0.3).
   defp fade(duration_ms) do
     maybe(
-      gen all(
-            fade_in <- millis(0..duration_ms),
-            fade_out <- millis(0..(duration_ms - fade_in))
-          ) do
-        ["fade:#{decimal(fade_in)}:#{decimal(fade_out)}"]
-      end
+      one_of([
+        gen all(
+              fade_in <- millis(0..duration_ms),
+              fade_out <- millis(0..(duration_ms - fade_in))
+            ) do
+          ["fade:#{decimal(fade_in)}:#{decimal(fade_out)}"]
+        end,
+        constant(["fade:-0:-0"])
+      ])
     )
   end
 
   defp gain("peaks"), do: constant([])
-  defp gain(_format), do: map(millis(-30_000..30_000), &["gain:#{decimal(&1)}"])
+
+  # `-0` included on purpose: it renders as "0" and so shares a cache key with
+  # `gain:0`, which makes it the cheapest way for a property to catch a builder
+  # that treats the two differently.
+  defp gain(_format) do
+    one_of([
+      map(millis(-30_000..30_000), &["gain:#{decimal(&1)}"]),
+      constant(["gain:-0"]),
+      constant(["gain:0"])
+    ])
+  end
 
   defp norm("peaks"), do: constant([])
 

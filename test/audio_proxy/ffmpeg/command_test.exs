@@ -162,13 +162,56 @@ defmodule AudioProxy.Ffmpeg.CommandTest do
       assert argv("f:wav") |> Enum.take(-5) == ["-c:a", "pcm_s16le", "-f", "wav", "pipe:1"]
     end
 
-    test "m4a is fragmented, because stdout cannot be seeked back to" do
-      assert argv("f:m4a") |> Enum.take(-7) ==
-               ["-c:a", "aac", "-movflags", "frag_keyframe+empty_moov", "-f", "mp4", "pipe:1"]
+    # Not `frag_keyframe`: it cuts a fragment at each video keyframe, and an
+    # audio-only stream has none, so the whole render lands in one fragment
+    # flushed at EOF. Cutting on duration is what makes the stream a stream.
+    test "m4a fragments on time, because audio has no keyframes to cut on" do
+      assert argv("f:m4a") |> Enum.take(-9) ==
+               [
+                 "-c:a",
+                 "aac",
+                 "-movflags",
+                 "empty_moov+default_base_moof",
+                 "-frag_duration",
+                 "1000000",
+                 "-f",
+                 "mp4",
+                 "pipe:1"
+               ]
+
+      refute "frag_keyframe" in argv("f:m4a")
     end
 
     test "br is kbps, spelled so ffmpeg cannot read it as bits" do
       assert argv("br:96") |> Enum.take(-5) == ["-b:a", "96k", "-f", "mp3", "pipe:1"]
+    end
+
+    test "a signed zero renders as a plain zero everywhere" do
+      # `-0` parses to -0.0, renders as "0", and so shares a cache key with
+      # `0` — it must therefore share a command with it too.
+      assert argv("gain:-0") == argv("gain:0")
+      assert argv("t:0:10/fade:-0:-0") == argv("t:0:10/fade:0:0")
+      assert argv("t:-0") == argv("t:0")
+
+      # And the zero-guards still hold: a zero fade is no filter at all.
+      refute "-af" in argv("t:0:10/fade:-0:-0")
+    end
+
+    test "wav follows the source's bit depth when it is known" do
+      {:ok, opts} = Options.parse("f:wav")
+
+      assert Command.build(opts, @source, bit_depth: :bd24) |> Enum.take(-5) ==
+               ["-c:a", "pcm_s24le", "-f", "wav", "pipe:1"]
+
+      # An explicit `bd` still wins over the source.
+      {:ok, pinned} = Options.parse("f:wav/bd:16")
+
+      assert Command.build(pinned, @source, bit_depth: :bd24) |> Enum.take(-5) ==
+               ["-c:a", "pcm_s16le", "-f", "wav", "pipe:1"]
+
+      # Unknown source depth falls back, documented rather than silent.
+      assert Command.build(opts, @source) |> Enum.take(-5) ==
+               ["-c:a", "pcm_s16le", "-f", "wav", "pipe:1"]
     end
 
     test "q picks the quality knob the codec actually has" do

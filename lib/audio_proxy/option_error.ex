@@ -34,6 +34,7 @@ defmodule AudioProxy.OptionError do
           | :requires_peaks_format
           | :unsupported_for_peaks
           | :unsupported_for_format
+          | :out_of_range_for_format
           | :requires_bounded_trim
           | :sample_rate_above_lossy_cap
           | :fade_exceeds_duration
@@ -106,6 +107,9 @@ defmodule AudioProxy.OptionError do
 
       :unsupported_for_peaks ->
         "#{inspect(error.segment)} is not supported with f:peaks"
+
+      :out_of_range_for_format ->
+        "#{inspect(error.segment)} is out of range for #{inspect(error.related)}"
 
       :unsupported_for_format ->
         "#{inspect(error.segment)} is not supported with #{inspect(error.related)}"

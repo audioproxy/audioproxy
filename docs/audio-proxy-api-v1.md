@@ -51,12 +51,12 @@ No write endpoints in v1: variant write-back to S3 is a side effect of a GET ren
 
 | Option | Values | Notes |
 |---|---|---|
-| `f` | `mp3` `opus` `ogg` `aac` `m4a` `flac` `wav` `peaks` | `aac` = ADTS stream (streamable); `m4a` = fragmented MP4 (`-movflags frag_keyframe+empty_moov`); default `mp3` |
+| `f` | `mp3` `opus` `ogg` `aac` `m4a` `flac` `wav` `peaks` | `aac` = ADTS stream (streamable); `m4a` = fragmented MP4, cut on duration (`-movflags empty_moov+default_base_moof -frag_duration 1000000`) — `frag_keyframe` cuts at video keyframes, and audio has none, so it yields one fragment flushed at EOF; default `mp3` |
 | `br` | integer, kbps | CBR/ABR bitrate for lossy formats |
-| `q` | codec-specific number | VBR quality; mutually exclusive with `br` |
+| `q` | codec-specific number | VBR quality; mutually exclusive with `br`. The codec's own scale and range: mp3 0–9, ogg −1–10, aac/m4a 0.1–2, opus 0–10, flac 0–12 (the last two are `compression_level`). Out of range is a 422 — `f:flac/q:13` is rejected by ffmpeg itself |
 | `sr` | Hz (`44100`, `48000`, …) | Resample; default: source rate, capped at 48 kHz for lossy |
 | `ch` | `1` \| `2` | Downmix (defensible defaults: >2ch → 2) |
-| `bd` | `16` \| `24` \| `32f` | Bit depth, lossless formats only |
+| `bd` | `16` \| `24` \| `32f` | Bit depth, lossless formats only; default: the source's depth, as `sr` defaults to its rate. `32f` is wav-only (flac encodes integers) |
 
 ### 3.2 Time-domain / preview
 

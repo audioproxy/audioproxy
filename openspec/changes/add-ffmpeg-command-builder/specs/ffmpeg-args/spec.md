@@ -39,7 +39,16 @@ The system SHALL map each processing option to its ffmpeg form per API doc §3: 
 
 #### Scenario: Fragmented MP4
 - **WHEN** building `f:m4a`
-- **THEN** argv includes `-movflags` with `frag_keyframe+empty_moov` (streamable, no seekable output required)
+- **THEN** argv fragments on duration (`-movflags empty_moov+default_base_moof` with `-frag_duration`), so output is emitted progressively rather than flushed at EOF, and no seekable output is required
+- **AND** argv does NOT use `frag_keyframe`, which cuts at video keyframes and therefore never fires on an audio-only stream
+
+#### Scenario: Signed zero
+- **WHEN** an option is spelled `-0` (`gain:-0`, `fade:-0`, `t:-0`)
+- **THEN** it builds the identical argv to the same option spelled `0`, because the two normalize identically and so share a cache key
+
+#### Scenario: Lossless bit depth follows the source
+- **WHEN** building a lossless format with no `bd` and the source's bit depth is known
+- **THEN** argv encodes at the source's depth, as `sr` defaults to the source's rate; with the depth unknown it falls back to 16-bit
 
 #### Scenario: Filter order
 - **WHEN** `norm`, `gain`, `sr` and `fade` are all present

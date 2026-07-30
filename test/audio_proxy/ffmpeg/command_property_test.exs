@@ -26,10 +26,36 @@ defmodule AudioProxy.Ffmpeg.CommandPropertyTest do
     end
   end
 
+  # Two independent draws essentially never collide, so guarding on a collision
+  # would make this assertion almost never run — a property that reads like it
+  # tests the headline invariant while testing nothing. Instead, re-spell one
+  # variant (its own normalized form is a different string that must describe
+  # the same thing) and require the implication to hold on a pair that is
+  # guaranteed to collide.
   property "equal cache keys imply identical argv" do
-    check all(left <- option_segments(), right <- option_segments()) do
-      if CacheKey.derive(left, @source) == CacheKey.derive(right, @source) do
-        assert build(left) == build(right)
+    check all(segments <- option_segments()) do
+      assert {:ok, normalized} = Options.normalize_string(segments)
+
+      assert CacheKey.derive(segments, @source) == CacheKey.derive(normalized, @source)
+      assert build(segments) == build(normalized)
+    end
+  end
+
+  # The `-0` regression, as a property rather than an example: any spelling that
+  # normalizes to the same string must build the same command, and `-0` is the
+  # spelling that used to normalize alike and build differently.
+  property "a signed zero builds what an unsigned zero builds" do
+    check all(
+            segments <- option_segments(),
+            key <- member_of(["gain", "fade", "t"])
+          ) do
+      base = Enum.reject(segments, &String.starts_with?(&1, key <> ":"))
+      signed = base ++ ["#{key}:-0"]
+      unsigned = base ++ ["#{key}:0"]
+
+      with {:ok, _} <- Options.parse(signed), {:ok, _} <- Options.parse(unsigned) do
+        assert Options.normalize_string(signed) == Options.normalize_string(unsigned)
+        assert build(signed) == build(unsigned)
       end
     end
   end

@@ -127,8 +127,10 @@ AudioProxy.CacheKey.derive!("br:96/f:opus", "s3://masters/piece.wav")
 
 Decimals are accepted to three places (millisecond precision) and rejected
 beyond that rather than silently rounded, so float formatting can never
-destabilize a cache key. `dl` and `cb` values stay percent-encoded and are
-treated as opaque bytes.
+destabilize a cache key. `-0` is collapsed to `0` at parse time: it renders as
+`0`, so it cannot be told apart in a cache key, and letting it into the struct
+would let it be told apart in the ffmpeg arguments. `dl` and `cb` values stay
+percent-encoded and are treated as opaque bytes.
 
 ### Validation rules
 
@@ -139,6 +141,9 @@ Beyond each key's own value domain, these cross-key rules are enforced:
   quality scale (everything but `wav`).
 - `bd` requires a lossless format (`flac`, `wav`), and `bd:32f` requires
   `f:wav` — flac encodes integer samples only.
+- `q` must sit inside its codec's scale: mp3 0–9, ogg −1–10, aac/m4a 0.1–2,
+  opus 0–10, flac 0–12. `f:flac/q:13` is refused by ffmpeg itself
+  ("invalid compression level"), so refusing it here turns a 500 into a 422.
 - `pts` and `pk_fmt` require `f:peaks`.
 - `sr` is capped at 48 kHz for lossy formats.
 - A fade must fit inside the trimmed region when the trim is bounded, and a
@@ -217,13 +222,13 @@ stays data; `dl` and `cb` never reach the command at all.
 | `sr` | `aresample=<Hz>` | |
 | `ch` | `-ac 1` \| `-ac 2` | An output option, not a filter |
 | `br` | `-b:a <kbps>k` | Lossy formats only |
-| `q` | `-q:a` (mp3, ogg, aac, m4a) or `-compression_level` (opus, flac) | Whichever knob the codec has |
-| `bd` | `-c:a pcm_s16le`/`pcm_s24le`/`pcm_f32le` (wav), `-sample_fmt s16`/`s32` (flac) | |
+| `q` | `-q:a` (mp3, ogg, aac, m4a) or `-compression_level` (opus, flac) | Whichever knob the codec has, bounded to its range |
+| `bd` | `-c:a pcm_s16le`/`pcm_s24le`/`pcm_f32le` (wav), `-sample_fmt s16`/`s32` (flac) | Omitted, a lossless variant follows the source's depth |
 | `f:mp3` | `-c:a libmp3lame -f mp3` | |
 | `f:opus` | `-c:a libopus -f ogg` | |
 | `f:ogg` | `-c:a libvorbis -f ogg` | |
 | `f:aac` | `-c:a aac -f adts` | ADTS, because it streams |
-| `f:m4a` | `-c:a aac -movflags frag_keyframe+empty_moov -f mp4` | Fragmented: plain MP4 needs a seekable output to write its moov atom, and stdout is not one |
+| `f:m4a` | `-c:a aac -movflags empty_moov+default_base_moof -frag_duration 1000000 -f mp4` | Fragmented: plain MP4 needs a seekable output for its moov atom, and stdout is not one. Cut on duration, not `frag_keyframe` — see below |
 | `f:flac` | `-c:a flac -f flac` | |
 | `f:wav` | `-c:a pcm_s16le -f wav` | |
 | `f:peaks` | `-c:a pcm_s16le -f s16le` | Raw PCM for the peak reducer, not an encode |
@@ -231,6 +236,25 @@ stays data; `dl` and `cb` never reach the command at all.
 Every command writes to `pipe:1` behind an explicit `-f`, since stdout has no
 filename for ffmpeg to infer a muxer from, and every command runs with
 `-nostdin -hide_banner -loglevel error` so stderr carries diagnostics only.
+
+### Why `m4a` fragments on duration
+
+`-movflags frag_keyframe` starts a new fragment at each video keyframe. An
+audio-only stream has none, so `empty_moov` alone produces exactly **one**
+fragment, which ffmpeg flushes when the input ends — a valid file on a
+non-seekable pipe, but not a stream. Measured on a 20 s source fed at realtime:
+
+| movflags | first bytes | fragments | size |
+|---|---|---|---|
+| `frag_keyframe+empty_moov` | 19.7 s | 1 | 328218 |
+| `empty_moov+default_base_moof` + `-frag_duration 1000000` | 1.8 s | 20 | 327275 |
+| `empty_moov+frag_every_frame` | 0.2 s | 863 | 437684 |
+| mp3, for reference | 0.2 s | — | — |
+
+One-second fragments cost nothing measurable in size and make the stream a
+stream, so that is what the builder emits. The `:ffmpeg`-tagged suite counts
+the fragments and measures time-to-first-byte, so the regression cannot come
+back quietly.
 
 Filters run in the order `loudnorm → volume → aresample → afade`, and the
 order is load-bearing. `loudnorm` goes first because normalizing after a
@@ -259,11 +283,15 @@ fails a test rather than a request. Pinning an exact ffmpeg version — and
 whether to build it from source with a trimmed codec set — is decided in
 `add-docker-release`.
 
-One known gap: libopus encodes at 48/24/16/12/8 kHz only, so `sr:44100` with
+Two known gaps. libopus encodes at 48/24/16/12/8 kHz only, so `sr:44100` with
 `f:opus` is resampled to 48 kHz by ffmpeg's own negotiation and produces the
-same bytes as `f:opus` alone, under a different cache key. It costs a
-duplicate cache object, not a wrong render, and it is tracked with the other
-semantic no-ops above.
+same bytes as `f:opus` alone, under a different cache key. And with no `bd`,
+`f:wav` falls back to 16-bit whenever the source's depth is unknown — the
+builder takes it as an argument (`build/3`), but the probe that supplies it
+belongs to the `/info` slice, so until then a 24-bit master requested as
+`f:wav` comes back 16-bit unless `bd:24` is given. Both cost a duplicate cache
+object or a documented fallback, not a wrong render, and both are tracked with
+the semantic no-ops above.
 
 ## Stack
 
