@@ -4,12 +4,57 @@
 
 An imgproxy-style on-the-fly audio transcoding proxy.
 
-> **Status: early.** The URL layer is complete — signature verification, the
-> processing-options grammar, cache-key derivation, and the ffmpeg argument
-> builder — and `GET /health` answers. Nothing runs ffmpeg yet: rendering,
-> streaming and S3 access arrive in the slices tracked under
-> `openspec/changes/`. So you can build and verify a signed URL today, but not
-> yet get audio back from one.
+> **Status: early.** URL signing, the processing-options grammar and the
+> ffmpeg argument builder are done; rendering, streaming and S3 access are not.
+> Slices tracked under `openspec/changes/`.
+
+## What you can do with it
+
+Point it at a lossless master in S3 and ask for a variant by URL. Nothing is
+pre-rendered and nothing is configured server-side: the options in the path
+*are* the request, so a catalogue of one file can serve previews, waveforms,
+speech-ready mono and format-shifted downloads without you generating any of
+them in advance.
+
+The path is `/{signature}/{options}/{source}`. These examples use the literal
+`insecure` in place of a signature, which `AP_ALLOW_INSECURE=true` accepts in
+development; [Signing URLs](#signing-urls) covers the real thing.
+
+```bash
+BASE=localhost:4000
+SRC='plain/s3://masters/piece.wav'
+
+# A 30-second preview: Opus at 96 kbps, starting 12.5 s in,
+# half-second fade in and one-second fade out.
+curl "$BASE/insecure/f:opus/br:96/t:12.5:30/fade:0.5:1/$SRC"
+
+# Waveform peaks to draw a player UI — 800 min/max pairs as JSON.
+curl "$BASE/insecure/f:peaks/pts:800/$SRC"
+
+# Speech, small: 64 kbps mono MP3 at 22.05 kHz.
+curl "$BASE/insecure/f:mp3/br:64/ch:1/sr:22050/$SRC"
+
+# Normalised to −16 LUFS for podcast delivery.
+curl "$BASE/insecure/f:mp3/br:128/norm:ebu/$SRC"
+
+# Two minutes of 24-bit FLAC, offered to the browser as a download.
+curl -OJ "$BASE/insecure/f:flac/bd:24/t:60:120/dl:excerpt.flac/$SRC"
+
+# Mono 16 kHz WAV, the shape a speech-to-text pipeline wants.
+curl "$BASE/insecure/f:wav/ch:1/sr:16000/$SRC"
+
+# What is this file? (ffprobe metadata, as JSON)
+curl "$BASE/insecure/info/$SRC"
+```
+
+Each URL describes its output completely, so the same URL always means the
+same bytes. The first request for a variant renders it and streams it while it
+encodes; later requests are served from the variant bucket with `Range` support.
+
+> **These render nothing yet.** Today the URL layer is real — bad options come
+> back as `422` naming the offending segment, bad signatures as `403` — but the
+> render path is not wired up. The examples show the API being built toward, and
+> each option string above is checked against the parser in the test suite.
 
 ## Design
 
