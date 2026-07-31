@@ -40,7 +40,16 @@ Stay with the stdlib and core/OTP tooling as far as possible. GenStage is accept
   - Devcontainer image carries Elixir/OTP + ffmpeg/ffprobe (mirrors runtime deps); `postCreateCommand` is `bin/agent-setup`. Use `devcontainer up` / `devcontainer exec`, not raw `docker compose`.
 - One OpenSpec change per worktree; merge back when its tasks are checked off and tests are green.
 - Toolchain pin lives in `.tool-versions`, Elixir/OTP as a matched pair. It is the single source of truth: mise reads it locally, `erlef/setup-beam` reads it in CI. Bumping a version means editing that one file (and the devcontainer/release image tags by hand).
-- Keep the README current: every slice that changes behavior, options, config, or workflow updates it in the same change.
+- **Documentation has a shape; keep writing to it.** Every slice that changes behavior, options, config, or workflow updates the docs in the same change — but *which* doc is not a free choice:
+
+  | File | Holds | Test |
+  |---|---|---|
+  | `README.md` | Usage only. What the proxy is, how to sign a URL, every option and its validation rules, configuration, how to run it. | Would someone *operating* this need it? |
+  | `docs/audio-proxy-api-v1.md` | The source of truth for URL grammar, options, cache-key rules, headers, error codes. | Is this the contract? |
+  | `docs/development.md` | Toolchain, worktrees and devcontainers, the suite and its tags, CI. | Is this about working *on* the repo? |
+  | `docs/ffmpeg-arguments.md` | How options become ffmpeg args: filter order, per-format flags, measured trade-offs, known gaps. | Is this how the sausage is made? |
+
+  The README is the one with a hard rule: **no implementation detail.** A reader arrives wanting to render audio, not to learn how the filtergraph is assembled. Internals that are genuinely worth writing down — and most are — go to `docs/` and get linked from the README's documentation table, not inlined into it. When a section starts explaining *how* rather than *how to*, it has outgrown the README.
 
 ## Architecture decisions
 
