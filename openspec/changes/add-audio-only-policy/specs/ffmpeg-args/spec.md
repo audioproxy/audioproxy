@@ -8,11 +8,19 @@ The command builder SHALL include `-vn`, `-sn`, and `-dn` in every render argume
 - **THEN** `-vn`, `-sn`, and `-dn` are present in each
 
 ### Requirement: Input protocol whitelist in every argv
-The command builder SHALL include `-protocol_whitelist` with the configured audio-input protocol set (default `https,tls,tcp`) before the input in every argument vector.
+The command builder SHALL include `-protocol_whitelist` before the input in every argument vector, with the minimal set for the resolved source type: `file` for local sources; `https,tls,tcp` for HTTPS sources (plus `http` only when a plaintext dev endpoint is configured).
 
 #### Scenario: Whitelist precedes input
 - **WHEN** any argv is built
-- **THEN** `-protocol_whitelist` appears as an input option (before `-i`) with the configured set
+- **THEN** `-protocol_whitelist` appears as an input option (before `-i`) with the source type's set
+
+#### Scenario: Local sources cannot reach the network
+- **WHEN** argv is built for a local source
+- **THEN** the whitelist is exactly `file` — no network protocol is available to the invocation
+
+#### Scenario: Remote sources cannot reach the filesystem
+- **WHEN** argv is built for an HTTPS source
+- **THEN** the whitelist contains no `file` entry
 
 ### Requirement: Flag allowlist is introspectable
 The command builder SHALL expose the complete set of flags it can ever emit, so the argv-allowlist property test compares against a published set rather than a hardcoded copy.

@@ -7,12 +7,12 @@
 ## 2. Endpoint
 
 - [ ] 2.1 `info` as exclusive pseudo-option in ParseOptions (422 with any other option)
-- [ ] 2.2 Info action: resolve → HEAD (404/size) → presign → probe → JSON response; ETag derivation + `If-None-Match`/304; Cache-Control
+- [ ] 2.2 Info action: resolve → `Source.Store.stat` (404/size) → `Source.Store.ffmpeg_input` → probe → JSON response; ETag derivation (source identity + stat etag material) + `If-None-Match`/304; Cache-Control
 - [ ] 2.3 Error mapping: unprobeable → 415; probe timeout → 504
 
 ## 3. Integration (`@tag :ffmpeg`)
 
-- [ ] 3.1 Generated fixtures (incl. tagged mp3) through fake S3: full contract assertions per spec scenarios; 304 revalidation; text file → 415
+- [ ] 3.1 Generated fixtures (incl. tagged mp3) from the local fixture root: full contract assertions per spec scenarios; 304 revalidation; text file → 415; S3-source case once `add-s3-client` has landed
 
 ## 4. Docs
 

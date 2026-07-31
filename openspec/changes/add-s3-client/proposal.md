@@ -1,12 +1,13 @@
 ## Why
 
-Three S3 interactions power the whole system: presigned GET URLs (ffmpeg input + HIT redirects), object existence checks (cache HIT detection), and streaming PUT (variant write-back). CLAUDE.md leaves the client choice open (`ex_aws_s3` vs minimal); this slice decides it and builds the layer.
+Three S3 interactions power the production deployment: presigned GET URLs (ffmpeg input + HIT redirects), object existence checks (cache HIT detection), and streaming PUT (variant write-back). CLAUDE.md leaves the client choice open (`ex_aws_s3` vs minimal); this slice decides it and builds the layer. Positioned post-MVP: the MVP renders from local files (`add-local-files-source`), so S3 lands together with its main consumer, the variant cache.
 
 ## What Changes
 
 - Decide the client approach (design.md): hand-rolled SigV4 with stdlib `:crypto` + a minimal HTTP client, keeping the dependency policy intact.
 - Implement SigV4 presigned GET URL generation (configurable expiry).
 - Implement HEAD (existence + size + ETag) and streaming multipart PUT.
+- Implement the S3 backend of the `Source.Store` seam (introduced by `add-local-files-source`): `stat/1` via HEAD, `ffmpeg_input/1` via presigned GET — the render/info flows gain S3 sources with no changes of their own.
 - Credentials from the standard AWS env vars (+ optional endpoint override for MinIO/localstack-style testing).
 
 ## Capabilities
@@ -17,11 +18,11 @@ Three S3 interactions power the whole system: presigned GET URLs (ffmpeg input +
 
 ### Modified Capabilities
 
-<!-- none -->
+<!-- none — the storage seam contract is defined in `local-files`; this adds a backend behind it -->
 
 ## Impact
 
-- New: `lib/audio_proxy/s3/{sigv4,client}.ex`.
+- New: `lib/audio_proxy/s3/{sigv4,client}.ex`, S3 backend in the source store.
 - New config: standard `AWS_*` vars, `AP_S3_ENDPOINT` (test/dev override), presign TTL.
-- Depends on: `init-project-scaffold`.
-- Blocks: `add-render-endpoint` (presigned input), `add-variant-cache` (HEAD/PUT/redirect), `add-info-endpoint`.
+- Depends on: `add-local-files-source` (the seam it implements a backend for).
+- Blocks: `add-variant-cache` (HEAD/PUT/redirect). Position: first post-MVP slice, immediately before `add-variant-cache`.

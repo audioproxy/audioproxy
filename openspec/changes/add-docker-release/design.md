@@ -16,7 +16,7 @@ CLAUDE.md fixes the shape: multi-stage, `mix release` + bundled ERTS, `apk add f
 - **PID 1 = tini** (`apk add tini`, `ENTRYPOINT ["/sbin/tini","--"]`): the release's beam handles SIGTERM, tini reaps any orphaned-zombie edge cases — belt and braces for a subprocess-heavy app.
 - **`config/runtime.exs` is the only config entry point** — same `AudioProxy.Config` boot validation runs in release and dev; container dies loudly on bad config.
 - **Healthcheck** via `wget -qO- localhost:$PORT/health` (busybox wget, no curl needed).
-- **CI smoke script in Ruby** (user convention): build image → run with `AP_ALLOW_INSECURE=true` + fake-S3 sibling container (or MinIO) → assert health, render a lavfi-generated WAV to mp3, compare ffprobe-reported duration; then run `mix test --only ffmpeg` inside the build-stage image against the runtime image's ffmpeg via a shared volume — ensures argv-contract tests see the shipped binary.
+- **CI smoke script in Ruby** (user convention): build image → run with `AP_ALLOW_INSECURE=true` and a mounted fixture volume (`AP_LOCAL_ROOT=/fixtures` — the MVP source type; no fake-S3 sibling container needed) → assert health, render a lavfi-generated WAV to mp3, compare ffprobe-reported duration; then run `mix test --only ffmpeg` inside the build-stage image against the runtime image's ffmpeg via a shared volume — ensures argv-contract tests see the shipped binary. (S3-sourced smoke joins post-MVP with `add-s3-client`.)
 
 ## Risks / Trade-offs
 

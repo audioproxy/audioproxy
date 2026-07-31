@@ -12,12 +12,12 @@ Integration slice: no new domain logic, but the wiring decisions (plug order, st
 
 ## Decisions
 
-- **Plug order**: VerifySignature → ParseOptions → ResolveSource → (endpoint action: size check → presign → subscribe → stream). Cheapest checks first; everything user-derived validated before any S3 call.
-- **Size check via S3 HEAD** (also yields not-found early) before presigning — one control-plane round trip buys 404/413 before a subprocess ever starts. HTTP(S) sources: HEAD with fallback to accepting unknown size (enforced post-hoc by render byte cap).
+- **Plug order**: VerifySignature → ParseOptions → ResolveSource → (endpoint action: source stat/size check → ffmpeg input from the store → subscribe → stream). Cheapest checks first; everything user-derived validated before any storage/filesystem call.
+- **Size/existence via `Source.Store.stat/1`** before handing ffmpeg its input — buys 404/413 before a subprocess ever starts. Local sources: `File.stat` (MVP). S3 sources (post-MVP): HEAD behind the same seam. HTTP(S) sources: HEAD with fallback to accepting unknown size (enforced post-hoc by render byte cap).
 - **Streaming loop** in the endpoint process: receive coordinator messages, `chunk(conn, data)`; `{:error, closed}` from `chunk/2` = disconnect → unsubscribe + exit. A `receive`-loop plug action (no GenServer) keeps conn ownership simple.
 - **Timeout of first chunk** bounded by semaphore queue timeout + render timeout — the loop itself uses `AP_RENDER_TIMEOUT` as its receive deadline and maps expiry to 504 (pre-first-byte) or abnormal termination (mid-stream).
 - **Errors as `ErrorJSON.render(conn, status, reason)`** — single mapping table from structured errors (option/source/render classes) to §5 codes; tested exhaustively at the unit level, spot-checked end-to-end.
-- **Test harness**: full-stack tests boot the app on an ephemeral port with fake S3 (Bandit stub from the S3 slice) + real ffmpeg; raw-socket client (`:gen_tcp`) for disconnect and chunk-timing assertions where `Req`-style clients are too high-level. (Test-only HTTP client dep stays out; `:httpc` + `:gen_tcp` suffice.)
+- **Test harness**: full-stack tests boot the app on an ephemeral port with a local fixture directory as `AP_LOCAL_ROOT` + real ffmpeg — no network stub needed for the MVP path; raw-socket client (`:gen_tcp`) for disconnect and chunk-timing assertions where `Req`-style clients are too high-level. (Test-only HTTP client dep stays out; `:httpc` + `:gen_tcp` suffice. S3-source coverage joins via the fake-S3 stub when `add-s3-client` lands.)
 
 ## Risks / Trade-offs
 
