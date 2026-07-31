@@ -8,8 +8,10 @@ An imgproxy-style on-the-fly audio transcoding proxy.
 > supervision tree, `AudioProxy.Config`, URL signature generation/verification
 > (`AudioProxy.Signature` + `AudioProxy.Plugs.VerifySignature`), the processing
 > options grammar and cache-key derivation (`AudioProxy.Options` +
-> `AudioProxy.CacheKey`), and the unsigned `GET /health` endpoint. Rendering and
-> S3 access arrive in the slices tracked under `openspec/changes/`.
+> `AudioProxy.CacheKey`), the ffmpeg argument builder
+> (`AudioProxy.Ffmpeg.Command`), and the unsigned `GET /health` endpoint.
+> Nothing runs ffmpeg yet: rendering, streaming and S3 access arrive in the
+> slices tracked under `openspec/changes/`.
 
 ## Design
 
@@ -125,23 +127,39 @@ AudioProxy.CacheKey.derive!("br:96/f:opus", "s3://masters/piece.wav")
 
 Decimals are accepted to three places (millisecond precision) and rejected
 beyond that rather than silently rounded, so float formatting can never
-destabilize a cache key. `dl` and `cb` values stay percent-encoded and are
-treated as opaque bytes.
+destabilize a cache key. `-0` is collapsed to `0` at parse time: it renders as
+`0`, so it cannot be told apart in a cache key, and letting it into the struct
+would let it be told apart in the ffmpeg arguments. `dl` and `cb` values stay
+percent-encoded and are treated as opaque bytes.
 
 ### Validation rules
 
-Beyond each key's own value domain, five cross-key rules are enforced:
+Beyond each key's own value domain, these cross-key rules are enforced:
 
 - `br` and `q` are mutually exclusive.
-- `bd` requires a lossless format (`flac`, `wav`).
+- `br` requires a lossy format; `q` requires a format whose encoder has a
+  quality scale (everything but `wav`).
+- `bd` requires a lossless format (`flac`, `wav`), and `bd:32f` requires
+  `f:wav` — flac encodes integer samples only.
+- `q` must sit inside its codec's scale: mp3 0–9, ogg −1–10, aac/m4a 0.1–2,
+  opus 0–10, flac 0–12. `f:flac/q:13` is refused by ffmpeg itself
+  ("invalid compression level"), so refusing it here turns a 500 into a 422.
 - `pts` and `pk_fmt` require `f:peaks`.
 - `sr` is capped at 48 kHz for lossy formats.
-- A fade must fit inside the trimmed region when the trim is bounded.
+- A fade must fit inside the trimmed region when the trim is bounded, and a
+  fade-out requires a bounded trim at all: its start is `duration - out`, and
+  without a duration there is nothing to count back from. A fade-in needs no
+  trim, since it starts at zero.
 
-Peaks add a sixth rule: `f:peaks` refuses `br`, `q`, `sr`, `bd`, `gain` and
-`norm`. Peaks are computed from the decoded source and respect only `t` and
-`ch` (§3.3), so accepting an option that cannot change the output would hand
-byte-identical peaks two different cache keys. `f:peaks/br:96` is a 422.
+Peaks add one more: `f:peaks` refuses `br`, `q`, `sr`, `bd`, `gain` and
+`norm`. Peaks are computed from the decoded source and respect only `t`, `ch`
+and `fade` (§3.3), so accepting an option that cannot change the output would
+hand byte-identical peaks two different cache keys. `f:peaks/br:96` is a 422.
+
+The rules about `br`, `q` and `bd:32f` come from the same principle applied
+one layer down: ffmpeg accepts `-b:a` on a flac encode and ignores it, so
+`f:flac/br:320` would be two cache keys for one file. Rejecting is cheaper
+than storing the duplicate.
 
 Unknown keys, repeated keys, empty segments, and valueless segments are
 rejected too — there is no last-write-wins and no silent ignoring, because
@@ -172,6 +190,108 @@ identity renders but keep their own keys, so those spellings cost duplicate
 cache objects. Collapsing them is tracked as follow-up work. The property suite
 (`test/audio_proxy/options_property_test.exs`) holds this line: normalization
 is idempotent, order-insensitive, and always re-parses.
+
+## ffmpeg arguments
+
+`AudioProxy.Ffmpeg.Command.build/2` turns a validated options struct plus an
+input URL into an argv list. It is a pure function and it is the last leg of
+the round-trip: equal cache keys imply byte-identical commands, which is what
+makes a cache hit a claim about bytes rather than about a URL.
+
+```elixir
+{:ok, opts} = AudioProxy.Options.parse("f:opus/br:96/t:12.5:30/fade:0.5:1")
+AudioProxy.Ffmpeg.Command.build(opts, "https://masters.example/piece.wav")
+# => ["-nostdin", "-hide_banner", "-loglevel", "error",
+#     "-ss", "12.5", "-t", "30", "-i", "https://masters.example/piece.wav",
+#     "-vn", "-af", "afade=t=in:st=0:d=0.5,afade=t=out:st=29:d=1",
+#     "-c:a", "libopus", "-b:a", "96k", "-f", "ogg", "pipe:1"]
+```
+
+There is no shell anywhere in this path. The argv is a flat list of complete
+arguments, so a source URL containing `;`, `$(…)` or spaces is one element and
+stays data; `dl` and `cb` never reach the command at all.
+
+### Option → ffmpeg mapping
+
+| Option | ffmpeg | Notes |
+|---|---|---|
+| `t:START[:DUR]` | `-ss START [-t DUR]` **before** `-i` | Input seeking, so ffmpeg's HTTP client issues a Range request and never reads the skipped bytes. Everything downstream sees the trimmed region starting at t=0 |
+| `fade:IN[:OUT]` | `afade=t=in:st=0:d=IN`, `afade=t=out:st=DUR-OUT:d=OUT` | Inside the trimmed region, by construction |
+| `gain` | `volume=<dB>dB` | |
+| `norm:ebu:I:TP:LRA` | `loudnorm=I=…:TP=…:LRA=…` | Single-pass (§3.2) |
+| `sr` | `aresample=<Hz>` | |
+| `ch` | `-ac 1` \| `-ac 2` | An output option, not a filter |
+| `br` | `-b:a <kbps>k` | Lossy formats only |
+| `q` | `-q:a` (mp3, ogg, aac, m4a) or `-compression_level` (opus, flac) | Whichever knob the codec has, bounded to its range |
+| `bd` | `-c:a pcm_s16le`/`pcm_s24le`/`pcm_f32le` (wav), `-sample_fmt s16`/`s32` (flac) | Omitted, a lossless variant follows the source's depth |
+| `f:mp3` | `-c:a libmp3lame -f mp3` | |
+| `f:opus` | `-c:a libopus -f ogg` | |
+| `f:ogg` | `-c:a libvorbis -f ogg` | |
+| `f:aac` | `-c:a aac -f adts` | ADTS, because it streams |
+| `f:m4a` | `-c:a aac -movflags empty_moov+default_base_moof -frag_duration 1000000 -f mp4` | Fragmented: plain MP4 needs a seekable output for its moov atom, and stdout is not one. Cut on duration, not `frag_keyframe` — see below |
+| `f:flac` | `-c:a flac -f flac` | |
+| `f:wav` | `-c:a pcm_s16le -f wav` | |
+| `f:peaks` | `-c:a pcm_s16le -f s16le` | Raw PCM for the peak reducer, not an encode |
+
+Every command writes to `pipe:1` behind an explicit `-f`, since stdout has no
+filename for ffmpeg to infer a muxer from, and every command runs with
+`-nostdin -hide_banner -loglevel error` so stderr carries diagnostics only.
+
+### Why `m4a` fragments on duration
+
+`-movflags frag_keyframe` starts a new fragment at each video keyframe. An
+audio-only stream has none, so `empty_moov` alone produces exactly **one**
+fragment, which ffmpeg flushes when the input ends — a valid file on a
+non-seekable pipe, but not a stream. Measured on a 20 s source fed at realtime:
+
+| movflags | first bytes | fragments | size |
+|---|---|---|---|
+| `frag_keyframe+empty_moov` | 19.7 s | 1 | 328218 |
+| `empty_moov+default_base_moof` + `-frag_duration 1000000` | 1.8 s | 20 | 327275 |
+| `empty_moov+frag_every_frame` | 0.2 s | 863 | 437684 |
+| mp3, for reference | 0.2 s | — | — |
+
+One-second fragments cost nothing measurable in size and make the stream a
+stream, so that is what the builder emits. The `:ffmpeg`-tagged suite counts
+the fragments and measures time-to-first-byte, so the regression cannot come
+back quietly.
+
+Filters run in the order `loudnorm → volume → aresample → afade`, and the
+order is load-bearing. `loudnorm` goes first because normalizing after a
+static `gain` would undo it; `aresample` follows it because single-pass
+`loudnorm` resamples its output to 192 kHz; `afade` goes last so the fade
+shape survives the stages above it.
+
+That 192 kHz has one visible consequence: **`norm` without an explicit `sr`
+appends `aresample=48000`.** Without it every normalized render would be a
+192 kHz file. 48 kHz is the API's own lossy ceiling (§3.1) and universally
+supported, but it does mean `norm` on a 96 kHz lossless master downsamples.
+Choosing better would need the source's real sample rate, which the argument
+builder deliberately does not know — it is a pure function of the options, and
+that purity is what the round-trip property rests on. Pass `sr` explicitly to
+override.
+
+### ffmpeg version
+
+The argv is a contract with a specific ffmpeg, not with "ffmpeg" in the
+abstract: encoder names, muxer names and filter option spellings all drift
+between versions. The devcontainer and the release image therefore install
+ffmpeg from the same distro packaging, and the `:ffmpeg`-tagged tests
+(`test/audio_proxy/ffmpeg/command_ffmpeg_test.exs`) run every format and every
+filter through the real binary, so a codec name that a build does not carry
+fails a test rather than a request. Pinning an exact ffmpeg version — and
+whether to build it from source with a trimmed codec set — is decided in
+`add-docker-release`.
+
+Two known gaps. libopus encodes at 48/24/16/12/8 kHz only, so `sr:44100` with
+`f:opus` is resampled to 48 kHz by ffmpeg's own negotiation and produces the
+same bytes as `f:opus` alone, under a different cache key. And with no `bd`,
+`f:wav` falls back to 16-bit whenever the source's depth is unknown — the
+builder takes it as an argument (`build/3`), but the probe that supplies it
+belongs to the `/info` slice, so until then a 24-bit master requested as
+`f:wav` comes back 16-bit unless `bd:24` is given. Both cost a duplicate cache
+object or a documented fallback, not a wrong render, and both are tracked with
+the semantic no-ops above.
 
 ## Stack
 
@@ -251,7 +371,10 @@ drives the router through `Plug.Test` and binds no socket, so several copies can
 run concurrently.
 
 Tests tagged `:ffmpeg` shell out to the real binaries and are excluded by
-default. Run them explicitly, on a machine that has ffmpeg installed:
+default — they render every format and every filter through the actual
+encoder, which is the only way an assumption about a codec name gets checked.
+Run them explicitly, on a machine that has ffmpeg installed (the devcontainer
+does):
 
 ```bash
 mix test --only ffmpeg
@@ -271,6 +394,12 @@ which is a test-only dependency. Every processing option must round-trip
 (parse → normalize → cache key → identical ffmpeg args), so option handling is
 property-tested rather than only example-tested.
 
+The generators live in `AudioProxy.OptionsGenerators` and are shared by the
+options and ffmpeg-argv suites — both rest on the same round-trip, so they
+must probe the same grammar. They are built format-first, so every cross-key
+rule holds by construction: a property that has to filter its own inputs has
+stopped testing what it claims to test.
+
 Tests that need config other than the defaults use
 `AudioProxy.ConfigHelper.put_config/1`, which swaps `:persistent_term` and
 restores it on exit; such tests must set `async: false`. Prefer
@@ -285,7 +414,7 @@ parsing or validation.
 | Job | Runs | Notes |
 |---|---|---|
 | `test` | `mix format --check-formatted`, `mix compile --warnings-as-errors`, `mix test --include integration` | No external binaries — the untagged + `:integration` suite must pass on a bare runner |
-| `test-ffmpeg` | `mix test --only ffmpeg` | Installs ffmpeg first; no-ops green until the first `:ffmpeg`-tagged test exists |
+| `test-ffmpeg` | `mix test --only ffmpeg` | Installs ffmpeg first; renders every format and filter through the real binary |
 
 Compilation runs with warnings as errors because the compiler's set-theoretic
 type checker reports through warnings — that flag is what makes the type gate a

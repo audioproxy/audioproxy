@@ -18,10 +18,13 @@ Every render is an ffmpeg invocation whose arguments must be a pure, injection-s
 
 ### Modified Capabilities
 
-<!-- none -->
+- `processing-options`: reject the encoding and fade combinations that no ffmpeg invocation can honour.
 
 ## Impact
 
 - New: `lib/audio_proxy/ffmpeg/command.ex`.
+- Modified: `AudioProxy.Options` gains four rules the argv table exposed (`br` needs a lossy format, `q` a format with a quality scale, `bd:32f` needs `f:wav`, a fade-out needs a bounded trim), plus a public `render_number/1` so options strings and filter values render identically.
+- Modified: `AudioProxy.OptionError` gains three reasons for those rules.
+- Test generators lifted into `test/support/options_generators.ex`, shared by both property suites.
 - Depends on: `add-options-parser`.
 - Blocks: `add-ffmpeg-port-pipeline` (consumes argv), `add-peaks-format` (PCM extraction args).

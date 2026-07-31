@@ -30,8 +30,12 @@ defmodule AudioProxy.OptionError do
           | :control_character
           | :mutually_exclusive
           | :requires_lossless_format
+          | :requires_lossy_format
           | :requires_peaks_format
           | :unsupported_for_peaks
+          | :unsupported_for_format
+          | :out_of_range_for_format
+          | :requires_bounded_trim
           | :sample_rate_above_lossy_cap
           | :fade_exceeds_duration
 
@@ -59,22 +63,65 @@ defmodule AudioProxy.OptionError do
   @spec message(t()) :: String.t()
   def message(%__MODULE__{} = error) do
     case error.reason do
-      :empty_segment -> "empty options segment"
-      :missing_value -> "segment #{inspect(error.segment)} has no value"
-      :unknown_key -> "unknown option #{inspect(error.segment)}"
-      :duplicate_key -> "option #{inspect(error.segment)} given more than once"
-      :invalid_integer -> "#{inspect(error.segment)} expects an integer"
-      :invalid_number -> "#{inspect(error.segment)} expects a number"
-      :excessive_precision -> "#{inspect(error.segment)} exceeds millisecond precision"
-      :invalid_value -> "#{inspect(error.segment)} is not a supported value"
-      :out_of_range -> "#{inspect(error.segment)} is out of range"
-      :control_character -> "#{inspect(error.segment)} contains a control character"
-      :mutually_exclusive -> "#{inspect(error.segment)} conflicts with #{inspect(error.related)}"
-      :requires_lossless_format -> "#{inspect(error.segment)} requires a lossless format"
-      :requires_peaks_format -> "#{inspect(error.segment)} requires f:peaks"
-      :unsupported_for_peaks -> "#{inspect(error.segment)} is not supported with f:peaks"
-      :sample_rate_above_lossy_cap -> "#{inspect(error.segment)} exceeds the 48 kHz lossy cap"
-      :fade_exceeds_duration -> "#{inspect(error.segment)} is longer than the trimmed region"
+      :empty_segment ->
+        "empty options segment"
+
+      :missing_value ->
+        "segment #{inspect(error.segment)} has no value"
+
+      :unknown_key ->
+        "unknown option #{inspect(error.segment)}"
+
+      :duplicate_key ->
+        "option #{inspect(error.segment)} given more than once"
+
+      :invalid_integer ->
+        "#{inspect(error.segment)} expects an integer"
+
+      :invalid_number ->
+        "#{inspect(error.segment)} expects a number"
+
+      :excessive_precision ->
+        "#{inspect(error.segment)} exceeds millisecond precision"
+
+      :invalid_value ->
+        "#{inspect(error.segment)} is not a supported value"
+
+      :out_of_range ->
+        "#{inspect(error.segment)} is out of range"
+
+      :control_character ->
+        "#{inspect(error.segment)} contains a control character"
+
+      :mutually_exclusive ->
+        "#{inspect(error.segment)} conflicts with #{inspect(error.related)}"
+
+      :requires_lossless_format ->
+        "#{inspect(error.segment)} requires a lossless format"
+
+      :requires_lossy_format ->
+        "#{inspect(error.segment)} requires a lossy format"
+
+      :requires_peaks_format ->
+        "#{inspect(error.segment)} requires f:peaks"
+
+      :unsupported_for_peaks ->
+        "#{inspect(error.segment)} is not supported with f:peaks"
+
+      :out_of_range_for_format ->
+        "#{inspect(error.segment)} is out of range for #{inspect(error.related)}"
+
+      :unsupported_for_format ->
+        "#{inspect(error.segment)} is not supported with #{inspect(error.related)}"
+
+      :requires_bounded_trim ->
+        "#{inspect(error.segment)} requires a trim with a duration"
+
+      :sample_rate_above_lossy_cap ->
+        "#{inspect(error.segment)} exceeds the 48 kHz lossy cap"
+
+      :fade_exceeds_duration ->
+        "#{inspect(error.segment)} is longer than the trimmed region"
     end
   end
 end
