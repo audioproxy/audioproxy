@@ -4,14 +4,57 @@
 
 An imgproxy-style on-the-fly audio transcoding proxy.
 
-> **Status: early.** What exists today is the application skeleton — OTP app,
-> supervision tree, `AudioProxy.Config`, URL signature generation/verification
-> (`AudioProxy.Signature` + `AudioProxy.Plugs.VerifySignature`), the processing
-> options grammar and cache-key derivation (`AudioProxy.Options` +
-> `AudioProxy.CacheKey`), the ffmpeg argument builder
-> (`AudioProxy.Ffmpeg.Command`), and the unsigned `GET /health` endpoint.
-> Nothing runs ffmpeg yet: rendering, streaming and S3 access arrive in the
-> slices tracked under `openspec/changes/`.
+> **Status: early.** URL signing, the processing-options grammar and the
+> ffmpeg argument builder are done; rendering, streaming and S3 access are not.
+> Slices tracked under `openspec/changes/`.
+
+## What you can do with it
+
+Point it at a lossless master in S3 and ask for a variant by URL. Nothing is
+pre-rendered and nothing is configured server-side: the options in the path
+*are* the request, so a catalogue of one file can serve previews, waveforms,
+speech-ready mono and format-shifted downloads without you generating any of
+them in advance.
+
+The path is `/{signature}/{options}/{source}`. These examples use the literal
+`insecure` in place of a signature, which `AP_ALLOW_INSECURE=true` accepts in
+development; [Signing URLs](#signing-urls) covers the real thing.
+
+```bash
+BASE=localhost:4000
+SRC='plain/s3://masters/piece.wav'
+
+# A 30-second preview: Opus at 96 kbps, starting 12.5 s in,
+# half-second fade in and one-second fade out.
+curl "$BASE/insecure/f:opus/br:96/t:12.5:30/fade:0.5:1/$SRC"
+
+# Waveform peaks to draw a player UI — 800 min/max pairs as JSON.
+curl "$BASE/insecure/f:peaks/pts:800/$SRC"
+
+# Speech, small: 64 kbps mono MP3 at 22.05 kHz.
+curl "$BASE/insecure/f:mp3/br:64/ch:1/sr:22050/$SRC"
+
+# Normalised to −16 LUFS for podcast delivery.
+curl "$BASE/insecure/f:mp3/br:128/norm:ebu/$SRC"
+
+# Two minutes of 24-bit FLAC, offered to the browser as a download.
+curl -OJ "$BASE/insecure/f:flac/bd:24/t:60:120/dl:excerpt.flac/$SRC"
+
+# Mono 16 kHz WAV, the shape a speech-to-text pipeline wants.
+curl "$BASE/insecure/f:wav/ch:1/sr:16000/$SRC"
+
+# What is this file? (ffprobe metadata, as JSON)
+curl "$BASE/insecure/info/$SRC"
+```
+
+Each URL describes its output completely, so the same URL always means the
+same bytes. The first request for a variant renders it and streams it while it
+encodes; later requests are served from the variant bucket with `Range` support.
+
+> **These render nothing yet.** Today the URL layer is real — bad options come
+> back as `422` naming the offending segment, bad signatures as `403` — but the
+> render path is not wired up. The examples show the API being built toward, and
+> each option string above is checked against the parser in the test suite.
 
 ## Design
 
@@ -31,8 +74,23 @@ GET /{signature}/{options}/{source}
 
 **[`docs/audio-proxy-api-v1.md`](docs/audio-proxy-api-v1.md) is the source of
 truth** for the URL grammar, processing options, cache-key rules, response
-headers, and error codes. Read it before touching URL parsing or response
-semantics.
+headers, and error codes. What follows here is the working subset; reach for
+the spec when you need the exact contract.
+
+## Running it
+
+```bash
+mise install          # Elixir and Erlang/OTP, pinned in .tool-versions
+mix deps.get
+PORT=4000 mix run --no-halt
+
+curl -s localhost:4000/health
+# {"status":"ok","version":"0.1.0"}
+```
+
+Rendering needs `ffmpeg` and `ffprobe` on `PATH`; the release image will bundle
+them. For a development container that already has them, and for the test
+suite, see [docs/development.md](docs/development.md).
 
 ## Signing URLs
 
@@ -191,146 +249,6 @@ cache objects. Collapsing them is tracked as follow-up work. The property suite
 (`test/audio_proxy/options_property_test.exs`) holds this line: normalization
 is idempotent, order-insensitive, and always re-parses.
 
-## ffmpeg arguments
-
-`AudioProxy.Ffmpeg.Command.build/2` turns a validated options struct plus an
-input URL into an argv list. It is a pure function and it is the last leg of
-the round-trip: equal cache keys imply byte-identical commands, which is what
-makes a cache hit a claim about bytes rather than about a URL.
-
-```elixir
-{:ok, opts} = AudioProxy.Options.parse("f:opus/br:96/t:12.5:30/fade:0.5:1")
-AudioProxy.Ffmpeg.Command.build(opts, "https://masters.example/piece.wav")
-# => ["-nostdin", "-hide_banner", "-loglevel", "error",
-#     "-ss", "12.5", "-t", "30", "-i", "https://masters.example/piece.wav",
-#     "-vn", "-af", "afade=t=in:st=0:d=0.5,afade=t=out:st=29:d=1",
-#     "-c:a", "libopus", "-b:a", "96k", "-f", "ogg", "pipe:1"]
-```
-
-There is no shell anywhere in this path. The argv is a flat list of complete
-arguments, so a source URL containing `;`, `$(…)` or spaces is one element and
-stays data; `dl` and `cb` never reach the command at all.
-
-### Option → ffmpeg mapping
-
-| Option | ffmpeg | Notes |
-|---|---|---|
-| `t:START[:DUR]` | `-ss START [-t DUR]` **before** `-i` | Input seeking, so ffmpeg's HTTP client issues a Range request and never reads the skipped bytes. Everything downstream sees the trimmed region starting at t=0 |
-| `fade:IN[:OUT]` | `afade=t=in:st=0:d=IN`, `afade=t=out:st=DUR-OUT:d=OUT` | Inside the trimmed region, by construction |
-| `gain` | `volume=<dB>dB` | |
-| `norm:ebu:I:TP:LRA` | `loudnorm=I=…:TP=…:LRA=…` | Single-pass (§3.2) |
-| `sr` | `aresample=<Hz>` | |
-| `ch` | `-ac 1` \| `-ac 2` | An output option, not a filter |
-| `br` | `-b:a <kbps>k` | Lossy formats only |
-| `q` | `-q:a` (mp3, ogg, aac, m4a) or `-compression_level` (opus, flac) | Whichever knob the codec has, bounded to its range |
-| `bd` | `-c:a pcm_s16le`/`pcm_s24le`/`pcm_f32le` (wav), `-sample_fmt s16`/`s32` (flac) | Omitted, a lossless variant follows the source's depth |
-| `f:mp3` | `-c:a libmp3lame -f mp3` | |
-| `f:opus` | `-c:a libopus -f ogg` | |
-| `f:ogg` | `-c:a libvorbis -f ogg` | |
-| `f:aac` | `-c:a aac -f adts` | ADTS, because it streams |
-| `f:m4a` | `-c:a aac -movflags empty_moov+default_base_moof -frag_duration 1000000 -f mp4` | Fragmented: plain MP4 needs a seekable output for its moov atom, and stdout is not one. Cut on duration, not `frag_keyframe` — see below |
-| `f:flac` | `-c:a flac -f flac` | |
-| `f:wav` | `-c:a pcm_s16le -f wav` | |
-| `f:peaks` | `-c:a pcm_s16le -f s16le` | Raw PCM for the peak reducer, not an encode |
-
-Every command writes to `pipe:1` behind an explicit `-f`, since stdout has no
-filename for ffmpeg to infer a muxer from, and every command runs with
-`-nostdin -hide_banner -loglevel error` so stderr carries diagnostics only.
-
-### Why `m4a` fragments on duration
-
-`-movflags frag_keyframe` starts a new fragment at each video keyframe. An
-audio-only stream has none, so `empty_moov` alone produces exactly **one**
-fragment, which ffmpeg flushes when the input ends — a valid file on a
-non-seekable pipe, but not a stream. Measured on a 20 s source fed at realtime:
-
-| movflags | first bytes | fragments | size |
-|---|---|---|---|
-| `frag_keyframe+empty_moov` | 19.7 s | 1 | 328218 |
-| `empty_moov+default_base_moof` + `-frag_duration 1000000` | 1.8 s | 20 | 327275 |
-| `empty_moov+frag_every_frame` | 0.2 s | 863 | 437684 |
-| mp3, for reference | 0.2 s | — | — |
-
-One-second fragments cost nothing measurable in size and make the stream a
-stream, so that is what the builder emits. The `:ffmpeg`-tagged suite counts
-the fragments and measures time-to-first-byte, so the regression cannot come
-back quietly.
-
-Filters run in the order `loudnorm → volume → aresample → afade`, and the
-order is load-bearing. `loudnorm` goes first because normalizing after a
-static `gain` would undo it; `aresample` follows it because single-pass
-`loudnorm` resamples its output to 192 kHz; `afade` goes last so the fade
-shape survives the stages above it.
-
-That 192 kHz has one visible consequence: **`norm` without an explicit `sr`
-appends `aresample=48000`.** Without it every normalized render would be a
-192 kHz file. 48 kHz is the API's own lossy ceiling (§3.1) and universally
-supported, but it does mean `norm` on a 96 kHz lossless master downsamples.
-Choosing better would need the source's real sample rate, which the argument
-builder deliberately does not know — it is a pure function of the options, and
-that purity is what the round-trip property rests on. Pass `sr` explicitly to
-override.
-
-### ffmpeg version
-
-The argv is a contract with a specific ffmpeg, not with "ffmpeg" in the
-abstract: encoder names, muxer names and filter option spellings all drift
-between versions. The devcontainer and the release image therefore install
-ffmpeg from the same distro packaging, and the `:ffmpeg`-tagged tests
-(`test/audio_proxy/ffmpeg/command_ffmpeg_test.exs`) run every format and every
-filter through the real binary, so a codec name that a build does not carry
-fails a test rather than a request. Pinning an exact ffmpeg version — and
-whether to build it from source with a trimmed codec set — is decided in
-`add-docker-release`.
-
-Two known gaps. libopus encodes at 48/24/16/12/8 kHz only, so `sr:44100` with
-`f:opus` is resampled to 48 kHz by ffmpeg's own negotiation and produces the
-same bytes as `f:opus` alone, under a different cache key. And with no `bd`,
-`f:wav` falls back to 16-bit whenever the source's depth is unknown — the
-builder takes it as an argument (`build/3`), but the probe that supplies it
-belongs to the `/info` slice, so until then a 24-bit master requested as
-`f:wav` comes back 16-bit unless `bd:24` is given. Both cost a duplicate cache
-object or a documented fallback, not a wrong render, and both are tracked with
-the semantic no-ops above.
-
-## Stack
-
-- **Elixir** with Plug + [Bandit](https://github.com/mtrudel/bandit) — no
-  Phoenix, since there is no HTML and no channels to serve.
-- **ffmpeg as a subprocess**, not libav bindings. ffmpeg does all
-  decoding/encoding; Elixir is orchestration only. `ffprobe` backs `/info`.
-- **No database, no queue, no sidecar.** State lives in S3 and in URLs.
-
-## Toolchain
-
-Elixir and Erlang/OTP are pinned as a matched pair in
-[`.tool-versions`](.tool-versions); bump them together. That file is the single
-source of truth — mise reads it locally and `erlef/setup-beam` reads it in CI,
-so CI cannot drift from your shell.
-
-```bash
-mise install
-```
-
-Elixir 1.20 is a floor, not a preference: the type gate here is the compiler's
-own set-theoretic checker, surfaced by `mix compile --warnings-as-errors` in CI.
-There is no Dialyzer and no `dialyxir` — nothing to keep a PLT warm for, and no
-second type system whose opinions have to be reconciled with the compiler's.
-
-`@type t` and `@spec` go on public seams only, where they are worth reading in
-ExDoc and useful to the LSP. Private plumbing goes unannotated; the checker
-infers it.
-
-## Getting started
-
-```bash
-mix deps.get
-mix test
-PORT=4000 mix run --no-halt
-curl -s localhost:4000/health
-# {"status":"ok","version":"0.1.0"}
-```
-
 ## Configuration
 
 All configuration comes from `AP_`-prefixed environment variables — see
@@ -359,141 +277,21 @@ case-insensitively. An empty value counts as unset.
 
 The listener port is read from `AP_PORT`, then `PORT`, then `4000`.
 
-## Tests
+## Stack
 
-```bash
-mix test
-mix format --check-formatted
-```
+Elixir with Plug and [Bandit](https://github.com/mtrudel/bandit), and no
+Phoenix — there is no HTML to render and no channels to serve. ffmpeg runs as a
+subprocess rather than through libav bindings, so it does all decoding and
+encoding while Elixir stays orchestration; `ffprobe` backs `/info`. There is no
+database, no queue and no sidecar, because the only state is what lives in S3
+and in the URLs themselves. That leaves one container to deploy and nothing to
+migrate.
 
-Both are part of the CI gate — a change is not done until both pass. The suite
-drives the router through `Plug.Test` and binds no socket, so several copies can
-run concurrently.
+## Documentation
 
-Tests tagged `:ffmpeg` shell out to the real binaries and are excluded by
-default — they render every format and every filter through the actual
-encoder, which is the only way an assumption about a codec name gets checked.
-Run them explicitly, on a machine that has ffmpeg installed (the devcontainer
-does):
-
-```bash
-mix test --only ffmpeg
-```
-
-Tests tagged `:integration` bind a real socket (Bandit on a fixed port) to
-verify adapter behavior end-to-end — currently that the signed request path
-reaches the verifier byte-identical to what the client sent. They are
-excluded by default but run in CI; locally:
-
-```bash
-mix test --include integration
-```
-
-Property tests use [StreamData](https://github.com/whatyouhide/stream_data),
-which is a test-only dependency. Every processing option must round-trip
-(parse → normalize → cache key → identical ffmpeg args), so option handling is
-property-tested rather than only example-tested.
-
-The generators live in `AudioProxy.OptionsGenerators` and are shared by the
-options and ffmpeg-argv suites — both rest on the same round-trip, so they
-must probe the same grammar. They are built format-first, so every cross-key
-rule holds by construction: a property that has to filter its own inputs has
-stopped testing what it claims to test.
-
-Tests that need config other than the defaults use
-`AudioProxy.ConfigHelper.put_config/1`, which swaps `:persistent_term` and
-restores it on exit; such tests must set `async: false`. Prefer
-`AudioProxy.Config.build!/1` — pure and async-safe — when you only need to check
-parsing or validation.
-
-## Continuous integration
-
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to
-`main` and every pull request, in two jobs:
-
-| Job | Runs | Notes |
-|---|---|---|
-| `test` | `mix format --check-formatted`, `mix compile --warnings-as-errors`, `mix test --include integration` | No external binaries — the untagged + `:integration` suite must pass on a bare runner |
-| `test-ffmpeg` | `mix test --only ffmpeg` | Installs ffmpeg first; renders every format and filter through the real binary |
-
-Compilation runs with warnings as errors because the compiler's set-theoretic
-type checker reports through warnings — that flag is what makes the type gate a
-gate rather than a suggestion.
-
-Both jobs read Elixir and Erlang/OTP from [`.tool-versions`](.tool-versions),
-so bumping the pin is a one-file change that CI follows automatically. The
-`deps`/`_build` cache is keyed on the resolved versions plus `mix.lock`, so a
-toolchain bump misses the cache rather than restoring BEAM files built by a
-different compiler.
-
-Later slices extend this workflow rather than adding parallel ones — the image
-build and smoke tests from `add-docker-release`, and MinIO as a service
-container from `add-s3-client` — so there stays exactly one check to require.
-
-[`.github/dependabot.yml`](.github/dependabot.yml) opens update PRs weekly for
-Hex packages and GitHub Actions. Minor and patch updates are grouped into one PR
-per ecosystem; majors come individually. Every one of them is gated by the
-workflow above.
-
-`main` is protected: pull requests cannot merge until both jobs pass, and the
-branch rejects force-pushes and deletion. **Branch protection is a repo setting,
-not a file**, so it does not travel with a clone — a fork has to set it up
-again, under *Settings → Branches → Add rule* for `main`, requiring the checks
-named **format, compile, unit tests** and **ffmpeg-tagged tests** (GitHub lists
-status checks by job name, not by the job's key in the YAML).
-
----
-
-## Development workflow
-
-Everything below is about *how* work happens here, not about the proxy itself.
-
-Every feature slice gets its own git worktree paired with its own devcontainer,
-managed with [worktrunk](https://worktrunk.dev) (`wt`). The app is stateless, so
-isolation is just directory plus port — no per-branch database exists.
-
-```bash
-brew install worktrunk
-
-# Create the worktree and its devcontainer (deps + compile run inside)
-wt switch --create add-options-parser
-
-# Boot the app on this branch's port
-wt start add-options-parser
-
-# Run commands inside this worktree's container
-bin/agent-exec mix test
-bin/agent-exec mix format --check-formatted
-
-# Merge back and tear down
-wt merge add-options-parser
-wt remove add-options-parser
-```
-
-Each branch gets a deterministic port in 10000–19999 from worktrunk's
-`hash_port` filter, so several worktrees can run at once without colliding.
-`wt list` shows each worktree's URL. The port is passed to the container at
-create time (so it can be published) and at boot time (so Bandit binds it) by
-the hooks in [`.config/wt.toml`](.config/wt.toml).
-
-The devcontainer image
-([`.devcontainer/Dockerfile`](.devcontainer/Dockerfile)) pins the same
-Elixir/OTP pair as `.tool-versions`, plus `ffmpeg`/`ffprobe` — they are part of
-the product, so the `:ffmpeg`-tagged tests need the real binaries.
-
-The binstubs are host/container dual-purpose — they branch on the `DEVCONTAINER`
-env var so they never recurse through `devcontainer exec`:
-
-| Binstub | On the host | In the container |
-|---|---|---|
-| `bin/agent-setup` | `devcontainer up` | `mix deps.get` + compile (dev & test) |
-| `bin/agent-server` | delegates via `bin/agent-exec` | `mix run --no-halt` |
-| `bin/agent-exec` | `devcontainer exec` | refuses — run the command directly |
-| `bin/agent-cleanup` | removes the worktree's container | refuses |
-
-Use `devcontainer up` / `devcontainer exec` (i.e. the binstubs) rather than raw
-`docker compose`: only the devcontainer CLI applies `containerEnv` and the
-`postCreateCommand`.
-
-One OpenSpec change per worktree; merge back when its tasks are checked off and
-the suite is green.
+| Document | What it covers |
+|---|---|
+| [docs/audio-proxy-api-v1.md](docs/audio-proxy-api-v1.md) | **The source of truth.** URL grammar, every processing option, cache-key rules, response headers, error codes |
+| [docs/development.md](docs/development.md) | Toolchain, per-slice worktrees and devcontainers, the test suite and its tags, CI |
+| [docs/ffmpeg-arguments.md](docs/ffmpeg-arguments.md) | How options become ffmpeg arguments — filter order, per-format flags, known gaps |
+| `openspec/specs/` | Capability specs for what is built; `openspec/changes/` holds what is planned |
