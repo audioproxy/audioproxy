@@ -19,7 +19,7 @@ defmodule AudioProxy.Config do
   | `AP_SALT` | hex-encoded binary | unset (`nil`) |
   | `AP_ALLOW_INSECURE` | boolean | `false` |
   | `AP_SOURCE_ALLOWLIST` | comma-separated list | `[]` |
-  | `AP_LOCAL_ROOT` | existing directory | unset (`nil`) — local sources disabled |
+  | `AP_LOCAL_ROOT` | existing directory, not `/` | unset (`nil`) — local sources disabled |
   | `AP_VARIANT_BUCKET` | string | unset (`nil`) — no variant cache |
   | `AP_MAX_CONCURRENCY` | positive integer | `System.schedulers_online/0` |
   | `AP_QUEUE_SIZE` | non-negative integer | `32` |
@@ -195,10 +195,20 @@ defmodule AudioProxy.Config do
     with value when is_binary(value) <- fetch(env, var) do
       expanded = Path.expand(value)
 
-      if File.dir?(expanded) do
-        expanded
-      else
-        raise Error, "#{var} must be an existing directory, got: #{inspect(value)}"
+      cond do
+        # Every relative path is "under" `/`, so a root of `/` is confinement
+        # switched off. Nobody types it deliberately; `AP_LOCAL_ROOT=${DIR}/`
+        # with `DIR` unset produces it, which is exactly why it fails loudly at
+        # boot rather than serving the filesystem.
+        expanded == "/" ->
+          raise Error,
+                "#{var} must not be the filesystem root — it would serve every file on the host; point it at the directory you mean to serve"
+
+        not File.dir?(expanded) ->
+          raise Error, "#{var} must be an existing directory, got: #{inspect(value)}"
+
+        true ->
+          expanded
       end
     end
   end

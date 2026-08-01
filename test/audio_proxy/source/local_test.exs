@@ -232,6 +232,113 @@ defmodule AudioProxy.Source.LocalTest do
     end
   end
 
+  # Each of these pins a finding from the adversarial review of this slice.
+  describe "hardening" do
+    test "a path with too many components is refused before the expensive call" do
+      # `Path.safe_relative/2` is superlinear in component count: 1000 segments
+      # measured at 2.76 s of scheduler time. The cap is the DoS control, so the
+      # assertion is on wall-clock as much as on the verdict.
+      deep = String.duplicate("a/", 5_000) <> "b.wav"
+
+      {microseconds, verdict} = :timer.tc(fn -> Local.authorize({:local, deep}) end)
+
+      assert verdict == {:error, :not_allowed}
+
+      assert microseconds < 100_000,
+             "took #{div(microseconds, 1000)} ms — the cap is not short-circuiting"
+    end
+
+    test "a path over the byte cap is refused" do
+      long = String.duplicate("a", 2_000) <> ".wav"
+
+      assert Local.authorize({:local, long}) == {:error, :not_allowed}
+    end
+
+    test "a path just inside both caps still works", %{root: root} do
+      nested = Enum.map_join(1..60, "/", fn _ -> "d" end)
+      File.mkdir_p!(Path.join(root, nested))
+      File.write!(Path.join([root, nested, "track.wav"]), "RIFF")
+
+      assert Local.authorize({:local, nested <> "/track.wav"}) == :ok
+    end
+
+    test "the filesystem root is refused as a root, even set directly" do
+      put_config(%{local_root: "/"})
+
+      assert Local.authorize({:local, "etc/passwd"}) == {:error, :not_allowed}
+      assert Local.stat({:local, "etc/passwd"}) == {:error, :not_allowed}
+    end
+
+    test "a component whose link status cannot be determined is refused", %{root: root} do
+      unreadable = Path.join(root, "noperm")
+      File.mkdir_p!(unreadable)
+      File.write!(Path.join(unreadable, "secret.wav"), "SECRET")
+      File.chmod!(unreadable, 0o000)
+      on_exit(fn -> File.chmod(unreadable, 0o755) end)
+
+      # Running as root defeats the permission bit, so only assert when the
+      # kernel actually refuses us.
+      case File.read_link(Path.join(unreadable, "secret.wav")) do
+        {:error, :eacces} ->
+          assert Local.authorize({:local, "noperm/secret.wav"}) == {:error, :not_allowed}
+
+        _other ->
+          :ok
+      end
+    end
+
+    test "ffmpeg_input refuses a FIFO, which would otherwise block ffmpeg forever", %{root: root} do
+      fifo = Path.join(root, "pipe.wav")
+      {_output, 0} = System.cmd("mkfifo", [fifo])
+
+      assert Local.ffmpeg_input({:local, "pipe.wav"}) == {:error, :not_found}
+    end
+
+    test "ffmpeg_input refuses a directory" do
+      assert Local.ffmpeg_input({:local, "previews"}) == {:error, :not_found}
+    end
+
+    test "parse collapses spellings that name one file into one cache key" do
+      assert Local.parse("previews//track.wav") == {:ok, {:local, "previews/track.wav"}}
+      assert Local.parse("./previews/track.wav") == {:ok, {:local, "previews/track.wav"}}
+      assert Local.parse("previews/./track.wav") == {:ok, {:local, "previews/track.wav"}}
+      assert Local.parse("previews/track.wav/") == {:ok, {:local, "previews/track.wav"}}
+    end
+
+    test "parse leaves traversal and absolute paths intact for authorize to refuse" do
+      assert Local.parse("../outside/secret.wav") == {:ok, {:local, "../outside/secret.wav"}}
+      assert Local.parse("/etc/passwd") == {:ok, {:local, "/etc/passwd"}}
+
+      assert Local.authorize({:local, "/etc/passwd"}) == {:error, :not_allowed}
+    end
+
+    test "paths that normalize to nothing are empty paths" do
+      assert Local.parse(".") == {:error, :empty_path}
+      assert Local.parse("./.") == {:error, :empty_path}
+      assert Local.parse("") == {:error, :empty_path}
+    end
+
+    test "an all-slashes path stays absolute rather than normalizing to empty" do
+      # The leading-slash rule takes precedence on purpose: `///` is absolute,
+      # and absolute paths are refused by the gate, not quietly turned into
+      # something relative.
+      assert Local.parse("///") == {:ok, {:local, "///"}}
+      assert Local.authorize({:local, "///"}) == {:error, :not_allowed}
+    end
+
+    test "an option-looking or protocol-looking filename is still just a file", %{root: root} do
+      File.write!(Path.join(root, "-i.wav"), "RIFF")
+      File.write!(Path.join(root, "http:example.wav"), "RIFF")
+
+      # Verified against the real binary: ffmpeg resolves an absolute path to
+      # the file protocol regardless of what the basename looks like.
+      assert {:ok, dash} = Local.ffmpeg_input({:local, "-i.wav"})
+      assert String.starts_with?(dash, "/")
+      assert {:ok, colon} = Local.ffmpeg_input({:local, "http:example.wav"})
+      assert String.starts_with?(colon, "/")
+    end
+  end
+
   describe "the storage seam" do
     test "the render flow's two questions are answerable through the resolver alone" do
       assert {:ok, source} = Source.parse("plain/local://previews/track.wav")

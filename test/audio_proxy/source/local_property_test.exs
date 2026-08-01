@@ -53,12 +53,17 @@ defmodule AudioProxy.Source.LocalPropertyTest do
     resolved_root = real_path(root)
 
     check all(path <- hostile_path()) do
-      case Local.authorize({:local, path}) do
-        {:error, :not_allowed} ->
-          :ok
+      # The invariant is about what actually reaches ffmpeg, so it is stated
+      # over `ffmpeg_input/1`'s output rather than over the authorization
+      # verdict: `authorize/1` may pass a path whose file does not exist or is
+      # not a regular file, and the seam then refuses it.
+      case Local.ffmpeg_input({:local, path}) do
+        {:error, reason} ->
+          assert reason in [:not_allowed, :not_found]
 
-        :ok ->
-          assert {:ok, absolute} = Local.ffmpeg_input({:local, path})
+        {:ok, absolute} ->
+          assert Local.authorize({:local, path}) == :ok,
+                 "#{inspect(path)} yielded an ffmpeg input without being authorized"
 
           assert List.starts_with?(Path.split(absolute), Path.split(resolved_root)),
                  "#{inspect(path)} was accepted but resolved to #{inspect(absolute)}, " <>

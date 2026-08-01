@@ -277,18 +277,26 @@ curl "$BASE/insecure/f:mp3/br:128/plain/local://previews/track.wav"
 ```
 
 The root is the whole access-control story for disk: **unset `AP_LOCAL_ROOT`
-and local sources are refused outright**, so a proxy serves exactly what you
-mounted for it and nothing else. Inside that, paths that climb out with `..`,
-absolute paths, and symlinks whose targets land outside the root are all
-refused — as `404`, the same answer as a file that is not there, so the root
-cannot be used to probe the filesystem around it.
+and local sources are refused outright**, so a proxy reaches only what you
+mounted for it. Inside that, paths that climb out with `..`, absolute paths,
+and symlinks whose targets land outside the root are all refused — as `404`,
+the same answer as a file that is not there, so the root cannot be used to
+probe the filesystem around it. Setting the root to `/` is refused at boot.
 
+> **Mount the root read-only.** Confinement is enforced over paths, which
+> leaves two things it cannot see: a hardlink inside the root can point at a
+> file outside it, and a file can be swapped for a symlink in the moment
+> between the path being checked and ffmpeg opening it. Both need write
+> access to the root, so a read-only mount (`-v /srv/audio:/srv/audio:ro`)
+> closes both. Treat write access to the root as equivalent to choosing what
+> the proxy will serve.
 The root does not appear in the cache key. `local://previews/track.wav` names
 the same variant whether it is mounted at `/srv/audio` or `/data`, so moving
 or redeploying the root does not invalidate anything.
 
-A file that is missing, or that is not a regular file, is a `404`; one larger
-than `AP_MAX_SRC_BYTES` is a `413` before any render starts.
+A file that is missing, or that is not a regular file — a directory, FIFO,
+socket or device — is a `404`; one larger than `AP_MAX_SRC_BYTES` is a `413`
+before any render starts. Paths are capped at 64 components and 1024 bytes.
 
 **`s3://` and `https://` sources are not built yet** — each is its own slice,
 with its own rule for what it will serve, and until they land those schemes
@@ -310,7 +318,7 @@ so several of them are parsed and validated but not yet consumed by anything.
 | `AP_SALT` | hex | unset | HMAC salt |
 | `AP_ALLOW_INSECURE` | boolean | `false` | Accept unsigned URLs (dev only) |
 | `AP_SOURCE_ALLOWLIST` | comma-separated | empty | Permitted source buckets/hosts (used once remote source types land) |
-| `AP_LOCAL_ROOT` | existing directory | unset | Root for `local://` sources; unset disables them. Must exist at boot |
+| `AP_LOCAL_ROOT` | existing directory | unset | Root for `local://` sources; unset disables them. Must exist at boot, and may not be `/` |
 | `AP_VARIANT_BUCKET` | string | unset | Write-back target; unset = always render |
 | `AP_MAX_CONCURRENCY` | positive integer | schedulers online | Max simultaneous ffmpeg processes |
 | `AP_QUEUE_SIZE` | non-negative integer | `32` | Waiting renders before `429` |

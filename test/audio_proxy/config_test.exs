@@ -118,6 +118,13 @@ defmodule AudioProxy.ConfigTest do
       assert error.message =~ "directory"
     end
 
+    test "the filesystem root aborts the boot, since it would serve the whole host" do
+      error = assert_raise Error, fn -> Config.build!(%{"AP_LOCAL_ROOT" => "/"}) end
+
+      assert error.message =~ "AP_LOCAL_ROOT"
+      assert error.message =~ "filesystem root"
+    end
+
     test "a file rather than a directory aborts the boot", %{tmp_dir: tmp_dir} do
       file = Path.join(tmp_dir, "a-file")
       File.write!(file, "")

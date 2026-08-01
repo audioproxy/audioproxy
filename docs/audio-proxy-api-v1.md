@@ -26,7 +26,11 @@ GET /{signature}/{options}/{source}
 
 When `AP_LOCAL_ROOT` is unset, local sources are disabled — the root *is* the allowlist for disk, so nothing mounted means nothing served.
 
-Confinement is absolute and uniform. After the source has been decoded exactly once (never before — a check on a half-decoded string proves nothing), the path must be relative, must not climb out of the root with `..`, and must still resolve inside the root once every symlink on it has been followed. A path that fails any of these is refused, never normalized and retried. Every refusal is **404**, the same status as a missing file: §5 has no 403, and a distinct status would turn the root into an existence oracle for the filesystem around it.
+Confinement is over *paths*, and uniform. After the source has been decoded exactly once (never before — a check on a half-decoded string proves nothing), the path must be relative, must not climb out of the root with `..`, and must still resolve inside the root once every symlink on it has been followed. A path that fails any of these is refused, never normalized and retried. Every refusal is **404**, the same status as a missing file: §5 has no 403, and a distinct status would turn the root into an existence oracle for the filesystem around it.
+
+Two things sit outside a path-based check, and both are deployment assumptions rather than gaps the proxy can close: a **hardlink** inside the root pointing at an inode outside it is indistinguishable from an ordinary file, and the window between resolving a path and ffmpeg opening it (**TOCTOU**) allows a file to be swapped for a symlink. Both require write access to the root. **Mount the root read-only and do not let untrusted code write into it.**
+
+Paths are bounded before resolution: at most 64 components and 1024 bytes, refused as 404. The bound is a denial-of-service control — the confinement primitive is superlinear in component count.
 
 Metadata comes from the filesystem: regular files only (a directory, FIFO or device is a 404, as is a missing file), size checked against `AP_MAX_SRC_BYTES` for the 413, and size-plus-mtime as the ETag material behind conditional requests on `/info`.
 
