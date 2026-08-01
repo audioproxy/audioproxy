@@ -91,6 +91,77 @@ layer maps to a status. A source type adds its own on top.
 | `:control_character` | A control, format or separator code point |
 | `:unknown_scheme` | No registered source type claims the scheme |
 
+## Local sources
+
+`local://{path}` names a path relative to `AP_LOCAL_ROOT`. The root is
+deployment configuration — a bind mount, a volume, a directory on a laptop —
+and unset means the type is disabled: nothing mounted, nothing served. The
+root *is* the allowlist for disk, which is why this type has no allowlist of
+its own. `/` is refused at boot, since every relative path is "under" it.
+
+### Confinement
+
+Order matters more than any single check:
+
+1. The shared layer has already decoded the source exactly once and refused
+   control-class code points. A confinement check on a half-decoded string
+   proves nothing, so it does not run on one.
+2. `Path.safe_relative/2` rejects absolute paths and any `..` that climbs out
+   of the root, and normalizes `.` and interior `..` away.
+3. The result is joined to the root and resolved link by link — `safe_relative`
+   does not follow symlinks, and a `previews` symlinked at `/etc` is a
+   perfectly safe *relative* path.
+4. The resolved path must still sit under the resolved root.
+
+Nothing is normalized-and-continued: a path failing any step is refused, not
+repaired. Every refusal is `{:error, :not_allowed}` → **404**, the same answer
+as a missing file, so the root cannot be used to probe the filesystem around
+it.
+
+One consequence worth knowing: OTP treats *any* absolute symlink target as
+unsafe, so a link inside the root that spells its target absolutely is refused
+even though the target is servable. Relative links inside the root work;
+absolute ones want a root pointed at the resolved location instead.
+
+### Limits
+
+At most **64 path components** and **1024 bytes**, enforced before resolution
+runs. This is a denial-of-service control, not tidiness: `Path.safe_relative/2`
+is superlinear in component count — measured at 7.9 ms for 100 components,
+397 ms for 500, and 2764 ms for 1000 — so an unbounded path would buy seconds
+of scheduler time on one process.
+
+### Metadata
+
+Regular files only. A missing file, a directory, a FIFO, a socket or a device
+is a `404`; a file larger than `AP_MAX_SRC_BYTES` is a `413` before any render
+starts. ETag material is a hash of size and mtime.
+
+### Identity
+
+The root does not appear in the canonical string, so `local://previews/track.wav`
+names the same variant whether it is mounted at `/srv/audio` or `/data`, and
+moving or redeploying the root invalidates nothing. `parse/1` collapses empty
+and `.` segments so that one file does not wear several cache keys; it does not
+touch `..`, and a leading `/` survives so absolute paths are refused rather than
+quietly reinterpreted.
+
+### What confinement does not cover
+
+Confinement is defined over *paths*, and two things escape that definition.
+Both are deployment assumptions rather than defects, and both need write access
+to the root:
+
+- **Hardlinks.** A hardlink inside the root pointing at an inode outside it is
+  indistinguishable from an ordinary file to any path-based check.
+- **Time of check to time of use.** `ffmpeg_input/1` returns a path and ffmpeg
+  opens it a moment later; anything that can rewrite the root in that window can
+  swap the file for a symlink. Closing this needs the render pipeline to pass an
+  already-open descriptor, tracked with `add-render-endpoint`.
+
+**Mount the root read-only**, and treat write access to it as equivalent to
+choosing what the proxy will serve.
+
 ## The source-type contract
 
 A type is a module implementing `AudioProxy.Source.Type`, registered in a

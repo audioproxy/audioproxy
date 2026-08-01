@@ -268,35 +268,30 @@ request it in — the signature covers the raw path.
 
 ### `local://` — files under a configured root
 
-`local://{path}` serves a path relative to `AP_LOCAL_ROOT`:
+`local://{path}` serves a path relative to `AP_LOCAL_ROOT`. Mount the directory
+you want served, read-only, and point the proxy at it:
 
 ```bash
-export AP_LOCAL_ROOT=/srv/audio
-# …serves /srv/audio/previews/track.wav
+docker run -p 4000:4000 \
+  -e AP_ALLOW_INSECURE=true \
+  -e AP_LOCAL_ROOT=/srv/audio \
+  -v /path/to/your/audio:/srv/audio:ro \
+  ghcr.io/audioproxy/audioproxy:latest
+
+# …renders /srv/audio/previews/track.wav
 curl "$BASE/insecure/f:mp3/br:128/plain/local://previews/track.wav"
 ```
 
-The root is the whole access-control story for disk: **unset `AP_LOCAL_ROOT`
-and local sources are refused outright**, so a proxy reaches only what you
-mounted for it. Inside that, paths that climb out with `..`, absolute paths,
-and symlinks whose targets land outside the root are all refused — as `404`,
-the same answer as a file that is not there, so the root cannot be used to
-probe the filesystem around it. Setting the root to `/` is refused at boot.
+> The image is not published yet — the container ships with the release slice
+> under `openspec/changes/add-docker-release`. Until then, set `AP_LOCAL_ROOT`
+> in your environment and run it as under [Running it](#running-it).
 
-> **Mount the root read-only.** Confinement is enforced over paths, which
-> leaves two things it cannot see: a hardlink inside the root can point at a
-> file outside it, and a file can be swapped for a symlink in the moment
-> between the path being checked and ffmpeg opening it. Both need write
-> access to the root, so a read-only mount (`-v /srv/audio:/srv/audio:ro`)
-> closes both. Treat write access to the root as equivalent to choosing what
-> the proxy will serve.
-The root does not appear in the cache key. `local://previews/track.wav` names
-the same variant whether it is mounted at `/srv/audio` or `/data`, so moving
-or redeploying the root does not invalidate anything.
+Unset `AP_LOCAL_ROOT` and local sources are refused outright: the root is the
+whole access-control story for disk. **Mount it read-only** — write access to
+the root is equivalent to choosing what the proxy will serve.
 
-A file that is missing, or that is not a regular file — a directory, FIFO,
-socket or device — is a `404`; one larger than `AP_MAX_SRC_BYTES` is a `413`
-before any render starts. Paths are capped at 64 components and 1024 bytes.
+[docs/sources.md](docs/sources.md#local-sources) has the confinement rules, the
+path limits, and why the root never appears in a cache key.
 
 **`s3://` and `https://` sources are not built yet** — each is its own slice,
 with its own rule for what it will serve, and until they land those schemes
