@@ -162,10 +162,13 @@ shipped ffmpeg** and **container smoke suite** (GitHub lists status checks by
 job name, not by the job's key in the YAML). `publish` is not a required check —
 it does not run on pull requests at all.
 
-> Removing a job does not remove its required check. **ffmpeg-tagged tests** was
-> dropped, and if it is still listed under branch protection every pull request
-> will block forever waiting for a status that can no longer arrive. Untick it
-> there when this lands.
+> **Renaming or removing a job means editing that list in the same breath.** A
+> required check is matched by job name, so one that no longer runs never
+> reports, and GitHub shows it as *Expected — waiting for status*: visually
+> identical to a job still in progress, on a run that finished minutes ago.
+> Every pull request then blocks forever. Dropping the old apt-ffmpeg job did
+> exactly this, and the symptom reads as a hung CI rather than a settings
+> mismatch, so it costs more to diagnose than it should.
 
 ---
 

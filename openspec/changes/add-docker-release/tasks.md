@@ -15,7 +15,7 @@
 
 - [x] 3.1 Publish job in `ci.yml` (`needs: smoke`): GHCR login via `GITHUB_TOKEN`; on `v*` tags push `:X.Y.Z`/`:X.Y`/`:latest`, on `main` push `:edge` + `:sha-<12>`
 - [x] 3.2 Release assertion: `mix.exs` version == git tag, or the publish job fails
-- [ ] 3.3 Verify (scratch pre-release tag): package appears on GHCR linked to the repo, OCI labels present (`docker inspect`), `:sha-*` pullable and boots
+- [x] 3.3 Verify (scratch pre-release tag): package appears on GHCR linked to the repo, OCI labels present (`docker inspect`), `:sha-*` pullable and boots
 - [ ] 3.4 Cut `v0.1.0` once the MVP smoke suite is green on main
 
 ## 4. Docs
