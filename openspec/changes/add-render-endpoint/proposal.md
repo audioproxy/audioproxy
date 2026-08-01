@@ -23,5 +23,5 @@ This slice assembles the pieces into the core resource: `GET /{sig}/{options}/{s
 ## Impact
 
 - Modified: `lib/audio_proxy/router.ex`; new `lib/audio_proxy/plugs/*`, `lib/audio_proxy/error_json.ex`.
-- Depends on: `add-signature-verification`, `add-options-parser`, `add-source-resolver` (decoding + the storage seam), `add-local-files-source` (the MVP source type behind it), `add-render-semaphore`, `add-ffmpeg-port-pipeline`, `add-render-coalescing`.
+- Depends on: `add-signature-verification`, `add-options-parser`, `add-source-resolver` (decoding + the storage seam), `add-local-files-source` (the MVP source type behind it), `add-ffmpeg-port-pipeline`, `add-render-coalescing`.
 - Blocks: `add-variant-cache` (adds HIT/tee to this endpoint), `add-peaks-format`, `add-info-endpoint` (shares plug chain).
