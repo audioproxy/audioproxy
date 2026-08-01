@@ -32,3 +32,29 @@ The container SHALL propagate SIGTERM to the release, terminate in-flight render
 #### Scenario: SIGTERM during render
 - **WHEN** the container receives SIGTERM while a render streams
 - **THEN** the container exits cleanly and no ffmpeg process survives in the container's final process table
+
+### Requirement: Images are published to GHCR per the tag rules
+The system SHALL publish images to `ghcr.io/audioproxy/audioproxy`: a `vX.Y.Z` git tag publishes `:X.Y.Z`, `:X.Y`, and `:latest`; a push to `main` publishes `:edge` and an immutable `:sha-<short>`; publishing SHALL be gated on the smoke suite passing.
+
+#### Scenario: Release tag publishes version tags
+- **WHEN** a `vX.Y.Z` tag is pushed and CI is green through smoke
+- **THEN** `:X.Y.Z`, `:X.Y`, and `:latest` are pullable from GHCR and boot
+
+#### Scenario: Main publishes edge and sha
+- **WHEN** a commit lands on `main` with CI green
+- **THEN** `:edge` and `:sha-<short>` for that commit are pullable
+
+#### Scenario: Red smoke blocks publishing
+- **WHEN** the smoke suite fails
+- **THEN** no image is pushed for that ref
+
+### Requirement: Version provenance
+The published image SHALL carry OCI labels (`org.opencontainers.image.source`, `.revision`, `.version`), and a release SHALL fail when the `mix.exs` version does not equal the git tag.
+
+#### Scenario: Labels present
+- **WHEN** a published image is inspected
+- **THEN** source, revision, and version labels identify the repo, commit, and version
+
+#### Scenario: Tag/version mismatch fails
+- **WHEN** a `v1.2.0` tag is pushed while `mix.exs` says `1.1.0`
+- **THEN** the publish job fails without pushing
