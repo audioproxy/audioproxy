@@ -23,5 +23,5 @@ The proxy must never become an accidental video transcoder or a generic ffmpeg g
 ## Impact
 
 - Modified: `lib/audio_proxy/ffmpeg/command.ex` (stream-disable flags, per-source-type protocol whitelist, allowlist introspection for tests), render action (probe gate before subscribing), `docs/audio-proxy-api-v1.md`.
-- Depends on: `add-ffmpeg-command-builder`, `add-render-endpoint`, `add-info-endpoint` (reuses its `Ffprobe` module for the gate), `add-local-files-source` (source types the whitelist dispatches on).
+- Depends on: `add-ffmpeg-command-builder`, `add-render-endpoint`, `add-info-endpoint` (reuses its `Ffprobe` module for the gate), `add-local-files-source` (the local source type the whitelist dispatches on). The HTTPS half of the whitelist becomes reachable with `add-remote-files-source`; until then only the `file` set is exercised.
 - Position: post-MVP, directly after `add-info-endpoint`. Until it lands, video-container sources get their audio track extracted rather than rejected — the `-vn` defense can be cherry-picked into the command builder earlier if that window matters.

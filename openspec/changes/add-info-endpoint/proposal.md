@@ -22,4 +22,4 @@
 ## Impact
 
 - New: `lib/audio_proxy/ffprobe.ex`, info action in router.
-- Depends on: `add-render-endpoint` (plug chain), `add-ffmpeg-port-pipeline` (subprocess wrapper), `add-s3-client`.
+- Depends on: `add-render-endpoint` (plug chain), `add-ffmpeg-port-pipeline` (subprocess wrapper), `add-source-resolver` (the storage seam it probes through). Storage-agnostic: it gains each source type as that type's backend lands.

@@ -1,42 +1,76 @@
 ## ADDED Requirements
 
-### Requirement: Source segment parses into a typed source
-The system SHALL parse the path remainder after the options into `plain/s3://{bucket}/{key}`, `plain/{https-url}`, or `enc/{base64url(source)}` forms, yielding a typed S3 or HTTP source with URL-escaping resolved.
+### Requirement: Source segment encodings
+The system SHALL accept the source segment in two encodings — `plain/{source}`, percent-escaped and unescaped exactly once, and `enc/{base64url(source)}`, padded or unpadded — and SHALL resolve both to the same decoded source string before any source-type-specific parsing runs.
 
-#### Scenario: S3 source
-- **WHEN** parsing `plain/s3://masters/2026/piece-final.wav`
-- **THEN** the result is an S3 source with bucket `masters` and key `2026/piece-final.wav`
+#### Scenario: Encodings converge
+- **WHEN** one source arrives as `plain/` and as `enc/`
+- **THEN** both yield the same typed source and byte-identical canonical strings
 
-#### Scenario: Escaped key round-trips
-- **WHEN** an S3 key contains spaces or `+` and is URL-escaped in the path
-- **THEN** the parsed key contains the original unescaped bytes
+#### Scenario: Escaped bytes round-trip
+- **WHEN** a `plain/` payload contains `%20`, `%25` or `+`
+- **THEN** the decoded source contains a space, a literal `%`, and a literal `+` respectively
 
-#### Scenario: Encoded form equivalence
-- **WHEN** parsing `enc/{base64url("s3://masters/x.wav")}` and `plain/s3://masters/x.wav`
-- **THEN** both yield the same typed source and the same canonical source string
+#### Scenario: Malformed escape rejected
+- **WHEN** a `plain/` payload contains a `%` not followed by two hex digits
+- **THEN** parsing fails with a structured error, rather than passing the bytes through and giving one source two spellings
 
-#### Scenario: Malformed sources rejected
-- **WHEN** the segment is `plain/ftp://x`, undecodable `enc/…`, or an s3 URL without a key
+#### Scenario: Undecodable encoded payload rejected
+- **WHEN** an `enc/` payload is not valid base64url, or decodes to bytes that are not valid UTF-8
 - **THEN** parsing fails with a structured error
 
-### Requirement: Allowlist enforcement
-The system SHALL reject sources whose bucket (S3) or host (HTTP) matches no pattern in `AP_SOURCE_ALLOWLIST`; when the allowlist is unset, HTTP sources SHALL be rejected and S3 sources accepted (private-bucket credentials are the effective gate).
+#### Scenario: Unknown encoding prefix rejected
+- **WHEN** the segment begins with neither `plain/` nor `enc/`
+- **THEN** parsing fails with a structured error
 
-#### Scenario: Allowed bucket
-- **WHEN** `AP_SOURCE_ALLOWLIST=masters,previews-*` and the source bucket is `masters`
-- **THEN** resolution succeeds
+### Requirement: Universally rejected content
+The system SHALL reject a decoded source containing any Unicode control, format, or line/paragraph-separator code point, regardless of source type.
 
-#### Scenario: Wildcard pattern
-- **WHEN** the allowlist contains `previews-*` and the bucket is `previews-eu`
-- **THEN** resolution succeeds
+#### Scenario: ASCII control rejected
+- **WHEN** the decoded source contains a NUL byte or a newline
+- **THEN** parsing fails with a structured error
 
-#### Scenario: Disallowed host
-- **WHEN** the source is `https://evil.example/x.wav` and `evil.example` matches no pattern
-- **THEN** resolution fails with an authorization error that the HTTP layer maps to 404
+#### Scenario: Non-ASCII control rejected
+- **WHEN** the decoded source contains U+0085, U+2028, or a right-to-left override
+- **THEN** parsing fails with a structured error, because such a code point would reach ffmpeg arguments, object keys and log lines
+
+#### Scenario: Ordinary non-ASCII text accepted
+- **WHEN** the decoded source contains accented or non-Latin characters
+- **THEN** parsing succeeds — only control-class code points are refused
+
+### Requirement: Source types dispatch by scheme
+The system SHALL split the decoded source on its scheme, match the scheme case-insensitively against the registered source types, and delegate parsing to the matching type; a scheme with no registered type SHALL fail with a structured error.
+
+#### Scenario: Registered scheme dispatches
+- **WHEN** a type is registered for scheme `x` and the decoded source is `x://body`
+- **THEN** that type's parser receives `body` and its result is returned
+
+#### Scenario: Scheme case is insensitive
+- **WHEN** the decoded source spells a registered scheme in mixed case
+- **THEN** it dispatches to the same type
+
+#### Scenario: Unregistered scheme rejected
+- **WHEN** the decoded source names a scheme no type is registered for, or carries no scheme at all
+- **THEN** parsing fails with a structured error
+
+#### Scenario: No types registered
+- **WHEN** no source types are registered
+- **THEN** every source fails with the unregistered-scheme error, and nothing else in the pipeline changes behavior
+
+### Requirement: Source type contract
+The system SHALL define a source-type contract covering parsing a decoded body into a typed source, rendering that source's canonical identity, authorizing it, and the storage operations the render and info flows need — metadata (size and ETag material) and an ffmpeg input.
+
+#### Scenario: Authorization is delegated
+- **WHEN** a typed source is authorized
+- **THEN** the decision comes from its own type, so an allowlist, a filesystem root, or any other policy can gate its own kind without the shared layer knowing what gating means
+
+#### Scenario: Storage is delegated
+- **WHEN** the render or info flow asks a source for its metadata or its ffmpeg input
+- **THEN** the answer comes from its own type, so a later backend is a registration rather than a change to those flows
 
 ### Requirement: Canonical source identity
-The system SHALL produce one canonical string per source for cache-key derivation, independent of which URL encoding (`plain` vs `enc`, escaping variants) the request used.
+The system SHALL produce one canonical string per source for cache-key derivation, independent of which encoding the request used.
 
 #### Scenario: Encoding-independent cache identity
 - **WHEN** the same source arrives via `plain` and `enc` forms
-- **THEN** the canonical strings are byte-identical
+- **THEN** the canonical strings are byte-identical, and therefore so are the cache keys derived from them
