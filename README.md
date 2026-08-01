@@ -84,6 +84,11 @@ The container is the way to run this. It carries the release with its own
 Erlang runtime and the ffmpeg the renders are tested against, so there is
 nothing to install and nothing to keep in step.
 
+> **Not published yet.** `v0.1.0` has not been tagged, so nothing is on GHCR and
+> the pull below will fail. Until it is, build the image yourself —
+> `docker build -t audio_proxy:local .` — and substitute that tag, or run from a
+> checkout as described further down.
+
 ```bash
 docker run --rm -p 4000:4000 \
   -e AP_KEY="$AP_KEY" -e AP_SALT="$AP_SALT" \

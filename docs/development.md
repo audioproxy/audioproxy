@@ -130,11 +130,15 @@ it is the one whose verdict counts. They can legitimately disagree — the
 devcontainer is Debian and the release image is Alpine, and their ffmpeg majors
 differ — which is the gap `image-ffmpeg` exists to close.
 
-Both jobs read Elixir and Erlang/OTP from [`.tool-versions`](../.tool-versions),
-so bumping the pin is a one-file change that CI follows automatically. The
-`deps`/`_build` cache is keyed on the resolved versions plus `mix.lock`, so a
-toolchain bump misses the cache rather than restoring BEAM files built by a
-different compiler.
+`test` and `test-ffmpeg` read Elixir and Erlang/OTP from
+[`.tool-versions`](../.tool-versions), so bumping that pin is a one-file change
+they follow automatically. The `deps`/`_build` cache is keyed on the resolved
+versions plus `mix.lock`, so a toolchain bump misses the cache rather than
+restoring BEAM files built by a different compiler. `image-ffmpeg` and `smoke`
+get their toolchain from the Dockerfile instead, which is why
+[`VERSIONS.md`](../VERSIONS.md) has to be bumped alongside `.tool-versions` — the
+two are not wired together, and nothing but that file's procedure keeps them in
+step.
 
 Later slices extend this workflow rather than adding parallel ones — MinIO as a
 service container from `add-s3-client`, and the arm64 matrix from
@@ -166,6 +170,14 @@ suite, so a red pipeline publishes nothing for that ref.
 |---|---|---|
 | `vX.Y.Z` | `:X.Y.Z`, `:X.Y`, `:latest` | `:X.Y` and `:latest` move; `:X.Y.Z` does not |
 | push to `main` | `:edge`, `:sha-<12>` | `:edge` moves; `:sha-<12>` does not |
+| any other `v*` tag | none — the job fails | — |
+
+That last row is deliberate. The workflow triggers on `v*`, so `v1.2.3-rc1` and
+`v1.2` reach the publish job, and both would otherwise have been treated as
+releases: an RC would have moved `:latest`, and `v2.0.0-beta.1` would have
+produced a `:2.0.0-beta` tag that means nothing. There is no pre-release channel
+yet; if one is wanted, it needs its own tag rule rather than falling out of
+string manipulation.
 
 `:sha-<12>` is the one to reach for when you need an exact image that is not a
 release — it is one image per commit and it is never reused, which makes both
