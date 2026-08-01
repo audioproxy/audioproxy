@@ -6,20 +6,10 @@ defmodule AudioProxy.ErrorJSONTest do
 
   alias AudioProxy.{ErrorJSON, OptionError}
 
-  # Every reason the source layer can produce for "no servable source" — the
-  # shared resolver's, the local type's, and the storage seam's. A source type
-  # added later extends this list with its own (see the ErrorJSON moduledoc).
-  @source_not_found [
-    :unknown_encoding,
-    :invalid_encoding,
-    :malformed_escape,
-    :empty_source,
-    :control_character,
-    :unknown_scheme,
-    :empty_path,
-    :not_allowed,
-    :not_found
-  ]
+  # The module's own list, not a copy — a hand-written list here would drift
+  # silently (second-opinion finding M-2). A source type added later extends
+  # `not_found_reasons/0` in its slice, and these tests then cover it.
+  @source_not_found ErrorJSON.not_found_reasons()
 
   defp decoded(error) do
     {status, headers, body} = ErrorJSON.render(error)

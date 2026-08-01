@@ -3,15 +3,22 @@ defmodule AudioProxy.Plugs.RenderPipeline do
   The signed render chain (API doc §2): verify, parse, resolve, act.
 
   Cheapest checks first — signature verification and both parsers are pure
-  functions of the request; the action's `stat` is the only I/O and runs last.
-  A halted conn short-circuits the rest of the chain, so a 401 never reaches
-  option parsing and a 422 never touches the filesystem.
+  functions of the request, and authorization is an existence-blind
+  confinement resolution; the action's `stat` is the only source-metadata
+  I/O and runs last. A halted conn short-circuits the rest of the chain, so
+  a 401 never reaches option parsing and a 422 never touches the filesystem.
+
+  The mounting contract is the assigns chain: `VerifySignature` assigns
+  `:rest_of_path`, `ParseOptions` assigns `:options` and `:source_string`,
+  `ResolveSource` assigns `:source`, and each plug reads exactly what its
+  predecessor assigns — a plug mounted without its upstream raises
+  `KeyError`. Mount the four together, in this order.
 
   Mounted by the router for `GET /:sig/*rest`; `/health` stays outside it, so
   an unsigned liveness check never touches signature verification. The action
   is the seam: a 501 placeholder today, the streaming render in
-  `add-render-endpoint`. The info endpoint will reuse the three plugs with an
-  action of its own.
+  `add-render-endpoint`. The info endpoint will reuse the first three plugs
+  with an action of its own.
   """
 
   use Plug.Builder

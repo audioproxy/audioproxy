@@ -29,10 +29,16 @@ defmodule AudioProxy.ErrorJSON do
   Every source failure is the same 404, byte for byte: an unauthorized source,
   a missing file, an unparseable encoding, an unknown scheme. §5 has no 403,
   and a distinguishable response would turn the source policy into an
-  existence oracle for whatever sits behind it. A source type added later must
-  extend `@source_not_found` with its own "not there" reasons as part of its
-  slice — anything it returns that is not listed here (or another row's shape)
-  fails to render loudly, in tests, rather than silently becoming a 500.
+  existence oracle for whatever sits behind it.
+
+  A source type added later must extend `@source_not_found` — exposed as
+  `not_found_reasons/0`, so tests exercise the module's own list rather than
+  a copy that can drift — with its own "not there" reasons, as part of its
+  slice. An unlisted reason does not become a wrong response: `render/1` has
+  no clause for it and raises `FunctionClauseError`, so the mistake crashes
+  that slice's end-to-end tests instead of answering a plausible status in
+  production. There is deliberately no catch-all: an unlisted reason is a
+  programmer error, and a default row would hide it.
   """
 
   import Plug.Conn
@@ -63,6 +69,16 @@ defmodule AudioProxy.ErrorJSON do
     :not_allowed,
     :not_found
   ]
+
+  @doc """
+  The error reasons that render as the generic, byte-identical 404.
+
+  Public so tests and future source types exercise this module's own list —
+  a hand-copied list elsewhere would drift silently. Extend it, in the same
+  change, whenever a source type gains a new "not there" reason.
+  """
+  @spec not_found_reasons() :: [atom()]
+  def not_found_reasons, do: @source_not_found
 
   @doc """
   Maps a structured error to its `{status, headers, body}` triple.
