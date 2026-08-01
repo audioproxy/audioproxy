@@ -26,7 +26,7 @@ The system SHALL detect client disconnect during streaming and terminate the ren
 - **THEN** the ffmpeg process is dead shortly after
 
 ### Requirement: Render failures surface per contract
-The system SHALL answer 415 for undecodable sources and 504 for renders exceeding `AP_RENDER_TIMEOUT` before first byte; a failure after 200 SHALL terminate the chunked stream abnormally (connection close without final chunk).
+The system SHALL answer 415 for undecodable sources, 504 for renders exceeding `AP_RENDER_TIMEOUT` before first byte, and 500 `render_failed` for a pre-first-byte failure of any other kind; a failure after 200 SHALL terminate the chunked stream abnormally (connection close without final chunk).
 
 #### Scenario: Undecodable source
 - **WHEN** a signed request names a text file
@@ -39,6 +39,10 @@ The system SHALL answer 415 for undecodable sources and 504 for renders exceedin
 #### Scenario: Mid-stream failure after 200
 - **WHEN** the render fails after chunks were sent
 - **THEN** the stream terminates abnormally
+
+#### Scenario: Unclassifiable failure before the first byte
+- **WHEN** a render fails before producing output for a reason that is none of the above — no encoder on the host, a diagnostic no classifier recognises
+- **THEN** the response is 500 `render_failed`
 
 ## REMOVED Requirements
 

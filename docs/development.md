@@ -46,14 +46,24 @@ does):
 mix test --only ffmpeg
 ```
 
-Tests tagged `:integration` bind a real socket (Bandit on a fixed port) to
-verify adapter behavior end-to-end — currently that the signed request path
-reaches the verifier byte-identical to what the client sent. They are
+Tests tagged `:integration` bind a real socket to verify adapter behavior end
+to end — that the signed request path reaches the verifier byte-identical to
+what the client sent, and that the streaming lifecycle (chunk framing, client
+disconnect, a stream torn down after its `200`) behaves on the wire. They are
 excluded by default but run in CI; locally:
 
 ```bash
 mix test --include integration
 ```
+
+**The two tags never go on the same test.** They are exclusion filters, and
+including one overrides the other's exclusion, so a test carrying both would be
+dragged into the `test` CI job, which has no ffmpeg. A socket-binding test that
+also needs the real encoder is therefore tagged `:ffmpeg` only —
+`AudioProxy.RenderEndpointFfmpegTest` is the one that does. Everything else
+about the streaming path runs against a stand-in encoder
+(`test/support/fake_ffmpeg.sh`), which is what makes a hang, a dribble or a
+mid-stream failure reproducible on demand.
 
 Property tests use [StreamData](https://github.com/whatyouhide/stream_data),
 which is a test-only dependency. Every processing option must round-trip

@@ -148,7 +148,10 @@ Straight mapping of `ffprobe -show_format -show_streams`, filtered. Cached aggre
 | `415` | Source format not decodable |
 | `422` | Invalid or conflicting options |
 | `429` | Render queue full (`Retry-After` set) |
+| `500` | The render failed for a reason that is not the client's: no encoder, no space, a diagnostic the classifier does not recognise |
 | `504` | Render exceeded `AP_RENDER_TIMEOUT` |
+
+Every other row is something the *client* got wrong, which is why `500` is worth stating rather than leaving to the adapter: a render can fail with none of them true, and answering a plausible `4xx` would tell a client to stop retrying something that might well work next time.
 
 Mid-stream render failure after `200` is signaled by abnormal termination of the chunked stream (nothing better exists over plain HTTP; one more argument for HLS in v2).
 

@@ -4,10 +4,11 @@
 
 An imgproxy-style on-the-fly audio transcoding proxy.
 
-> **Status: early.** URL signing, the processing-options grammar, the ffmpeg
-> argument builder and `local://` source resolution are done, and signed URLs
-> now answer with the full error surface below; rendering, streaming and S3
-> access are not. Slices tracked under `openspec/changes/`.
+> **Status: early.** A signed URL for a `local://` source now renders and
+> streams: URL signing, the processing-options grammar, the ffmpeg argument
+> builder, source resolution and the chunked render endpoint are done. The
+> variant cache (so every request still renders), S3 and HTTPS sources, peaks
+> and `/info` are not. Slices tracked under `openspec/changes/`.
 ## What you can do with it
 
 Point it at a lossless master — a file in a directory you mounted, or later an
@@ -49,12 +50,12 @@ Each URL describes its output completely, so the same URL always means the
 same bytes. The first request for a variant renders it and streams it while it
 encodes; later requests are served from the variant bucket with `Range` support.
 
-> **These render nothing yet.** The request path is real — bad signatures come
-> back as `401`, bad options as `422` naming the offending segment, missing or
-> off-limits sources as `404`, oversized sources as `413` — but the render
-> itself is not wired up, so a request that passes every check answers `501`
-> for now. The examples show the API being built toward, and each option
-> string above is checked against the parser in the test suite.
+> **Mostly real now.** Transcodes render and stream: point `AP_LOCAL_ROOT` at a
+> directory and the first six examples above return audio. Not yet: `f:peaks`
+> and `info` (their own slices), `s3://` and `https://` sources, and the
+> variant bucket — every request renders, because there is no cache to hit
+> yet. Each option string above is checked against the parser in the test
+> suite.
 
 ## Design
 
@@ -146,6 +147,62 @@ test vector** used throughout the test suite; never use it as a real key.
 > makes the literal segment `insecure` pass as a signature
 > (`/insecure/f:opus/…/plain/…`). It exists for local development and smoke
 > tests; with it on, anyone who can reach the proxy can render anything.
+
+## Rendering a variant
+
+End to end, with a directory of your own audio and a real signature:
+
+```bash
+export AP_KEY=$(openssl rand -hex 32)
+export AP_SALT=$(openssl rand -hex 16)
+export AP_LOCAL_ROOT=/path/to/your/audio
+PORT=4000 mix run --no-halt &
+```
+
+Sign the path — everything after the signature segment, leading `/` included —
+and request it:
+
+```bash
+REST='/f:mp3/br:128/t:0:30/plain/local://piece.wav'
+
+SIG=$(ruby -ropenssl -rbase64 -e '
+  print Base64.urlsafe_encode64(
+    OpenSSL::HMAC.digest("SHA256", [ENV["AP_KEY"]].pack("H*"),
+                         [ENV["AP_SALT"]].pack("H*") + ARGV[0]),
+    padding: false)' "$REST")
+
+curl -D - -o preview.mp3 "localhost:4000/$SIG$REST"
+```
+
+```
+HTTP/1.1 200 OK
+transfer-encoding: chunked
+content-type: audio/mpeg
+cache-control: public, max-age=31536000, immutable
+etag: "6f1c…"
+x-audio-proxy: MISS
+```
+
+The first bytes leave before ffmpeg has finished, so a long transcode starts
+playing immediately rather than after it completes. There is no
+`Content-Length` and no `Accept-Ranges` on this response: the length is not
+known when the head goes out, and ranges arrive with the variant cache, whose
+`HIT` redirects to storage that serves them natively.
+
+`x-audio-proxy: MISS` is currently on every response, because there is no cache
+to hit yet — each request renders. `etag` is the variant's cache key, which is
+a pure function of the normalized options and the source, so the same variant
+requested with its options in a different order carries the same one.
+
+If the client goes away mid-stream, the render goes with it: closing the
+connection kills the ffmpeg process rather than leaving it encoding into a
+socket nobody is reading. A render that fails *before* any bytes are sent is
+one of the JSON errors below; one that fails after them can only be signalled
+by cutting the connection short, so treat a chunked response that ends without
+its terminating chunk as a failed download.
+
+For what happens behind that — the subprocess, buffering, the timeout and the
+kill discipline — see [docs/rendering.md](docs/rendering.md).
 
 ## Processing options
 
@@ -313,12 +370,13 @@ Failures are JSON, one shape everywhere: `{"error": "…", "message": "…"}`.
 | `415` | `undecodable_source` | The source format is not decodable |
 | `422` | `invalid_options` | Invalid or conflicting options; the message names the offending segment |
 | `429` | `queue_full` | The render queue is full; `Retry-After` is set |
+| `500` | `render_failed` | The render failed for a reason that is not yours: no encoder on the host, no disk space, a failure the proxy could not classify. Worth retrying |
 | `504` | `render_timeout` | The render exceeded `AP_RENDER_TIMEOUT` |
 
-`401`, `404`, `413` and `422` are reachable today; the rest ship with the
-render machinery that produces them. And until the render action lands (the
-next slice, `openspec/changes/add-render-endpoint`), a request that passes
-every check answers `501` `not_implemented` instead of streaming.
+All of these are reachable except `429`, which arrives with the render queue
+(`openspec/changes/add-render-semaphore`). A failure *after* the response has
+begun is not in this table and cannot be: see [Rendering a
+variant](#rendering-a-variant).
 
 ## Configuration
 
