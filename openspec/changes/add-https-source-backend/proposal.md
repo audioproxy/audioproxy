@@ -22,4 +22,4 @@
 
 - New: HEAD client wrapping in `lib/audio_proxy/source/https.ex` (no new deps — `:httpc`).
 - Depends on: `add-remote-files-source` (the form and stub it replaces).
-- Position: post-MVP, directly after `add-remote-files-source`; independent of `add-s3-client`.
+- Position: post-MVP, on demand — after `add-info-endpoint` at the earliest; independent of `add-s3-client` (which jumps ahead: local and S3 are the primary source types). Until it lands, HTTPS sources parse and authorize but stay unrenderable behind their pinned stub.
