@@ -51,6 +51,43 @@ Stay with the stdlib and core/OTP tooling as far as possible. GenStage is accept
 
   The README is the one with a hard rule: **no implementation detail.** A reader arrives wanting to render audio, not to learn how the filtergraph is assembled. Internals that are genuinely worth writing down — and most are — go to `docs/` and get linked from the README's documentation table, not inlined into it. When a section starts explaining *how* rather than *how to*, it has outgrown the README.
 
+## Adversarial review — how this project does it
+
+"Do an adversarial review" (or "second opinion") on this repo means one specific thing: **delegate the review to the `opencode` CLI running a non-Claude model, then reconcile its findings against your own self-review.** Do not substitute an in-session review or a subagent — the entire value is that the reviewer is a different model that did not write the code. Findings from past rounds that a self-review missed entirely (a float-comparison bug, a silently dropped struct field) are why this is the rule.
+
+The `jr-rails-second-opinion` skill holds the general workflow; read it for the loop structure. What follows is what this project has already learned, so it is not rediscovered every time.
+
+**Invocation** — from the worktree under review, backgrounded, never in the foreground:
+
+```bash
+opencode models openrouter | grep kimi        # verify the id resolves before the real run
+
+cat > "$SCRATCH/oc-config.json" <<'JSON'
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "bash": "allow", "glob": "allow", "grep": "allow", "read": "allow",
+    "edit": "deny", "write": "deny", "patch": "deny"
+  }
+}
+JSON
+
+cd <worktree> && OPENCODE_CONFIG="$SCRATCH/oc-config.json" PATH=/opt/homebrew/bin:$PATH \
+  nohup opencode run --pure -m openrouter/moonshotai/kimi-k2.7-code \
+  --title "second-opinion-<change-name>" "$(cat "$SCRATCH/brief.md")" \
+  > "$SCRATCH/review.md" 2> "$SCRATCH/review.err" &
+```
+
+- **Model:** `openrouter/moonshotai/kimi-k2.7-code`. The full provider path is required — `openrouter/kimi-k2.7-code` fails slowly and silently. Fallbacks when OpenRouter 502s: `openrouter/deepseek-v4-pro`, `openai/gpt-5.6-pro`.
+- **The config override is mandatory.** `~/.config/opencode/opencode.json` denies `bash`/`glob`/`grep`/`read` on purpose. With them denied, `opencode run` hangs forever at `message=init` with a 0-byte output file — indistinguishable from a crash. Override per-run via `OPENCODE_CONFIG`; **never edit the user's config.** Denying `edit`/`write`/`patch` in the same override is also the only no-write guarantee opencode has, since no flag provides one.
+- **Smoke-test with a prompt that uses a tool** (`"Run 'git rev-parse --abbrev-ref HEAD' and reply BRANCH=<name>"`). A tool-less "reply OK" prompt passes under a config that makes review impossible, and has burned a whole session that way.
+- **Commit before running** so `git status --short` afterwards proves the reviewer mutated nothing.
+- Runs take 5–20 minutes and are I/O-bound. Poll the output file for growth; a stalled byte count plus a live process is normal mid-thought.
+
+**Brief** — always include: the artifact (`git diff main...HEAD` on the worktree), hunting priorities in order, H/M/L severity on *every* finding, `file:line` citations not vibes, "do not edit any files", and this project's hard rules so the reviewer does not fight them: no new dependencies (see *Dependency policy*), config is `AP_`-prefixed env vars only, errors are data not exceptions, ffmpeg args are argv lists never shell strings, and every option must round-trip to an identical cache key.
+
+**After the run:** write your own self-review *before* reading the CLI output, then build a reconciliation table (Issue | Self-Review | CLI | Agreement), verify every CLI finding independently before accepting it, and present a synthesis with a gate status. **Never act on a finding without approval** — the CLI is a signal generator, not a judge. The working log is `second-opinion.md` (already gitignored); delete it once the findings are addressed. The improved code is the deliverable, not the log.
+
 ## Architecture decisions
 
 - **Input side:** never pipe source bytes through the BEAM. Generate a presigned S3 URL and pass it to ffmpeg as an HTTP input — ffmpeg does its own Range requests, so `-ss` seeks and trims read only the bytes they need. Also avoids the stdin/MP4-moov-atom trap.

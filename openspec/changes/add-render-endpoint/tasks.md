@@ -7,7 +7,8 @@
 
 ## 2. Render action
 
-- [ ] 2.1 Source stat via `Source.stat/1`: not-found → 404, size > `AP_MAX_SRC_BYTES` → 413; `Source.ffmpeg_input/1` for the render input (local path for MVP; presigned URL once the S3 backend exists)
+- [ ] 2.1 Source stat via `Source.stat/1`: not-found → 404, size > `AP_MAX_SRC_BYTES` → 413; `Source.ffmpeg_input/1` for the render input (local path for MVP; presigned URL once the S3 backend exists). Never bypass the seam to reach the filesystem: `ffmpeg_input/1` is what refuses non-regular files, and a FIFO handed to ffmpeg blocks forever on a read that never completes
+- [ ] 2.1a Decide the TOCTOU posture for local sources and record it in `design.md`: `Source.ffmpeg_input/1` returns a *path*, and the file it names can be replaced with a symlink out of the root before ffmpeg opens it. Either pin the inode (open the file here and hand ffmpeg `/dev/fd/N`, which also settles the `-protocol_whitelist` story) or accept the exposure explicitly with the read-only-root deployment assumption the README now states. Raised by the adversarial review of `add-local-files-source`; do not inherit it silently
 - [ ] 2.2 Spawn `Ffmpeg.Render` with the endpoint process as consumer (single call site — `add-render-coalescing` later swaps it for a coordinator subscribe); send response headers (Content-Type, Cache-Control, ETag, `X-Audio-Proxy: MISS`, optional Content-Disposition); chunked streaming receive-loop
 - [ ] 2.3 Disconnect handling: `chunk/2` error → cancel render/exit; receive-deadline → 504 pre-stream, abnormal close mid-stream
 

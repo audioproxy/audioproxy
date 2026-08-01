@@ -5,6 +5,7 @@ forms and the allowlist, PR 2 the HTTPS storage backend.
 
 - [ ] 1.1 `AudioProxy.Source.S3`: `Source.Type` behaviour — scheme/tag, `parse/1` of `{bucket}/{key}` (missing half → structured error), `canonical/1`
 - [ ] 1.2 `AudioProxy.Source.Https`: `parse/1` via `URI.new/1`; refuse `http://`, userinfo, hostless URLs
+- [ ] 1.2a Bound the input before parsing it, as `add-local-files-source` does (64 components / 1024 bytes): its adversarial review found `Path.safe_relative/2` to be superlinear in component count — 1000 segments cost 2.76 s of scheduler time on one process. Check the cost curve of `URI.new/1` and the S3 key split on adversarial input rather than assuming it is linear, and cap accordingly
 - [ ] 1.3 HTTPS canonicalization: downcase scheme+host, strip trailing root dot, `:inet.parse_strict_address/1` for IP literals, drop default port, absent path → `/`, drop empty query and fragment; preserve the URL's own escaping and dot segments
 - [ ] 1.4 Register both types in the resolver's dispatch table
 - [ ] 1.5 Allowlist pattern matcher: bucket = exact or trailing-`*` prefix glob (case-sensitive); host = exact or leading-`*.` label-anchored suffix glob (case-folded); bare `*` matches all; `*` anywhere else matches nothing

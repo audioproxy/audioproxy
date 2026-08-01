@@ -14,6 +14,7 @@ defmodule AudioProxy.ConfigTest do
                salt: nil,
                allow_insecure: false,
                source_allowlist: [],
+               local_root: nil,
                variant_bucket: nil,
                max_concurrency: System.schedulers_online(),
                queue_size: 32,
@@ -91,6 +92,44 @@ defmodule AudioProxy.ConfigTest do
     test "serve mode becomes an atom" do
       assert Config.build!(%{"AP_SERVE_MODE" => "redirect"}).serve_mode == :redirect
       assert Config.build!(%{"AP_SERVE_MODE" => "proxy"}).serve_mode == :proxy
+    end
+  end
+
+  describe "AP_LOCAL_ROOT" do
+    @describetag :tmp_dir
+
+    test "is unset by default, which disables local sources" do
+      assert Config.build!(%{}).local_root == nil
+    end
+
+    test "is expanded to an absolute path", %{tmp_dir: tmp_dir} do
+      relative = Path.relative_to_cwd(tmp_dir)
+
+      assert Config.build!(%{"AP_LOCAL_ROOT" => relative}).local_root == Path.expand(tmp_dir)
+    end
+
+    test "a directory that is not there aborts the boot, naming the variable" do
+      error =
+        assert_raise Error, fn ->
+          Config.build!(%{"AP_LOCAL_ROOT" => "/nope/not/a/directory"})
+        end
+
+      assert error.message =~ "AP_LOCAL_ROOT"
+      assert error.message =~ "directory"
+    end
+
+    test "the filesystem root aborts the boot, since it would serve the whole host" do
+      error = assert_raise Error, fn -> Config.build!(%{"AP_LOCAL_ROOT" => "/"}) end
+
+      assert error.message =~ "AP_LOCAL_ROOT"
+      assert error.message =~ "filesystem root"
+    end
+
+    test "a file rather than a directory aborts the boot", %{tmp_dir: tmp_dir} do
+      file = Path.join(tmp_dir, "a-file")
+      File.write!(file, "")
+
+      assert_raise Error, fn -> Config.build!(%{"AP_LOCAL_ROOT" => file}) end
     end
   end
 

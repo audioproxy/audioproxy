@@ -14,11 +14,11 @@ defmodule AudioProxy.SourceTest do
   defp parse(segment), do: Source.parse(segment, @types)
 
   describe "registered types" do
-    test "none ship with this slice" do
-      assert Source.types() == []
+    test "local is the one that ships so far" do
+      assert Source.types() == [AudioProxy.Source.Local]
     end
 
-    test "so every source is an unknown scheme until one is registered" do
+    test "so a scheme no registered type claims is an unknown scheme" do
       assert Source.parse("plain/fake://body") == {:error, :unknown_scheme}
       assert Source.parse(enc("s3://masters/a.wav")) == {:error, :unknown_scheme}
     end

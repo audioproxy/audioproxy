@@ -7,6 +7,7 @@
 ## 2. Tests
 
 - [ ] 2.1 Unit: grant under capacity, FIFO order, `{:error, :queue_full}` on overflow, release grants next waiter
+- [ ] 2.1a An input that never yields bytes (a FIFO placed under `AP_LOCAL_ROOT`, a stalled origin) holds its slot until `AP_RENDER_TIMEOUT`. Assert the timeout path releases the slot and that queued waiters are then granted — the slot accounting must survive a render that hangs rather than fails. `Source.ffmpeg_input/1` refuses FIFOs as of `add-local-files-source`, so this is defence in depth for the remote backends
 - [ ] 2.2 Crash-safety: kill a holder → slot recovered; kill a waiter → queue shrinks; caller-timeout race leaves no leaked slot
 - [ ] 2.3 Concurrency property: N tasks (N ≫ cap) hammer acquire/work/release with random crashes; invariant asserted throughout — held ≤ cap, final state fully released
 - [ ] 2.4 Telemetry: events fire with expected measurements (attach test handler)
