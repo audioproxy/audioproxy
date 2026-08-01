@@ -1,28 +1,27 @@
 ## Why
 
-This slice assembles the pieces into the core resource: `GET /{sig}/{options}/{source}` streaming a rendered variant as chunked 200 (API doc §2, §5 MISS path). Signature, options, source, and pipeline all exist; here they become an HTTP endpoint with the §5 error surface.
+With `add-request-plugs` in place, a valid render request reaches a pinned 501. This slice replaces it with the streaming action — the MVP's core behavior: spawn ffmpeg via the port pipeline and stream chunked 200 per API doc §5. Split from the plumbing so each PR stays within the review-size target.
 
 ## What Changes
 
-- Router route + plug chain: verify signature → parse options → resolve source → source stat + ffmpeg input via the storage seam → spawn a render and stream it.
-- The endpoint consumes the port-pipeline's chunk stream directly (one render per request). Coalescing (`add-render-coalescing`, post-MVP) later replaces the direct spawn with a coordinator subscribe — same message contract, so the streaming loop is untouched; until then concurrent same-variant requests render independently and `X-Audio-Proxy` is always `MISS` (the §5 coalescing promise is deferred with the slice, like 429).
-- Chunked 200 delivery: chunks forwarded as they arrive; headers per §5 (Content-Type, `Cache-Control: public, max-age=31536000, immutable`, `ETag` = cache key, `X-Audio-Proxy`, `Content-Disposition` for `dl`).
-- Client-disconnect detection → kill the render (pipeline's consumer-down guarantee; no orphaned ffmpeg per CLAUDE.md).
-- Error mapping: 401/404/413/415/422/429 (+`Retry-After`)/504 as JSON bodies; `AP_MAX_SRC_BYTES` enforced via the source stat.
-- End-to-end integration tests over a real socket (Bandit) with local fixture sources + real ffmpeg (S3 sources join the matrix when `add-s3-client` lands post-MVP).
+- The render action: `Source.ffmpeg_input/1` handoff (TOCTOU posture decided and recorded), spawn `Ffmpeg.Render` with the endpoint process as consumer, chunked streaming receive-loop.
+- Response headers per §5 on the 200: Content-Type, `Cache-Control: public, max-age=31536000, immutable`, `ETag` = cache key, `X-Audio-Proxy: MISS`, `Content-Disposition` for `dl`. (`COALESCED` arrives with `add-render-coalescing`.)
+- Client-disconnect detection → cancel the render (pipeline's consumer-down kill as backstop; no orphans per CLAUDE.md).
+- Render-produced errors become reachable: 415 (undecodable) and 504 (timeout) flow through the existing ErrorJSON table; mid-stream failure after 200 terminates the chunked stream abnormally.
+- Full-stack test harness over a real socket (Bandit + local fixtures + real ffmpeg; `:gen_tcp` for disconnect/timing assertions).
 
 ## Capabilities
 
 ### New Capabilities
 
-- `render-http`: The signed render endpoint — request pipeline wiring, chunked MISS delivery, and the §5 error contract.
+<!-- none -->
 
 ### Modified Capabilities
 
-<!-- none -->
+- `render-http`: gains the streaming requirements (chunked 200, §5 headers, disconnect, render-failure reachability); the 501 placeholder requirement is removed.
 
 ## Impact
 
-- Modified: `lib/audio_proxy/router.ex`; new `lib/audio_proxy/plugs/*`, `lib/audio_proxy/error_json.ex`.
-- Depends on: `add-signature-verification`, `add-options-parser`, `add-source-resolver` (decoding + the storage seam), `add-local-files-source` (the MVP source type behind it), `add-ffmpeg-port-pipeline`.
-- Blocks: `add-render-coalescing` (swaps the direct spawn for its coordinator), `add-variant-cache` (adds HIT/tee), `add-peaks-format`, `add-info-endpoint` (shares plug chain).
+- Modified: the action in the router; removes the 501 pinning test.
+- Depends on: `add-request-plugs` (the seam it fills), `add-ffmpeg-port-pipeline`, `add-local-files-source`.
+- Blocks: `add-docker-release` (the MVP surface it smoke-tests), `add-render-coalescing` (swaps the spawn call), `add-variant-cache`, `add-peaks-format`.
