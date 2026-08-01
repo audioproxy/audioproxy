@@ -8,7 +8,7 @@
 - `AP_SOURCE_ALLOWLIST` and its pattern matcher: exact, trailing-`*` prefix glob for buckets, leading-`*.` label-anchored suffix glob for hosts. Unset = HTTP refused, S3 accepted.
 - Canonical identity for both forms, including HTTPS URL normalization (case, trailing root dot, IP literal spelling, default port, empty path/query, fragment).
 - `http://`, userinfo-bearing URLs, and IDN-ambiguous hosts refused at the grammar.
-- The HTTPS backend of the storage seam: `stat/1` via HEAD (unknown size tolerated), `ffmpeg_input/1` as the URL itself — closing a gap no slice currently owns. The S3 backend stays with `add-s3-client`, which has the client.
+- Both forms ship with "no backend" storage stubs pinned by tests — the HTTPS backend follows in `add-https-source-backend`, the S3 backend in `add-s3-client`.
 - **BREAKING** relative to what `add-source-resolver` proposed before this split: that slice no longer knows any source form, so nothing renders from S3 or HTTPS until this change lands.
 
 ## Capabilities
@@ -26,6 +26,5 @@
 - New: `lib/audio_proxy/source/s3.ex`, `lib/audio_proxy/source/https.ex`, allowlist matcher, HTTPS store backend.
 - Config: `AP_SOURCE_ALLOWLIST` gains its only consumer (it is parsed today and used by nothing).
 - Depends on: `add-source-resolver` (the `Source.Type` behaviour and dispatch table it registers into).
-- Blocks: `add-s3-client` (implements the S3 store backend for the `s3://` form defined here).
+- Blocks: `add-https-source-backend` (HTTPS store backend) and `add-s3-client` (S3 store backend) — both implement the seam for forms defined here.
 - Sequencing: post-MVP, alongside or before `add-s3-client`. The MVP chain does not include it.
-- Lands as two stacked PRs per the review-size convention: (1) source forms + allowlist, (2) the HTTPS storage backend — the tasks are grouped accordingly.
