@@ -21,7 +21,9 @@ defmodule AudioProxy.Application do
       )
     end
 
-    children = listener(config)
+    # Renders before the listener: a request that arrives on the first accepted
+    # connection must find somewhere to start a subprocess.
+    children = [AudioProxy.Ffmpeg.RenderSupervisor] ++ listener(config)
 
     Logger.info("audio_proxy #{vsn()} starting (serve_mode: #{config.serve_mode})")
 
