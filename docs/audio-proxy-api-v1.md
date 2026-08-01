@@ -56,7 +56,7 @@ Example:
 | `GET /hls/{sig}/{options}/{source}/index.m3u8` | **Reserved for v2** — segmented streaming |
 | `GET /hls/{sig}/{options}/{source}/seg-{n}.m4s` | **Reserved for v2** |
 
-No write endpoints in v1: variant write-back to S3 is a side effect of a GET render, not a client-facing API.
+No write endpoints in v1: variant write-back to S3 is a side effect of a GET render, not a client-facing API. Methods other than GET answer `404`, everywhere: the signed space is GET-only, and a `405` would confirm a route's shape without telling a client anything useful.
 
 ---
 

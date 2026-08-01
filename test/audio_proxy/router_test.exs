@@ -28,9 +28,42 @@ defmodule AudioProxy.RouterTest do
     end
   end
 
+  describe "the signed URL space" do
+    # These hold under any config: an invalid signature is a 401 whether or
+    # not keys are set and whether or not AP_ALLOW_INSECURE is on, so the
+    # module stays async. Config-dependent signature cases (tampering,
+    # insecure-disabled) live in AudioProxy.RenderEndpointTest.
+
+    test "a signed-looking URL with an invalid signature is 401" do
+      conn =
+        request(
+          :get,
+          "/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/f:opus/br:96/plain/s3://b/k.wav"
+        )
+
+      assert conn.status == 401
+
+      assert JSON.decode!(conn.resp_body) == %{
+               "error" => "invalid_signature",
+               "message" => "Invalid or missing signature"
+             }
+    end
+
+    test "a single-segment path is a signature with no content — 401" do
+      assert request(:get, "/nope").status == 401
+    end
+
+    test "verification runs ahead of dispatch: no sig, no error but 401" do
+      # Bad options and an unknown scheme would be 422/404 after
+      # verification; without a valid signature they are 401 first.
+      assert request(:get, "/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/f:bogus/plain/s3://b/k").status ==
+               401
+    end
+  end
+
   describe "unknown paths" do
-    test "respond 404 with a JSON body" do
-      conn = request(:get, "/nope")
+    test "the root path matches no signed route and 404s" do
+      conn = request(:get, "/")
 
       assert conn.status == 404
       assert get_resp_header(conn, "content-type") == ["application/json; charset=utf-8"]
@@ -41,12 +74,14 @@ defmodule AudioProxy.RouterTest do
              }
     end
 
-    test "a signed-looking render URL 404s until that slice lands" do
-      assert request(:get, "/insecure/f:opus/br:96/plain/s3://masters/x.wav").status == 404
-    end
-
-    test "non-GET methods on /health also fall through to the 404" do
+    test "non-GET methods fall through to the 404" do
       assert request(:post, "/health").status == 404
+
+      assert request(
+               :post,
+               "/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/f:opus/plain/s3://b/k.wav"
+             ).status ==
+               404
     end
   end
 end

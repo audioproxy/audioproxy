@@ -5,8 +5,9 @@
 An imgproxy-style on-the-fly audio transcoding proxy.
 
 > **Status: early.** URL signing, the processing-options grammar, the ffmpeg
-> argument builder and `local://` source resolution are done; rendering,
-> streaming and S3 access are not. Slices tracked under `openspec/changes/`.
+> argument builder and `local://` source resolution are done, and signed URLs
+> now answer with the full error surface below; rendering, streaming and S3
+> access are not. Slices tracked under `openspec/changes/`.
 ## What you can do with it
 
 Point it at a lossless master — a file in a directory you mounted, or later an
@@ -48,10 +49,12 @@ Each URL describes its output completely, so the same URL always means the
 same bytes. The first request for a variant renders it and streams it while it
 encodes; later requests are served from the variant bucket with `Range` support.
 
-> **These render nothing yet.** Today the URL layer is real — bad options come
-> back as `422` naming the offending segment, bad signatures as `403` — but the
-> render path is not wired up. The examples show the API being built toward, and
-> each option string above is checked against the parser in the test suite.
+> **These render nothing yet.** The request path is real — bad signatures come
+> back as `401`, bad options as `422` naming the offending segment, missing or
+> off-limits sources as `404`, oversized sources as `413` — but the render
+> itself is not wired up, so a request that passes every check answers `501`
+> for now. The examples show the API being built toward, and each option
+> string above is checked against the parser in the test suite.
 
 ## Design
 
@@ -297,6 +300,26 @@ path limits, and why the root never appears in a cache key.
 with its own rule for what it will serve, and until they land those schemes
 are refused as unknown. See [docs/sources.md](docs/sources.md) for the
 contract they plug into and `openspec/changes/` for which slice adds which.
+
+## Errors
+
+Failures are JSON, one shape everywhere: `{"error": "…", "message": "…"}`.
+
+| Status | `error` | When |
+|---|---|---|
+| `401` | `invalid_signature` | Missing or invalid signature |
+| `404` | `not_found` | The source is missing, unreadable, unparseable, or not one this proxy may serve — deliberately indistinguishable, so a `404` tells you nothing about what exists on disk |
+| `413` | `source_too_large` | The source exceeds `AP_MAX_SRC_BYTES` |
+| `415` | `undecodable_source` | The source format is not decodable |
+| `422` | `invalid_options` | Invalid or conflicting options; the message names the offending segment |
+| `429` | `queue_full` | The render queue is full; `Retry-After` is set |
+| `504` | `render_timeout` | The render exceeded `AP_RENDER_TIMEOUT` |
+
+`401`, `404`, `413` and `422` are reachable today; the rest ship with the
+render machinery that produces them. And until the render action lands (the
+next slice, `openspec/changes/add-render-endpoint`), a request that passes
+every check answers `501` `not_implemented` instead of streaming.
+
 ## Configuration
 
 All configuration comes from `AP_`-prefixed environment variables — see
