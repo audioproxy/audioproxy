@@ -3,10 +3,14 @@ name: CI
 on:
   push:
     branches: [main]
+    # Release tags run the same pipeline as any other push; the publish job at
+    # the bottom is what reads the tag and turns it into version tags.
+    tags: ['v*']
   pull_request:
 
 env:
   MIX_ENV: test
+  IMAGE_NAME: ghcr.io/audioproxy/audioproxy
 
 jobs:
   test:
@@ -40,41 +44,200 @@ jobs:
       # :ffmpeg stays excluded (that tag has its own job below).
       - run: mix test --include integration
 
-  test-ffmpeg:
-    name: ffmpeg-tagged tests
+  # ---------------------------------------------------------------------------
+  # Image verification. Both jobs build from the same Dockerfile and share a
+  # buildx layer cache, so the second one to run pays for very little.
+  # ---------------------------------------------------------------------------
+
+  image-ffmpeg:
+    name: ffmpeg-tagged tests against the shipped ffmpeg
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install ffmpeg
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg
-          ffmpeg -version
-          ffprobe -version
+      - uses: docker/setup-buildx-action@v3
 
-      - uses: erlef/setup-beam@v1
-        id: beam
+      # The runtime image is built here too, only so its ffmpeg can be compared
+      # against the test stage's. That comparison is the whole point of the job:
+      # the argv contract has to be checked against the binary that ships, not
+      # against whatever the runner's apt happens to hold.
+      - name: Build test stage
+        uses: docker/build-push-action@v6
         with:
-          version-file: .tool-versions
-          version-type: strict
+          context: .
+          target: test
+          load: true
+          tags: audio_proxy:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      - uses: actions/cache@v6
+      - name: Build runtime stage
+        uses: docker/build-push-action@v6
         with:
-          path: |
-            deps
-            _build
-          key: ${{ runner.os }}-mix-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('mix.lock') }}
-          restore-keys: ${{ runner.os }}-mix-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
+          context: .
+          target: runtime
+          load: true
+          tags: audio_proxy:runtime
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      - run: mix deps.get
-
-      # `mix test --only` exits non-zero when the filter matches nothing, so
-      # this job stays green until the first `@tag :ffmpeg` test lands.
-      - name: Run :ffmpeg-tagged tests
+      - name: Assert the tested ffmpeg is the shipped ffmpeg
         run: |
-          if grep -rqE '@(module)?tag[ (]+:ffmpeg' test; then
-            mix test --only ffmpeg
-          else
-            echo "No :ffmpeg-tagged tests yet - nothing to run."
+          set -euo pipefail
+          # Captured whole, then sliced to the first line with parameter
+          # expansion. Piping into `head -1` closes the pipe after one line,
+          # ffmpeg dies of EPIPE partway through its banner, docker exits
+          # non-zero, and `pipefail` turns that into a failed step — a failure
+          # about plumbing that reads exactly like a failed assertion.
+          test_ffmpeg=$(docker run --rm --entrypoint ffmpeg audio_proxy:test -version)
+          ship_ffmpeg=$(docker run --rm --entrypoint ffmpeg audio_proxy:runtime -version)
+          test_ffmpeg=${test_ffmpeg%%$'\n'*}
+          ship_ffmpeg=${ship_ffmpeg%%$'\n'*}
+          echo "test stage:    $test_ffmpeg"
+          echo "runtime stage: $ship_ffmpeg"
+          if [ "$test_ffmpeg" != "$ship_ffmpeg" ]; then
+            echo "::error::test and runtime stages ship different ffmpeg builds — check ALPINE_VERSION in the Dockerfile"
+            exit 1
           fi
+
+          # VERSIONS.md is the single record of the pin; a bump that moves the
+          # major has to move that file too, deliberately. The FFMPEG_MAJOR line
+          # exists to be parsed — matching prose instead once meant reading a
+          # restatement of the number rather than the number itself.
+          expected=$(grep -oE '^[[:space:]]*FFMPEG_MAJOR=[0-9]+$' VERSIONS.md | grep -oE '[0-9]+$')
+          actual=$(printf '%s' "$ship_ffmpeg" | grep -oE 'ffmpeg version [0-9]+' | grep -oE '[0-9]+$')
+          echo "expected major: $expected, actual: $actual"
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::ffmpeg major $actual does not match the $expected pinned in VERSIONS.md"
+            exit 1
+          fi
+
+      - name: Run :ffmpeg-tagged tests in the image
+        run: docker run --rm audio_proxy:test mix test --only ffmpeg
+
+  smoke:
+    name: container smoke suite
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the release image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          load: true
+          tags: audio_proxy:smoke
+          # The smoke image is never pushed, so its version label only has to be
+          # non-empty for the label check; the publish job computes the real one.
+          build-args: |
+            VERSION=${{ github.ref_type == 'tag' && github.ref_name || 'edge' }}
+            REVISION=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Ruby is preinstalled on ubuntu-latest; the script needs no gems, and it
+      # takes its ffmpeg from the image rather than the runner.
+      - name: Run the smoke suite
+        run: SKIP_BUILD=1 IMAGE=audio_proxy:smoke bin/smoke-image
+
+  # ---------------------------------------------------------------------------
+  # Publishing. Gated on everything above; never runs for a pull request, so a
+  # fork cannot push and an unreviewed branch has nowhere to publish to.
+  # ---------------------------------------------------------------------------
+
+  publish:
+    name: publish image to GHCR
+    needs: [smoke, image-ffmpeg]
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # A release names a version in two places. If they disagree, the image
+      # would carry a version label nobody can trace back — fail before pushing,
+      # not after.
+      - name: Assert mix.exs version matches the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          # Same reason as above: no `| head -1` under pipefail. `awk NR==1`
+          # consumes its whole input, so nothing upstream ever sees EPIPE.
+          mix_version=$(grep -oE 'version:[[:space:]]*"[^"]+"' mix.exs | awk 'NR==1' | grep -oE '"[^"]+"' | tr -d '"')
+          echo "tag: $tag_version, mix.exs: $mix_version"
+          if [ "$tag_version" != "$mix_version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match mix.exs version $mix_version"
+            exit 1
+          fi
+
+      # Tag rules, in one place rather than spread across a matrix:
+      #   vX.Y.Z  -> :X.Y.Z, :X.Y, :latest
+      #   main    -> :edge, :sha-<12>
+      # The sha tag is the immutable one — it is what a deployment should pin
+      # when it is not pinning a release.
+      #
+      # The shape check on the tag is load-bearing, not defensive tidiness. The
+      # `v*` trigger also matches `v1.2.3-rc1` and `v1.2`, and plain suffix
+      # stripping turned both into a `:latest` push: a release candidate would
+      # have moved the tag everyone follows, and `v2.0.0-beta.1` would have
+      # produced the nonsense `:2.0.0-beta`. Anything that is not exactly
+      # X.Y.Z fails here rather than publishing something surprising.
+      - name: Compute image tags
+        id: tags
+        run: |
+          set -euo pipefail
+          short_sha=$(printf '%s' "$GITHUB_SHA" | cut -c1-12)
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+            if ! printf '%s' "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::tag $GITHUB_REF_NAME is not vX.Y.Z; pre-release and partial tags are not published"
+              exit 1
+            fi
+            major_minor="${version%.*}"
+            tags="${IMAGE_NAME}:${version},${IMAGE_NAME}:${major_minor},${IMAGE_NAME}:latest"
+          else
+            version="edge"
+            tags="${IMAGE_NAME}:edge,${IMAGE_NAME}:sha-${short_sha}"
+          fi
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publishing: $tags"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Rebuilt rather than carried over from the smoke job: the layer cache
+      # makes it cheap, and the alternative (exporting a tarball between jobs)
+      # buys nothing since the inputs are byte-identical.
+      #
+      # `cache-from` only. The smoke and image-ffmpeg jobs already exported every
+      # layer this build reads, in this same run, so exporting again would write
+      # a cache nobody reads — and it would be the one cache write happening
+      # under a narrowed `permissions:` block, which is a question not worth
+      # having.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: |
+            VERSION=${{ steps.tags.outputs.version }}
+            REVISION=${{ github.sha }}
+          cache-from: type=gha

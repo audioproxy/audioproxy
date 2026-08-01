@@ -1,0 +1,40 @@
+# The build context is deliberately narrow: the Dockerfile COPYs the paths it
+# needs by name, so everything here is belt-and-braces against a large context
+# and against host-built artifacts leaking into a stage that must compile its
+# own.
+
+# Host build products. Copying these in would mix BEAM files built by the host's
+# toolchain into a release assembled by the image's.
+_build/
+deps/
+cover/
+doc/
+*.ez
+audio_proxy-*.tar
+erl_crash.dump
+
+# Version control and CI.
+.git/
+.github/
+.gitignore
+
+# Local environment, editor and agent state.
+.env
+.env.*
+.claude/
+.config/
+.devcontainer/
+.opencode/
+.tool-versions
+bin/
+tmp/
+second-opinion.md
+
+# Planning artifacts and prose. The test stage copies README.md by name because
+# a test parses it; nothing else here is needed to build or test.
+openspec/
+docs/
+CLAUDE.md
+VERSIONS.md
+Dockerfile
+.dockerignore

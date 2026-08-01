@@ -82,41 +82,159 @@ restores it on exit; such tests must set `async: false`. Prefer
 `AudioProxy.Config.build!/1` — pure and async-safe — when you only need to check
 parsing or validation.
 
+## The container smoke suite
+
+`mix test` says nothing about the artifact that ships. [`bin/smoke-image`](../bin/smoke-image)
+builds the release image and drives it from outside, the way an operator would:
+
+```bash
+bin/smoke-image                 # build, then run every check
+SKIP_BUILD=1 bin/smoke-image    # reuse an already-built audio_proxy:smoke
+```
+
+It needs docker and curl, and deliberately not ffmpeg — the fixtures are
+generated with the image's own ffmpeg and the durations read back with its
+ffprobe, so what it measures is the shipped binary rather than yours. It checks
+that the release boots non-root and reaches `/health`, that a signed URL
+carrying a percent-escape renders over **h2c** (Bandit builds `request_path`
+separately on its HTTP/2 path, so the `:integration` suite's HTTP/1.1 guarantee
+does not carry over), that a malformed `AP_` variable kills the container, and
+that SIGTERM during a render is a prompt clean exit with ffmpeg gone from the
+process table first.
+
+The fixture directory is mounted `:ro` throughout, which is the posture the
+README tells operators to use rather than an incidental detail — write access to
+`AP_LOCAL_ROOT` is write access to what the proxy will serve.
+
 ## Continuous integration
 
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on every push to
-`main` and every pull request, in two jobs:
+`main`, every `v*` tag, and every pull request:
 
-| Job | Runs | Notes |
-|---|---|---|
-| `test` | `mix format --check-formatted`, `mix compile --warnings-as-errors`, `mix test --include integration` | No external binaries — the untagged + `:integration` suite must pass on a bare runner |
-| `test-ffmpeg` | `mix test --only ffmpeg` | Installs ffmpeg first; renders every format and filter through the real binary |
+| Job | Needs | Runs | Notes |
+|---|---|---|---|
+| `test` | — | `mix format --check-formatted`, `mix compile --warnings-as-errors`, `mix test --include integration` | No external binaries — the untagged + `:integration` suite must pass on a bare runner |
+| `image-ffmpeg` | `test` | Builds the `test` and `runtime` stages, then `mix test --only ffmpeg` inside the image | Asserts the two stages carry the *same* ffmpeg build, and that its major matches [`VERSIONS.md`](../VERSIONS.md) |
+| `smoke` | `test` | Builds the release image, runs [`bin/smoke-image`](../bin/smoke-image) | Boot, health, an end-to-end render off a read-only mount, a signed percent-escaped URL over h2c, config validation, SIGTERM during a render |
+| `publish` | `smoke`, `image-ffmpeg` | Pushes to GHCR | Never runs for a pull request; see [Releases](#releases) |
 
 Compilation runs with warnings as errors because the compiler's set-theoretic
 type checker reports through warnings — that flag is what makes the type gate a
 gate rather than a suggestion.
 
-Both jobs read Elixir and Erlang/OTP from [`.tool-versions`](../.tool-versions),
-so bumping the pin is a one-file change that CI follows automatically. The
+**The `:ffmpeg` suite runs in exactly one place: inside the image.** There was
+briefly a second job running it against Debian's apt ffmpeg on the bare runner,
+which was dropped — it tested an encoder this project does not ship. The two
+disagree in the way that matters: Debian trixie carries ffmpeg 7.x and the
+release image carries 8.x, so a green run against apt could never confirm the
+argv contract holds for what actually ships, and a red one might only mean the
+old major behaves differently. The cost of dropping it is slower feedback on a
+plain argv typo; the benefit is that a pass means something.
+
+Locally, `mix test --only ffmpeg` runs against whatever the devcontainer has
+(Debian, 7.x), so treat a local green as a strong hint and CI as the gate. This
+is the same gap [`VERSIONS.md`](../VERSIONS.md) documents.
+
+`test` reads Elixir and Erlang/OTP from [`.tool-versions`](../.tool-versions), so
+bumping that pin is a one-file change it follows automatically. The
 `deps`/`_build` cache is keyed on the resolved versions plus `mix.lock`, so a
 toolchain bump misses the cache rather than restoring BEAM files built by a
-different compiler.
+different compiler. `image-ffmpeg` and `smoke` get their toolchain from the
+Dockerfile instead, which is why `VERSIONS.md` has to be bumped alongside
+`.tool-versions` — the two are not wired together, and nothing but that file's
+procedure keeps them in step.
 
-Later slices extend this workflow rather than adding parallel ones — the image
-build and smoke tests from `add-docker-release`, and MinIO as a service
-container from `add-s3-client` — so there stays exactly one check to require.
+Later slices extend this workflow rather than adding parallel ones — MinIO as a
+service container from `add-s3-client`, and the arm64 matrix from
+`add-multi-arch-images` — so there stays one workflow to require.
 
 [`.github/dependabot.yml`](../.github/dependabot.yml) opens update PRs weekly for
 Hex packages and GitHub Actions. Minor and patch updates are grouped into one PR
 per ecosystem; majors come individually. Every one of them is gated by the
 workflow above.
 
-`main` is protected: pull requests cannot merge until both jobs pass, and the
-branch rejects force-pushes and deletion. **Branch protection is a repo setting,
-not a file**, so it does not travel with a clone — a fork has to set it up
-again, under *Settings → Branches → Add rule* for `main`, requiring the checks
-named **format, compile, unit tests** and **ffmpeg-tagged tests** (GitHub lists
-status checks by job name, not by the job's key in the YAML).
+`main` is protected: pull requests cannot merge until the gating jobs pass, and
+the branch rejects force-pushes and deletion. **Branch protection is a repo
+setting, not a file**, so it does not travel with a clone — a fork has to set it
+up again, under *Settings → Branches → Add rule* for `main`, requiring the
+checks named **format, compile, unit tests**, **ffmpeg-tagged tests against the
+shipped ffmpeg** and **container smoke suite** (GitHub lists status checks by
+job name, not by the job's key in the YAML). `publish` is not a required check —
+it does not run on pull requests at all.
+
+> Removing a job does not remove its required check. **ffmpeg-tagged tests** was
+> dropped, and if it is still listed under branch protection every pull request
+> will block forever waiting for a status that can no longer arrive. Untick it
+> there when this lands.
+
+---
+
+## Releases
+
+Images live at `ghcr.io/audioproxy/audioproxy`. Nothing is published by hand:
+the `publish` job is the only thing that pushes, and it is gated on the smoke
+suite, so a red pipeline publishes nothing for that ref.
+
+| Ref | Tags pushed | Mutable? |
+|---|---|---|
+| `vX.Y.Z` | `:X.Y.Z`, `:X.Y`, `:latest` | `:X.Y` and `:latest` move; `:X.Y.Z` does not |
+| push to `main` | `:edge`, `:sha-<12>` | `:edge` moves; `:sha-<12>` does not |
+| any other `v*` tag | none — the job fails | — |
+
+That last row is deliberate. The workflow triggers on `v*`, so `v1.2.3-rc1` and
+`v1.2` reach the publish job, and both would otherwise have been treated as
+releases: an RC would have moved `:latest`, and `v2.0.0-beta.1` would have
+produced a `:2.0.0-beta` tag that means nothing. There is no pre-release channel
+yet; if one is wanted, it needs its own tag rule rather than falling out of
+string manipulation.
+
+`:sha-<12>` is the one to reach for when you need an exact image that is not a
+release — it is one image per commit and it is never reused, which makes both
+pinning and bisection possible.
+
+### Cutting a release
+
+```bash
+# 1. Bump the version in mix.exs. CI fails the publish if it disagrees
+#    with the tag, so this is not optional and not automated.
+$EDITOR mix.exs
+
+# 2. Land it on main through the usual PR gate.
+
+# 3. Tag the merge commit and push the tag.
+git tag -a v0.1.0 -m "v0.1.0"
+git push origin v0.1.0
+```
+
+The tag push runs the whole pipeline again — tests, image, smoke — and only
+then publishes. There is no separate release workflow to keep in step.
+
+### What bumps what
+
+SemVer here is over the **URL contract**: the grammar, the response semantics,
+and the cache-key derivation. That is the API this project has; the Elixir
+modules are not a public interface.
+
+| Change | Bump |
+|---|---|
+| New option, new format, new endpoint — nothing existing changes meaning | Minor |
+| A change to what an existing URL means, or to how a cache key is derived | **Major** |
+| Bug fix, dependency update, ffmpeg/Alpine/OTP pin bump | Patch |
+
+Two of those are worth spelling out, because both look smaller than they are:
+
+- **A cache-key change is major even though no client code changes.** New keys
+  orphan every variant already written to the cache: the URLs still work, and
+  every one of them silently re-renders and re-writes. An operator has to be
+  told that before it happens, and a major version is how.
+- **A pin bump cuts a release.** A different ffmpeg encodes the same URL to
+  different bytes. Someone tracking `:0.1` must not have the output of a URL
+  change under them without a version to point at, so the pin is part of what a
+  version identifies. The procedure is in
+  [VERSIONS.md](../VERSIONS.md#bumping-a-pin).
+
+Until `v1.0.0` the URL contract may still move; `0.x` is the signal that it is
+not yet frozen.
 
 ---
 
