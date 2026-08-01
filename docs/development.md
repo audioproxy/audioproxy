@@ -114,31 +114,35 @@ README tells operators to use rather than an incidental detail — write access 
 | Job | Needs | Runs | Notes |
 |---|---|---|---|
 | `test` | — | `mix format --check-formatted`, `mix compile --warnings-as-errors`, `mix test --include integration` | No external binaries — the untagged + `:integration` suite must pass on a bare runner |
-| `test-ffmpeg` | — | `mix test --only ffmpeg` | Installs ffmpeg from apt; fast feedback on the argv contract |
 | `image-ffmpeg` | `test` | Builds the `test` and `runtime` stages, then `mix test --only ffmpeg` inside the image | Asserts the two stages carry the *same* ffmpeg build, and that its major matches [`VERSIONS.md`](../VERSIONS.md) |
-| `smoke` | `test`, `test-ffmpeg` | Builds the release image, runs [`bin/smoke-image`](../bin/smoke-image) | Boot, health, an end-to-end render off a read-only mount, a signed percent-escaped URL over h2c, config validation, SIGTERM during a render |
+| `smoke` | `test` | Builds the release image, runs [`bin/smoke-image`](../bin/smoke-image) | Boot, health, an end-to-end render off a read-only mount, a signed percent-escaped URL over h2c, config validation, SIGTERM during a render |
 | `publish` | `smoke`, `image-ffmpeg` | Pushes to GHCR | Never runs for a pull request; see [Releases](#releases) |
 
 Compilation runs with warnings as errors because the compiler's set-theoretic
 type checker reports through warnings — that flag is what makes the type gate a
 gate rather than a suggestion.
 
-`test-ffmpeg` and `image-ffmpeg` run the same suite against two different
-ffmpeg builds on purpose. The apt one on the runner is fast and catches an
-argv mistake early; the one in the image is the binary that actually ships, and
-it is the one whose verdict counts. They can legitimately disagree — the
-devcontainer is Debian and the release image is Alpine, and their ffmpeg majors
-differ — which is the gap `image-ffmpeg` exists to close.
+**The `:ffmpeg` suite runs in exactly one place: inside the image.** There was
+briefly a second job running it against Debian's apt ffmpeg on the bare runner,
+which was dropped — it tested an encoder this project does not ship. The two
+disagree in the way that matters: Debian trixie carries ffmpeg 7.x and the
+release image carries 8.x, so a green run against apt could never confirm the
+argv contract holds for what actually ships, and a red one might only mean the
+old major behaves differently. The cost of dropping it is slower feedback on a
+plain argv typo; the benefit is that a pass means something.
 
-`test` and `test-ffmpeg` read Elixir and Erlang/OTP from
-[`.tool-versions`](../.tool-versions), so bumping that pin is a one-file change
-they follow automatically. The `deps`/`_build` cache is keyed on the resolved
-versions plus `mix.lock`, so a toolchain bump misses the cache rather than
-restoring BEAM files built by a different compiler. `image-ffmpeg` and `smoke`
-get their toolchain from the Dockerfile instead, which is why
-[`VERSIONS.md`](../VERSIONS.md) has to be bumped alongside `.tool-versions` — the
-two are not wired together, and nothing but that file's procedure keeps them in
-step.
+Locally, `mix test --only ffmpeg` runs against whatever the devcontainer has
+(Debian, 7.x), so treat a local green as a strong hint and CI as the gate. This
+is the same gap [`VERSIONS.md`](../VERSIONS.md) documents.
+
+`test` reads Elixir and Erlang/OTP from [`.tool-versions`](../.tool-versions), so
+bumping that pin is a one-file change it follows automatically. The
+`deps`/`_build` cache is keyed on the resolved versions plus `mix.lock`, so a
+toolchain bump misses the cache rather than restoring BEAM files built by a
+different compiler. `image-ffmpeg` and `smoke` get their toolchain from the
+Dockerfile instead, which is why `VERSIONS.md` has to be bumped alongside
+`.tool-versions` — the two are not wired together, and nothing but that file's
+procedure keeps them in step.
 
 Later slices extend this workflow rather than adding parallel ones — MinIO as a
 service container from `add-s3-client`, and the arm64 matrix from
@@ -153,10 +157,15 @@ workflow above.
 the branch rejects force-pushes and deletion. **Branch protection is a repo
 setting, not a file**, so it does not travel with a clone — a fork has to set it
 up again, under *Settings → Branches → Add rule* for `main`, requiring the
-checks named **format, compile, unit tests**, **ffmpeg-tagged tests**, **ffmpeg-tagged
-tests against the shipped ffmpeg** and **container smoke suite** (GitHub lists
-status checks by job name, not by the job's key in the YAML). `publish` is not a
-required check — it does not run on pull requests at all.
+checks named **format, compile, unit tests**, **ffmpeg-tagged tests against the
+shipped ffmpeg** and **container smoke suite** (GitHub lists status checks by
+job name, not by the job's key in the YAML). `publish` is not a required check —
+it does not run on pull requests at all.
+
+> Removing a job does not remove its required check. **ffmpeg-tagged tests** was
+> dropped, and if it is still listed under branch protection every pull request
+> will block forever waiting for a status that can no longer arrive. Untick it
+> there when this lands.
 
 ---
 
