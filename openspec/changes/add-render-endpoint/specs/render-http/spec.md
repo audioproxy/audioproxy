@@ -12,7 +12,7 @@ The system SHALL serve a valid signed render request as `200 OK` with `Transfer-
 - **THEN** initial chunks arrive before the subprocess exits (no full buffering)
 
 ### Requirement: Response headers per API §5
-The system SHALL set `Content-Type` for the format, `Cache-Control: public, max-age=31536000, immutable`, `ETag` equal to the cache key, `X-Audio-Proxy: MISS`, and `Content-Disposition: attachment` with the filename when `dl` is present.
+The system SHALL set `Content-Type` for the format, `Cache-Control: public, max-age=31536000, immutable`, `ETag` carrying the cache key as an RFC 9110 entity-tag (the key, quoted), `X-Audio-Proxy: MISS`, and `Content-Disposition: attachment` with the filename when `dl` is present.
 
 #### Scenario: Headers on MISS
 - **WHEN** a fresh variant is requested with `dl:preview.mp3`

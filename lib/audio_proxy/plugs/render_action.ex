@@ -154,7 +154,7 @@ defmodule AudioProxy.Plugs.RenderAction do
     after
       deadline() ->
         demonitor(monitor)
-        Render.cancel(render)
+        cancel_and_drain(render)
         ErrorJSON.halt_with(conn, :render_timeout)
     end
   end
@@ -199,7 +199,7 @@ defmodule AudioProxy.Plugs.RenderAction do
         # this process dies instead of returning.
         Logger.debug("client disconnected mid-stream: #{inspect(reason)}")
         demonitor(monitor)
-        Render.cancel(render)
+        cancel_and_drain(render)
         halt(conn)
     end
   end
@@ -209,11 +209,42 @@ defmodule AudioProxy.Plugs.RenderAction do
   # owns the socket, and returning a conn would complete the response normally
   # and hand the client a truncated file it believes is whole.
   #
-  # `:shutdown`-tagged so it is not reported as a crash; what happened is
-  # already in the log line above, together with the class that caused it.
+  # The reason is `:shutdown`-tagged and carries the class, so an operator
+  # reading the adapter's exit report can tell a deliberate teardown from a bug
+  # in this module. Bandit logs it at error level either way — the tag does not
+  # buy silence, only legibility — which is why `log_failure/1` has already said
+  # what went wrong by the time this runs.
+  #
+  # No drain here, unlike the paths that return: this process is about to die,
+  # and its mailbox with it.
   defp abort(monitor, class) do
     demonitor(monitor)
     exit({:shutdown, {:render_aborted, class}})
+  end
+
+  # `cancel/1` returns only once the render has stopped, and everything the
+  # render ever sent us — queued chunks, the final `%{class: :cancelled}` — was
+  # sent before that reply, so it is already in the mailbox and `after 0` is a
+  # drain rather than a race.
+  #
+  # Draining matters because this process is Bandit's *connection* process and
+  # is reused for the next request on a keep-alive connection. Those messages
+  # would never match again — the next request pins a different render pid — so
+  # they would accumulate for the life of the connection, and every selective
+  # receive in the loop above would scan past all of them.
+  defp cancel_and_drain(render) do
+    Render.cancel(render)
+    drain(render)
+  end
+
+  defp drain(render) do
+    receive do
+      {:chunk, ^render, _data} -> drain(render)
+      {:done, ^render, _info} -> drain(render)
+      {:error, ^render, _failure} -> drain(render)
+    after
+      0 -> :ok
+    end
   end
 
   ## Response head

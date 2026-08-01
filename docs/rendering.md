@@ -74,9 +74,14 @@ there is a measurement asking for it.
 
 ## Render policy
 
-A render runs at full speed into the write-back; the client's chunked stream
-lags it rather than throttling it. A client listening in real time must not be
-able to pin a CPU slot for the duration of the audio.
+A render runs at full speed; the client's chunked stream lags it rather than
+throttling it. A client listening in real time must not be able to pin a CPU
+slot for the duration of the audio.
+
+The write-back this policy was written for does not exist yet — there is no
+variant bucket and no tee, so today "full speed" means only that the encoder is
+never paced by the socket. The policy is what the write-back will land into
+(`add-variant-cache`), not something already running.
 
 ## Lifecycle: no ffmpeg outlives its render
 

@@ -136,7 +136,7 @@ Straight mapping of `ffprobe -show_format -show_streams`, filtered. Cached aggre
 
 ### Common headers
 
-`Content-Type` per format · `Cache-Control: public, max-age=31536000, immutable` (URL encodes the variant, so it *is* immutable) · `ETag` = cache key.
+`Content-Type` per format · `Cache-Control: public, max-age=31536000, immutable` (URL encodes the variant, so it *is* immutable) · `ETag` = cache key, sent quoted, since RFC 9110 defines an entity-tag as a quoted-string and a bare token is not one.
 
 ### Errors (JSON body)
 

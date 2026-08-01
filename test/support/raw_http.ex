@@ -23,20 +23,76 @@ defmodule AudioProxy.RawHttp do
   @doc """
   Opens a connection and sends `GET path`.
 
-  `Connection: close` is always sent, so a completed response ends in a closed
-  socket the way every failure case does and one reader serves all of them.
+  `Connection: close` is sent by default, so a completed response ends in a
+  closed socket the way every failure case does and one reader serves all of
+  them. Pass `close: false` for the keep-alive cases, which need the connection
+  — and the process behind it — to survive the first response.
   """
-  @spec get(String.t(), :inet.port_number()) :: :gen_tcp.socket()
-  def get(path, port) do
+  @spec get(String.t(), :inet.port_number(), keyword()) :: :gen_tcp.socket()
+  def get(path, port, opts \\ []) do
     {:ok, socket} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false, packet: :raw])
 
-    :ok =
-      :gen_tcp.send(
-        socket,
-        "GET #{path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-      )
+    :ok = send_get(socket, path, opts)
 
     socket
+  end
+
+  @doc """
+  Sends `GET path` down a socket that is already open.
+
+  For the keep-alive cases: a second request on the connection the first one
+  left behind.
+  """
+  @spec send_get(:gen_tcp.socket(), String.t(), keyword()) :: :ok
+  def send_get(socket, path, opts \\ []) do
+    close = if Keyword.get(opts, :close, true), do: "Connection: close\r\n", else: ""
+
+    :gen_tcp.send(socket, "GET #{path} HTTP/1.1\r\nHost: localhost\r\n#{close}\r\n")
+  end
+
+  @doc """
+  Reads exactly one `Content-Length`-framed response, leaving the socket open.
+
+  `read/2` cannot serve the keep-alive tests: it reads to close, so the first
+  response would swallow the connection. Only the error responses need this,
+  and those all carry a `Content-Length`.
+  """
+  @spec read_one(:gen_tcp.socket(), timeout()) :: %{head: String.t(), body: binary()}
+  def read_one(socket, deadline \\ 5_000), do: read_one(socket, deadline, "")
+
+  defp read_one(socket, deadline, acc) do
+    case String.split(acc, "\r\n\r\n", parts: 2) do
+      [head, body] ->
+        length = content_length(head)
+
+        if byte_size(body) >= length do
+          %{head: String.downcase(head), body: binary_slice(body, 0, length)}
+        else
+          read_one(socket, deadline, acc <> recv!(socket, deadline))
+        end
+
+      [_partial] ->
+        read_one(socket, deadline, acc <> recv!(socket, deadline))
+    end
+  end
+
+  defp content_length(head) do
+    head
+    |> String.downcase()
+    |> String.split("\r\n")
+    |> Enum.find_value(0, fn line ->
+      case String.split(line, ":", parts: 2) do
+        ["content-length", value] -> value |> String.trim() |> String.to_integer()
+        _other -> nil
+      end
+    end)
+  end
+
+  defp recv!(socket, deadline) do
+    case :gen_tcp.recv(socket, 0, deadline) do
+      {:ok, data} -> data
+      {:error, reason} -> raise "socket error: #{inspect(reason)}"
+    end
   end
 
   @doc """

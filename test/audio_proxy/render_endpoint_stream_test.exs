@@ -60,7 +60,7 @@ defmodule AudioProxy.RenderEndpointStreamTest do
       )
 
     {:ok, {{127, 0, 0, 1}, port}} = ThousandIsland.listener_info(bandit)
-    {:ok, port: port}
+    {:ok, port: port, bandit: bandit}
   end
 
   describe "a completed render" do
@@ -129,8 +129,51 @@ defmodule AudioProxy.RenderEndpointStreamTest do
     end
   end
 
+  describe "keep-alive" do
+    test "a cancelled render leaves nothing in the connection's mailbox", %{
+      port: port,
+      bandit: bandit
+    } do
+      # Bandit reuses this connection's process for the next request, so
+      # anything the previous request left in that mailbox stays there: nothing
+      # would ever match it again (the next request pins a different render
+      # pid), and every selective receive in the streaming loop would scan past
+      # it for the life of the connection.
+      #
+      # Today this passes with or without `cancel_and_drain/1`, and the reason
+      # is worth writing down. A 504 normally arrives as the *render's* own
+      # timer firing and sending `%{class: :timeout}`, which the loop consumes —
+      # no cancellation, nothing left over. The action's own deadline is a
+      # second wider (see the module's "backstop" note), so the path that
+      # cancels, and therefore the path that can strand a `%{class: :cancelled}`
+      # here, only runs when the backstop beats the render's timer. This pins
+      # the invariant rather than the fix: it is what fails if a future change
+      # starts cancelling on the ordinary timeout path.
+      socket = RawHttp.get(signed("/f:mp3/plain/local://hang.wav"), port, close: false)
+
+      timed_out = RawHttp.read_one(socket, @deadline)
+      assert timed_out.head =~ "http/1.1 504"
+
+      # Asserted on the process itself: the next request succeeding proves
+      # nothing here, because a stale message is inert rather than harmful. The
+      # mailbox depth is the property.
+      assert {:ok, [connection]} = ThousandIsland.connection_pids(bandit)
+      assert {:message_queue_len, 0} = Process.info(connection, :message_queue_len)
+
+      # And the connection still works afterwards.
+      :ok = RawHttp.send_get(socket, signed("/f:mp3/plain/local://quick.wav"))
+      second = RawHttp.read(socket, @deadline)
+
+      assert second.head =~ "http/1.1 200 ok"
+      assert RawHttp.dechunk(second.body) == @payload
+      assert RawHttp.complete?(second.body)
+    end
+  end
+
+  defp signed(rest), do: "/#{Signature.sign(rest, @key, @salt)}#{rest}"
+
   defp request(rest, port) do
-    RawHttp.get("/#{Signature.sign(rest, @key, @salt)}#{rest}", port)
+    RawHttp.get(signed(rest), port)
   end
 
   ## Subprocess probing
