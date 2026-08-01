@@ -34,7 +34,7 @@ Stay with the stdlib and core/OTP tooling as far as possible. GenStage is accept
 
 ## Dev workflow
 
-- **Every feature/slice starts on a fresh git worktree paired with a devcontainer** (see *Worktree gate* above — that rule is the enforcement, this is the mechanism), managed with worktrunk (`wt`). This is the Elixir adaptation of the `/jr-rails-new` agentic-worktree workflow (see that skill's `reference/agentic-worktrees.md` for the principal pattern):
+- **Every feature/slice starts on a fresh git worktree paired with a devcontainer** (see *Worktree gate* above — that rule is the enforcement, this is the mechanism), managed with worktrunk (`wt`). The pattern is one isolated checkout per slice, each with its own container and its own port, so parallel agent sessions cannot collide:
   - `.config/wt.toml`: `post-create` runs `bin/agent-setup` (deps + compile inside the devcontainer), `post-start` runs `PORT={{ branch | hash_port }} bin/agent-server`, `pre-remove` runs `bin/agent-cleanup`, `post-remove` kills the branch's listener.
   - `bin/agent-server` boots the app on the branch's hashed port (Bandit reads `PORT`). No per-branch database exists — the app is stateless, so worktree isolation is just directory + port.
   - Devcontainer image carries Elixir/OTP + ffmpeg/ffprobe (mirrors runtime deps); `postCreateCommand` is `bin/agent-setup`. Use `devcontainer up` / `devcontainer exec`, not raw `docker compose`.
