@@ -7,7 +7,7 @@
 
 ## 2. Render action
 
-- [ ] 2.1 Source stat via `Source.Store`: not-found → 404, size > `AP_MAX_SRC_BYTES` → 413; `Source.Store.ffmpeg_input/1` for the render input (local path for MVP; presigned URL once the S3 backend exists)
+- [ ] 2.1 Source stat via `Source.stat/1`: not-found → 404, size > `AP_MAX_SRC_BYTES` → 413; `Source.ffmpeg_input/1` for the render input (local path for MVP; presigned URL once the S3 backend exists)
 - [ ] 2.2 Subscribe to coordinator; send response headers (Content-Type, Cache-Control, ETag, X-Audio-Proxy, optional Content-Disposition); chunked streaming receive-loop
 - [ ] 2.3 Disconnect handling: `chunk/2` error → unsubscribe/exit; receive-deadline → 504 pre-stream, abnormal close mid-stream
 

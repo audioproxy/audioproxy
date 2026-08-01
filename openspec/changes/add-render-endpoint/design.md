@@ -12,8 +12,8 @@ Integration slice: no new domain logic, but the wiring decisions (plug order, st
 
 ## Decisions
 
-- **Plug order**: VerifySignature → ParseOptions → ResolveSource → (endpoint action: source stat/size check → ffmpeg input from the store → subscribe → stream). Cheapest checks first; everything user-derived validated before any storage/filesystem call.
-- **Size/existence via `Source.Store.stat/1`** before handing ffmpeg its input — buys 404/413 before a subprocess ever starts. Local sources: `File.stat` (MVP). S3 sources (post-MVP): HEAD behind the same seam. HTTPS sources: HEAD with fallback to accepting unknown size (enforced post-hoc by render byte cap) — owned by `add-remote-files-source`, which implements that backend rather than leaving it to this slice.
+- **Plug order**: VerifySignature → ParseOptions → ResolveSource → (endpoint action: source stat/size check → ffmpeg input from the source's type → subscribe → stream). Cheapest checks first; everything user-derived validated before any storage/filesystem call.
+- **Size/existence via `Source.stat/1`** (delegating to the source's `Source.Type` backend) before handing ffmpeg its input — buys 404/413 before a subprocess ever starts. Local sources: `File.stat` (MVP). S3 sources (post-MVP): HEAD behind the same seam. HTTPS sources: HEAD with fallback to accepting unknown size (enforced post-hoc by render byte cap) — owned by `add-remote-files-source`, which implements that backend rather than leaving it to this slice.
 - **Streaming loop** in the endpoint process: receive coordinator messages, `chunk(conn, data)`; `{:error, closed}` from `chunk/2` = disconnect → unsubscribe + exit. A `receive`-loop plug action (no GenServer) keeps conn ownership simple.
 - **Timeout of first chunk** bounded by semaphore queue timeout + render timeout — the loop itself uses `AP_RENDER_TIMEOUT` as its receive deadline and maps expiry to 504 (pre-first-byte) or abnormal termination (mid-stream).
 - **Errors as `ErrorJSON.render(conn, status, reason)`** — single mapping table from structured errors (option/source/render classes) to §5 codes; tested exhaustively at the unit level, spot-checked end-to-end.

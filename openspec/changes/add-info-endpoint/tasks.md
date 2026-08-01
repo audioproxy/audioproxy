@@ -7,7 +7,7 @@
 ## 2. Endpoint
 
 - [ ] 2.1 `info` as exclusive pseudo-option in ParseOptions (422 with any other option)
-- [ ] 2.2 Info action: resolve → `Source.Store.stat` (404/size) → `Source.Store.ffmpeg_input` → probe → JSON response; ETag derivation (source identity + stat etag material) + `If-None-Match`/304; Cache-Control
+- [ ] 2.2 Info action: resolve → `Source.stat/1` (404/size) → `Source.ffmpeg_input/1` → probe → JSON response; ETag derivation (source identity + stat etag material) + `If-None-Match`/304; Cache-Control
 - [ ] 2.3 Error mapping: unprobeable → 415; probe timeout → 504
 
 ## 3. Integration (`@tag :ffmpeg`)
