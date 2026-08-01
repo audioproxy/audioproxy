@@ -47,16 +47,30 @@ defmodule AudioProxy.Ffmpeg.Render do
   mode, where the OS pipe blocking *is* the backpressure. Nothing in the
   consumer contract above would change.
 
-  ## Lifecycle
+  ## Lifecycle, and the orphan guarantee
 
-  > #### Incomplete until task 1.3 {: .warning}
-  >
-  > This slice lands the mechanism. Consumer death and process shutdown
-  > currently close the port, which drops the subprocess' stdout and usually
-  > kills it by `SIGPIPE` — *usually* is not a guarantee, and ffmpeg reading a
-  > slow HTTP input may not write again for a while. The explicit
-  > `SIGTERM` → `SIGKILL` escalation, the render timeout and `cancel/1` are the
-  > hardening slice.
+  **No ffmpeg process outlives its render.** Every way this GenServer can stop
+  — a clean finish, `cancel/1`, the timeout, a dead consumer, the supervisor
+  shutting down at VM stop — ends in `terminate/2`, which closes the port, then
+  sends `SIGTERM`, then `SIGKILL` after a two-second grace. Exits are trapped
+  so that the shutdown path is one of those ways rather than an exception to
+  them.
+
+  Closing the port is not enough on its own, which is the whole reason the
+  escalation exists: the BEAM does not signal the process on the far side of a
+  closed port. An ffmpeg blocked reading a slow HTTP input may not touch its
+  stdout for minutes, never notice, and sit there holding a slot.
+
+  ## Failure classification
+
+  A failed render reports `%{class: _, exit_status: _, stderr: _}`, where the
+  class is one of `:not_found`, `:undecodable`, `:timeout`, `:cancelled` or
+  `:render_failed`. ffmpeg exits 1 for almost everything, so the class comes
+  from matching a bounded tail of its stderr; the HTTP layer maps the class to
+  a status rather than reading ffmpeg's prose itself.
+
+  stderr goes to a per-render file under `scratch_dir/0` — merging it into
+  stdout would splice diagnostics into the audio.
   """
 
   use GenServer
@@ -69,14 +83,33 @@ defmodule AudioProxy.Ffmpeg.Render do
   # hold per concurrent render.
   @high_water 1_048_576
 
+  # How long a subprocess gets to honour SIGTERM before SIGKILL. Long enough
+  # for ffmpeg to flush and close, short enough that a cancelled request is not
+  # noticeably held open. PID reuse inside this window would in principle let
+  # the KILL land on an innocent process; the window makes that implausible on
+  # any real system, and the alternative — never escalating — is an orphan.
+  @grace 2_000
+  @poll_interval 25
+
+  # A bounded slice of ffmpeg's diagnostics: enough to classify and to put in a
+  # log line, not enough to be a memory hazard.
+  @stderr_tail_bytes 4_096
+
   @typedoc "A running render. Also the handle passed to `ack/2`."
   @type t :: pid()
+
+  @typedoc "Why a render failed. See *Failure classification* in the moduledoc."
+  @type failure :: %{
+          class: :not_found | :undecodable | :timeout | :cancelled | :render_failed,
+          exit_status: non_neg_integer() | nil,
+          stderr: binary()
+        }
 
   @typedoc "What a consumer receives. See the moduledoc."
   @type message ::
           {:chunk, t(), binary()}
           | {:done, t(), %{exit_status: 0}}
-          | {:error, t(), term()}
+          | {:error, t(), failure()}
 
   defstruct [
     :port,
@@ -84,6 +117,8 @@ defmodule AudioProxy.Ffmpeg.Render do
     :consumer,
     :monitor,
     :exit_status,
+    :stderr_path,
+    :timer,
     outstanding: 0,
     pending: :queue.new()
   ]
@@ -146,6 +181,32 @@ defmodule AudioProxy.Ffmpeg.Render do
     GenServer.cast(render, {:ack, bytes})
   end
 
+  @doc """
+  Cancels a running render.
+
+  The consumer is told (`%{class: :cancelled}`) before the render stops, so a
+  cancellation is not mistaken for a stream that simply ended. Returns `:ok`
+  once the subprocess is gone, which is what makes it usable as a barrier —
+  including when the caller *is* the consumer.
+  """
+  @spec cancel(t()) :: :ok
+  def cancel(render) do
+    GenServer.call(render, :cancel, @grace + 1_000)
+  catch
+    # Already finished on its own. Cancelling something that has stopped is
+    # exactly the outcome asked for.
+    :exit, _reason -> :ok
+  end
+
+  @doc """
+  The subprocess' OS pid, or `nil` if it was reaped before it could be read.
+
+  Exists for tests that have to prove the process is gone; nothing on the
+  request path needs it.
+  """
+  @spec os_pid(t()) :: pos_integer() | nil
+  def os_pid(render), do: GenServer.call(render, :os_pid)
+
   ## Server
 
   @impl true
@@ -155,20 +216,33 @@ defmodule AudioProxy.Ffmpeg.Render do
     args = Keyword.fetch!(opts, :args)
     consumer = Keyword.fetch!(opts, :consumer)
     executable = Keyword.fetch!(opts, :executable)
+    stderr_path = stderr_path()
 
-    port =
-      Port.open(
-        {:spawn_executable, executable},
-        [:binary, :exit_status, :use_stdio, :hide, args: args]
-      )
+    port = open_port(executable, args, stderr_path)
 
     {:ok,
      %__MODULE__{
        port: port,
-       os_pid: os_pid(port),
+       os_pid: read_os_pid(port),
        consumer: consumer,
-       monitor: Process.monitor(consumer)
+       monitor: Process.monitor(consumer),
+       stderr_path: stderr_path,
+       timer: Process.send_after(self(), :render_timeout, timeout(opts))
      }}
+  end
+
+  @impl true
+  def handle_call(:cancel, _from, state) do
+    send(state.consumer, {:error, self(), %{class: :cancelled, exit_status: nil, stderr: ""}})
+
+    # Replying from `terminate/2`'s far side is the point: the kill discipline
+    # runs before the caller is unblocked, so `cancel/1` returning means the
+    # subprocess is actually gone rather than merely asked to go.
+    {:stop, :normal, :ok, state}
+  end
+
+  def handle_call(:os_pid, _from, state) do
+    {:reply, state.os_pid, state}
   end
 
   @impl true
@@ -204,7 +278,12 @@ defmodule AudioProxy.Ffmpeg.Render do
         {:DOWN, monitor, :process, _pid, _reason},
         %__MODULE__{monitor: monitor} = state
       ) do
+    # Nobody left to send anything to; `terminate/2` does the killing.
     {:stop, :normal, state}
+  end
+
+  def handle_info(:render_timeout, state) do
+    finish(state, {:error, self(), %{class: :timeout, exit_status: nil, stderr: ""}})
   end
 
   # The port is linked to its owner and we trap exits, so its closure arrives
@@ -215,9 +294,14 @@ defmodule AudioProxy.Ffmpeg.Render do
 
   def handle_info(_message, state), do: {:noreply, state}
 
+  # Every stop path arrives here — a clean finish, a cancel, a timeout, a dead
+  # consumer, and the supervisor's own shutdown, which is why exits are
+  # trapped. One place to kill from is the whole orphan guarantee.
   @impl true
   def terminate(_reason, state) do
     close_port(state.port)
+    terminate_subprocess(state)
+    File.rm(state.stderr_path)
     :ok
   end
 
@@ -232,7 +316,7 @@ defmodule AudioProxy.Ffmpeg.Render do
       is_nil(state.exit_status) -> {:noreply, state}
       not :queue.is_empty(state.pending) -> {:noreply, state}
       state.exit_status == 0 -> finish(state, {:done, self(), %{exit_status: 0}})
-      true -> finish(state, {:error, self(), {:exit_status, state.exit_status}})
+      true -> finish(state, {:error, self(), failure(state)})
     end
   end
 
@@ -263,6 +347,145 @@ defmodule AudioProxy.Ffmpeg.Render do
 
   ## Subprocess
 
+  # Erlang ports offer stdout or stdout-with-stderr-merged, and nothing else.
+  # Merging would splice ffmpeg's diagnostics into the audio, so stderr goes to
+  # a file — and redirecting to a file needs a shell, because there is no port
+  # option for it.
+  #
+  # Introducing a shell is exactly what `AudioProxy.Ffmpeg.Command` exists to
+  # avoid, so note what is and is not interpolated: the script below is a
+  # compile-time constant with no user data in it. The binary arrives as `$0`
+  # and its arguments as `"$@"`, both still separate argv elements, and the
+  # path arrives through the environment. A source URL full of metacharacters
+  # is quoted shell *data*, never shell text. `exec` then replaces the shell
+  # with ffmpeg, so the pid read below is ffmpeg's own and there is no
+  # intermediate process to orphan.
+  @wrapper "/bin/sh"
+  @wrapper_script ~S(exec "$0" "$@" 2>"$AP_RENDER_STDERR")
+
+  defp open_port(executable, args, stderr_path) do
+    Port.open(
+      {:spawn_executable, @wrapper},
+      [
+        :binary,
+        :exit_status,
+        :use_stdio,
+        :hide,
+        args: ["-c", @wrapper_script, executable | args],
+        env: [{~c"AP_RENDER_STDERR", String.to_charlist(stderr_path)}]
+      ]
+    )
+  end
+
+  # Close the pipes, ask politely, then insist. `Port.close/1` alone only ends
+  # the conversation: the BEAM does not signal the process on the far side, and
+  # an ffmpeg blocked on a slow HTTP input may not write again for minutes and
+  # so never notice the closed stdout. That gap is the orphan.
+  defp terminate_subprocess(%__MODULE__{os_pid: nil}), do: :ok
+
+  # Already reaped; its status is how we got here.
+  defp terminate_subprocess(%__MODULE__{exit_status: status}) when not is_nil(status), do: :ok
+
+  defp terminate_subprocess(%__MODULE__{os_pid: os_pid}) do
+    signal(os_pid, "TERM")
+
+    unless gone_within?(os_pid, @grace) do
+      Logger.warning("render subprocess #{os_pid} ignored SIGTERM for #{@grace}ms; killing")
+      signal(os_pid, "KILL")
+    end
+
+    :ok
+  end
+
+  # Polling beats sleeping the whole grace: the common case is a process that
+  # dies on the first signal in a millisecond or two, and this is on the path
+  # of every cancelled request.
+  defp gone_within?(os_pid, remaining) when remaining <= 0, do: not alive?(os_pid)
+
+  defp gone_within?(os_pid, remaining) do
+    if alive?(os_pid) do
+      Process.sleep(@poll_interval)
+      gone_within?(os_pid, remaining - @poll_interval)
+    else
+      true
+    end
+  end
+
+  # `kill -0` tests for existence and permission without delivering anything.
+  defp alive?(os_pid), do: match?({_output, 0}, signal(os_pid, "0"))
+
+  defp signal(os_pid, signal) do
+    System.cmd("kill", ["-#{signal}", Integer.to_string(os_pid)], stderr_to_stdout: true)
+  catch
+    # `kill` itself missing would be a broken container, not a render fault.
+    :error, _reason -> {"", 1}
+  end
+
+  ## Failure classification
+
+  # Exit status alone cannot tell a missing file from an undecodable one —
+  # ffmpeg exits 1 for both — so the stderr tail decides, and the HTTP layer
+  # maps the class rather than reading ffmpeg's prose itself.
+  @classifiers [
+    {~r/No such file or directory|Server returned 40[34]|40[34] Not Found|Forbidden/i,
+     :not_found},
+    {~r/Invalid data found when processing input|could not find codec parameters|Invalid data/i,
+     :undecodable}
+  ]
+
+  defp failure(state) do
+    stderr = stderr_tail(state.stderr_path)
+
+    %{class: classify(stderr), exit_status: state.exit_status, stderr: stderr}
+  end
+
+  defp classify(stderr) do
+    Enum.find_value(@classifiers, :render_failed, fn {pattern, class} ->
+      if Regex.match?(pattern, stderr), do: class
+    end)
+  end
+
+  # The tail, not the file: a decoder can produce megabytes of complaint, and
+  # this ends up in a log line and possibly an error body. Reading from an
+  # offset keeps the bound real rather than trimming after the fact.
+  defp stderr_tail(nil), do: ""
+
+  defp stderr_tail(path) do
+    with {:ok, %File.Stat{size: size}} when size > 0 <- File.stat(path),
+         offset = max(size - @stderr_tail_bytes, 0),
+         {:ok, io} <- :file.open(path, [:read, :binary]) do
+      tail =
+        case :file.pread(io, offset, min(size, @stderr_tail_bytes)) do
+          {:ok, data} -> data
+          _other -> ""
+        end
+
+      :file.close(io)
+      tail
+    else
+      _unreadable -> ""
+    end
+  end
+
+  ## Scratch
+
+  @doc false
+  # Public only so the supervisor can sweep it at boot.
+  def scratch_dir, do: Path.join(System.tmp_dir!(), "audio_proxy_render")
+
+  defp stderr_path do
+    File.mkdir_p!(scratch_dir())
+
+    Path.join(scratch_dir(), "stderr-#{System.unique_integer([:positive, :monotonic])}.log")
+  end
+
+  defp timeout(opts) do
+    case Keyword.get(opts, :timeout) do
+      nil -> AudioProxy.Config.get(:render_timeout) * 1_000
+      milliseconds -> milliseconds
+    end
+  end
+
   defp executable(nil) do
     case System.find_executable("ffmpeg") do
       nil -> {:error, :ffmpeg_not_found}
@@ -280,7 +503,7 @@ defmodule AudioProxy.Ffmpeg.Render do
   # `nil` here is not an error. A subprocess that exits immediately — a bad
   # argument, `ffmpeg -version` — can be reaped before this line runs, and then
   # there is nothing left to signal. The exit status is already in the mailbox.
-  defp os_pid(port) do
+  defp read_os_pid(port) do
     case Port.info(port, :os_pid) do
       {:os_pid, os_pid} -> os_pid
       nil -> nil

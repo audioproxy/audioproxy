@@ -67,17 +67,15 @@ defmodule AudioProxy.Ffmpeg.RenderTest do
     test "reports a nonzero exit status", %{fake_cmd: fake_cmd} do
       {:ok, render} = Render.start_link(executable: fake_cmd, args: ["exit", "3"])
 
-      assert {:error, {:exit_status, 3}, ""} = RenderHarness.collect(render)
+      assert {:error, %{class: :render_failed, exit_status: 3, stderr: ""}, ""} =
+               RenderHarness.collect(render)
     end
 
     test "delivers the bytes written before a nonzero exit", %{fake_cmd: fake_cmd} do
-      # No `stderr` directive: this slice does not capture it, so writing any
-      # would only spill into the test runner's own output. Capture and
-      # classification are the hardening slice's tests.
       args = ["emit", "4096", "exit", "1"]
       {:ok, render} = Render.start_link(executable: fake_cmd, args: args)
 
-      assert {:error, {:exit_status, 1}, bytes} = RenderHarness.collect(render)
+      assert {:error, %{exit_status: 1}, bytes} = RenderHarness.collect(render)
       assert bytes == RenderHarness.pattern(4096)
     end
 

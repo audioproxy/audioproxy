@@ -318,7 +318,7 @@ so several of them are parsed and validated but not yet consumed by anything.
 | `AP_MAX_CONCURRENCY` | positive integer | schedulers online | Max simultaneous ffmpeg processes |
 | `AP_QUEUE_SIZE` | non-negative integer | `32` | Waiting renders before `429` |
 | `AP_MAX_SRC_BYTES` | positive integer | `2000000000` | Reject larger sources with `413` |
-| `AP_RENDER_TIMEOUT` | positive integer | `300` | Seconds before a render is killed (`504`) |
+| `AP_RENDER_TIMEOUT` | positive integer | `300` | Seconds a render may take before ffmpeg is killed and the request answered `504`. Raise it for full-length transcodes of long masters; the default suits previews. See [docs/rendering.md](docs/rendering.md) |
 | `AP_SERVE_MODE` | `redirect` \| `proxy` | `redirect` | Serve cache hits by redirect or proxied |
 
 Booleans accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`,
