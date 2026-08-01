@@ -28,3 +28,4 @@
 - Depends on: `add-source-resolver` (the `Source.Type` behaviour and dispatch table it registers into).
 - Blocks: `add-s3-client` (implements the S3 store backend for the `s3://` form defined here).
 - Sequencing: post-MVP, alongside or before `add-s3-client`. The MVP chain does not include it.
+- Lands as two stacked PRs per the review-size convention: (1) source forms + allowlist, (2) the HTTPS storage backend — the tasks are grouped accordingly.
