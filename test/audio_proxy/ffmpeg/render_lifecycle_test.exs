@@ -127,6 +127,33 @@ defmodule AudioProxy.Ffmpeg.RenderLifecycleTest do
       assert gone_within?(os_pid, @deadline), "a timed-out render left its subprocess behind"
     end
 
+    test "does not time out a finished render whose consumer is slow to ack", %{
+      fake_cmd: fake_cmd
+    } do
+      # The regression this exists for: the subprocess exits cleanly, but the
+      # consumer has not acked, so chunks are still queued and the completion
+      # message is rightly withheld. With the timer still armed across that
+      # wait, a successful encode was reported as `:timeout` — and would have
+      # been answered 504.
+      #
+      # `AP_RENDER_TIMEOUT` bounds how long ffmpeg may run. ffmpeg has stopped.
+      {:ok, render} =
+        Render.start_link(
+          executable: fake_cmd,
+          args: ["emit", "#{4 * 1_048_576}"],
+          timeout: 300
+        )
+
+      # Long enough for the subprocess to exit and the old timer to have fired.
+      Process.sleep(600)
+
+      refute_received {:error, ^render, %{class: :timeout}}
+
+      # And the render still completes correctly once the consumer catches up.
+      assert {:ok, bytes, %{exit_status: 0}} = RenderHarness.collect(render, idle_timeout: 5_000)
+      assert byte_size(bytes) == 4 * 1_048_576
+    end
+
     test "a render that finishes in time is unaffected", %{fake_cmd: fake_cmd} do
       {:ok, render} =
         Render.start_link(executable: fake_cmd, args: ["emit", "1024"], timeout: 30_000)
