@@ -8,7 +8,8 @@ defmodule AudioProxy.MixProject do
       elixir: "~> 1.20",
       start_permanent: Mix.env() == :prod,
       elixirc_paths: elixirc_paths(Mix.env()),
-      deps: deps()
+      deps: deps(),
+      releases: releases()
     ]
   end
 
@@ -16,6 +17,17 @@ defmodule AudioProxy.MixProject do
     [
       extra_applications: [:logger],
       mod: {AudioProxy.Application, []}
+    ]
+  end
+
+  # The release is what the Docker image ships: ERTS is bundled (the runtime
+  # stage has no Erlang installed), and `rel/env.sh.eex` turns distribution off.
+  defp releases do
+    [
+      audio_proxy: [
+        include_executables_for: [:unix],
+        applications: [audio_proxy: :permanent]
+      ]
     ]
   end
 
