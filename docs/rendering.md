@@ -74,9 +74,14 @@ there is a measurement asking for it.
 
 ## Render policy
 
-A render runs at full speed into the write-back; the client's chunked stream
-lags it rather than throttling it. A client listening in real time must not be
-able to pin a CPU slot for the duration of the audio.
+A render runs at full speed; the client's chunked stream lags it rather than
+throttling it. A client listening in real time must not be able to pin a CPU
+slot for the duration of the audio.
+
+The write-back this policy was written for does not exist yet — there is no
+variant bucket and no tee, so today "full speed" means only that the encoder is
+never paced by the socket. The policy is what the write-back will land into
+(`add-variant-cache`), not something already running.
 
 ## Lifecycle: no ffmpeg outlives its render
 
@@ -126,7 +131,7 @@ stderr:
 | `:undecodable` | `Invalid data found when processing input`, `could not find codec parameters` | 415 |
 | `:timeout` | the render timer, not stderr | 504 |
 | `:cancelled` | `cancel/1` | — the client has already gone |
-| `:render_failed` | anything else | 5xx |
+| `:render_failed` | anything else | 500 |
 
 The consumer receives `%{class: _, exit_status: _, stderr: _}`. Keeping the raw
 tail alongside the class matters: the class is what the proxy acts on, the tail
@@ -154,3 +159,39 @@ so a source URL full of metacharacters is quoted shell *data* and never shell
 text. `exec` then replaces the shell with ffmpeg, which means the pid the kill
 discipline signals is ffmpeg's own and there is no intermediate process left to
 orphan.
+
+## Delivery over HTTP
+
+The render endpoint (`AudioProxy.Plugs.RenderAction`) is a consumer of the
+contract above and nothing more: it spawns a render with itself as consumer,
+then loops on the mailbox, writing each chunk with `Plug.Conn.chunk/2` and
+acknowledging it. Acknowledging is not bookkeeping — forwarding stops above the
+high-water mark, so a loop that stopped acking would receive one buffer's worth
+of audio and then silence, `{:done, _, _}` included.
+
+The spawn is deliberately a single call site. Coalescing replaces exactly that
+call with a subscription to a shared render; the message contract is the same,
+so the loop does not change.
+
+**Before and after the first byte are different worlds.** Before it, nothing has
+been sent and a failure is an ordinary JSON error: the class maps to 404, 415,
+500 or 504. After it, the status line is spent, and the only signal HTTP/1.1
+leaves is an abnormal close — the connection is torn down without the
+terminating chunk, which is what §5 means by "abnormal termination of the
+chunked stream". A client that treats a truncated chunked response as a
+complete file will believe a failed render succeeded.
+
+**Disconnect is detected by writing.** `chunk/2` answering `{:error, _}` means
+the socket is gone, and the render is cancelled on the spot. That is not the
+only guarantee — the render monitors its consumer and kills the subprocess when
+it dies — but it is the prompt one. It costs a caveat: detection happens on the
+*next* chunk, so teardown is bounded by chunk cadence rather than by wall clock.
+For an encoder producing output continuously that is milliseconds; for one
+stalled on a slow input it is the render timeout, which is the same bound that
+applies to a client still listening.
+
+**The endpoint's own deadline is a backstop.** `AP_RENDER_TIMEOUT` is enforced
+by the render process, which owns the subprocess and can classify the failure.
+The endpoint applies the same budget to its own mailbox, slightly wider, so that
+a render dying without a word cannot leave a request hanging — but the timeout a
+client normally sees is the render's, with its class intact.

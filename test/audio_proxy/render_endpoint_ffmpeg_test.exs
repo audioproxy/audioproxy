@@ -1,0 +1,189 @@
+defmodule AudioProxy.RenderEndpointFfmpegTest do
+  @moduledoc """
+  The whole thing, for real: a signed URL in, a file `ffprobe` agrees is the
+  variant that was asked for out.
+
+  Everywhere else the encoder is a stand-in, because the HTTP lifecycle is a
+  property of the action rather than of ffmpeg
+  (`AudioProxy.RenderEndpointStreamTest` explains the split). This is the test
+  that would catch the two things a stand-in cannot: argv that ffmpeg refuses,
+  and bytes that are not the format the `Content-Type` claims. It runs the
+  production `AudioProxy.Router`, over Bandit, with `AP_LOCAL_ROOT` pointed at
+  fixtures this module generates.
+
+  Tagged `:ffmpeg` and *not* `:integration`, even though it binds a socket:
+  the tags are exclusion filters, and an include of one would drag this into
+  the CI job that has no ffmpeg installed.
+  """
+
+  use ExUnit.Case, async: false
+
+  import AudioProxy.ConfigHelper
+
+  alias AudioProxy.{RawHttp, Signature}
+
+  @moduletag :ffmpeg
+
+  # Encoding the long fixture is what the streaming assertions need to be
+  # slower than a single mailbox round trip; 60 s is the ExUnit default.
+  @moduletag timeout: 120_000
+
+  @key Base.decode16!("00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF")
+  @salt Base.decode16!("FFEEDDCCBBAA99887766554433221100")
+
+  @deadline 60_000
+
+  # A 440 Hz sine, which is all a transcode needs to be a transcode, and a much
+  # longer one for the timing assertion. Both are generated once for the module
+  # — a ten-minute WAV is ~100 MB, and writing it per test would dominate the
+  # run.
+  setup_all do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "audio_proxy_ffmpeg_fixtures-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(root)
+    on_exit(fn -> File.rm_rf(root) end)
+
+    sine(Path.join(root, "piece.wav"), 5)
+    sine(Path.join(root, "long.wav"), 600)
+    File.write!(Path.join(root, "notaudio.txt"), "definitely not audio")
+
+    {:ok, root: root}
+  end
+
+  setup %{root: root} do
+    put_config(%{
+      key: @key,
+      salt: @salt,
+      allow_insecure: false,
+      local_root: root,
+      max_src_bytes: 2_000_000_000,
+      render_timeout: 60
+    })
+
+    bandit =
+      start_supervised!(
+        {Bandit, plug: AudioProxy.Router, scheme: :http, ip: {127, 0, 0, 1}, port: 0}
+      )
+
+    {:ok, {{127, 0, 0, 1}, port}} = ThousandIsland.listener_info(bandit)
+    {:ok, port: port}
+  end
+
+  describe "end-to-end render" do
+    test "a trimmed mp3 arrives as a decodable mp3 of the requested length", %{port: port} do
+      response = render("/f:mp3/br:128/t:0:2/plain/local://piece.wav", port)
+
+      assert response.head =~ "http/1.1 200 ok"
+      assert response.head =~ "content-type: audio/mpeg"
+
+      audio = RawHttp.dechunk(response.body)
+      assert RawHttp.complete?(response.body)
+
+      probe = probe(audio, "mp3")
+      assert probe["format"]["format_name"] =~ "mp3"
+      assert_in_delta String.to_float(probe["format"]["duration"]), 2.0, 0.2
+    end
+
+    test "the same source renders as Opus when the options say so", %{port: port} do
+      response = render("/f:opus/br:96/t:0:2/plain/local://piece.wav", port)
+
+      assert response.head =~ "content-type: audio/ogg"
+
+      probe = probe(RawHttp.dechunk(response.body), "ogg")
+      assert probe["streams"] |> hd() |> Map.fetch!("codec_name") == "opus"
+    end
+
+    test "the §5 headers describe the variant, dl included", %{port: port} do
+      rest = "/f:mp3/t:0:2/dl:preview.mp3/plain/local://piece.wav"
+      response = render(rest, port)
+
+      key = AudioProxy.CacheKey.derive!("f:mp3/t:0:2/dl:preview.mp3", "local://piece.wav")
+
+      assert response.head =~ "content-type: audio/mpeg"
+      assert response.head =~ "cache-control: public, max-age=31536000, immutable"
+      assert response.head =~ ~s(etag: "#{key}")
+      assert response.head =~ "x-audio-proxy: miss"
+      assert response.head =~ ~s(content-disposition: attachment; filename="preview.mp3")
+
+      # §5: chunked, so neither of these may be present.
+      refute response.head =~ "content-length:"
+      refute response.head =~ "accept-ranges:"
+    end
+
+    test "bytes arrive long before the render finishes", %{port: port} do
+      # The ten-minute source takes seconds to encode. If the response were
+      # buffered, the first byte and the last would land together.
+      response = render("/f:mp3/plain/local://long.wav", port)
+
+      assert response.head =~ "http/1.1 200 ok"
+      assert RawHttp.complete?(response.body)
+
+      streamed_for = response.closed_at - response.first_byte_at
+
+      assert streamed_for > 500,
+             "the whole response arrived within #{streamed_for}ms, which is what buffering looks like"
+    end
+
+    test "a source ffmpeg cannot decode is a 415", %{port: port} do
+      response = render("/f:mp3/plain/local://notaudio.txt", port)
+
+      assert response.head =~ "http/1.1 415"
+      assert JSON.decode!(response.body)["error"] == "undecodable_source"
+    end
+  end
+
+  defp render(rest, port) do
+    "/#{Signature.sign(rest, @key, @salt)}#{rest}"
+    |> RawHttp.get(port)
+    |> RawHttp.read(@deadline)
+  end
+
+  defp sine(path, seconds) do
+    {_output, 0} =
+      System.cmd(
+        "ffmpeg",
+        [
+          "-y",
+          "-loglevel",
+          "error",
+          "-f",
+          "lavfi",
+          "-i",
+          "sine=frequency=440:duration=#{seconds}",
+          "-ac",
+          "2",
+          "-ar",
+          "44100",
+          path
+        ],
+        stderr_to_stdout: true
+      )
+  end
+
+  # ffprobe reads a file rather than a pipe here on purpose: seeking is how it
+  # reads a container's index, and a piped mp3 reports no duration.
+  defp probe(audio, extension) do
+    path =
+      Path.join(System.tmp_dir!(), "probe-#{System.unique_integer([:positive])}.#{extension}")
+
+    File.write!(path, audio)
+    on_exit(fn -> File.rm(path) end)
+
+    {json, 0} =
+      System.cmd("ffprobe", [
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_format",
+        "-show_streams",
+        path
+      ])
+
+    JSON.decode!(json)
+  end
+end

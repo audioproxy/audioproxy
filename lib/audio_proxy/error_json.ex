@@ -7,8 +7,8 @@ defmodule AudioProxy.ErrorJSON do
   `{:queue_full, retry_after}` tuple — and this module renders the
   `{status, headers, body}` triple for it. One table, keyed by error class, so
   the mapping is reviewable against `docs/audio-proxy-api-v1.md` §5 as a whole
-  and a producer landing later (415/504 with the streaming action, 429 with
-  the render semaphore) touches nothing here.
+  and a producer landing later (429 with the render semaphore) touches nothing
+  here — the streaming action, which produces 415/500/504, did not.
 
   The rows, one per §5 line:
 
@@ -19,7 +19,15 @@ defmodule AudioProxy.ErrorJSON do
       :undecodable_source            415     undecodable_source
       %OptionError{}                 422     invalid_options
       {:queue_full, retry_after}     429     queue_full          Retry-After
+      :render_failed                 500     render_failed
       :render_timeout                504     render_timeout
+
+  The 500 row is the one addition to §5's table, and it is deliberate: §5
+  enumerates what a *client* can have got wrong, and a render that fails for
+  none of those reasons — no ffmpeg on `PATH`, a full disk, a diagnostic no
+  classifier recognises — still has to answer something. A plausible-looking
+  4xx would tell the client to stop retrying something that might well work
+  next time.
 
   `render/1` is the pure mapping — that is what the per-row unit tests pin —
   and `halt_with/2` sends it and halts, which is all a plug ever calls.
@@ -113,6 +121,10 @@ defmodule AudioProxy.ErrorJSON do
       when is_integer(retry_after) and retry_after >= 0 do
     body = encode(%{error: "queue_full", message: "Render queue is full"})
     {429, [{"retry-after", Integer.to_string(retry_after)}], body}
+  end
+
+  def render(:render_failed) do
+    {500, [], encode(%{error: "render_failed", message: "Render failed"})}
   end
 
   def render(:render_timeout) do
