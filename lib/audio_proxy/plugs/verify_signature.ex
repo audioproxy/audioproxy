@@ -8,8 +8,8 @@ defmodule AudioProxy.Plugs.VerifySignature do
 
   On success the rest-of-path (leading `/` included) is stashed in
   `conn.assigns[:rest_of_path]` for the downstream options/source parsers. On
-  failure the plug halts with `401` and a JSON error body; a missing
-  signature segment is just another invalid signature.
+  failure the plug halts with the `401` row of `AudioProxy.ErrorJSON`; a
+  missing signature segment is just another invalid signature.
 
   Invariants downstream code must respect:
 
@@ -33,7 +33,7 @@ defmodule AudioProxy.Plugs.VerifySignature do
 
   import Plug.Conn
 
-  alias AudioProxy.Signature
+  alias AudioProxy.{ErrorJSON, Signature}
 
   @impl true
   def init(opts), do: opts
@@ -44,7 +44,7 @@ defmodule AudioProxy.Plugs.VerifySignature do
          :ok <- Signature.verify(sig_segment, rest_of_path) do
       assign(conn, :rest_of_path, rest_of_path)
     else
-      _ -> unauthorized(conn)
+      _ -> ErrorJSON.halt_with(conn, :invalid_signature)
     end
   end
 
@@ -55,14 +55,5 @@ defmodule AudioProxy.Plugs.VerifySignature do
       ["", sig_segment, rest] -> {:ok, sig_segment, "/" <> rest}
       _ -> {:error, :invalid_signature}
     end
-  end
-
-  defp unauthorized(conn) do
-    body = JSON.encode!(%{error: "invalid_signature", message: "Invalid or missing signature"})
-
-    conn
-    |> put_resp_content_type("application/json")
-    |> send_resp(401, body)
-    |> halt()
   end
 end
