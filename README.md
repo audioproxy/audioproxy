@@ -344,4 +344,5 @@ migrate.
 | [docs/sources.md](docs/sources.md) | Source encodings and escaping, what is refused, the source-type contract and canonical identity |
 | [docs/development.md](docs/development.md) | Toolchain, per-slice worktrees and devcontainers, the test suite and its tags, CI |
 | [docs/ffmpeg-arguments.md](docs/ffmpeg-arguments.md) | How options become ffmpeg arguments — filter order, per-format flags, known gaps |
+| [docs/rendering.md](docs/rendering.md) | How a render runs — the subprocess, the chunk stream, buffering and lifecycle guarantees |
 | `openspec/specs/` | Capability specs for what is built; `openspec/changes/` holds what is planned |
