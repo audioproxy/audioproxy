@@ -120,6 +120,31 @@ def wait_for_health(port, timeout: 60)
   end
 end
 
+# A container that never becomes healthy is the one failure that tells you
+# nothing: every later check fails as collateral, and the only visible symptom
+# is `docker exec` refusing to talk to a container that is no longer running.
+# Whatever the release said on its way down is in its logs, and those are gone
+# the moment the container is removed — so print them at the point of failure.
+def await_health(cid, port, timeout: 60)
+  health = wait_for_health(port, timeout: timeout)
+  return health if health
+
+  state = begin
+    JSON.parse(sh!("docker", "inspect", cid)).first["State"]
+  rescue StandardError
+    {}
+  end
+  logs, _ = sh("docker", "logs", cid)
+
+  log "--- container never became healthy; diagnostics follow ---"
+  log "state: running=#{state["Running"].inspect} exit=#{state["ExitCode"].inspect} error=#{state["Error"].inspect}"
+  log "health: #{state.dig("Health", "Status").inspect}"
+  logs.to_s.lines.last(40).each { |line| log "  | #{line.chomp}" }
+  log "--- end diagnostics ---"
+
+  nil
+end
+
 # base64url(HMAC-SHA256(key, salt || rest_of_path)), unpadded — the reference
 # signer in AudioProxy.Signature, in the language the smoke suite is written in.
 # Signing here rather than shelling into the container is the point: it proves a
@@ -256,7 +281,7 @@ def check_render(fixtures)
   cid = start_server(fixtures, extra_env: {"AP_ALLOW_INSECURE" => "true"})
   port = published_port(cid)
 
-  health = wait_for_health(port)
+  health = await_health(cid, port)
   check "container reaches /health" do
     health && health["status"] == "ok"
   end
@@ -329,7 +354,7 @@ def check_signed_h2c(fixtures)
   cid = start_server(fixtures)
   port = published_port(cid)
   check "signed-mode container reaches /health" do
-    wait_for_health(port)
+    await_health(cid, port)
   end
 
   rest = "/f:mp3/br:128/plain/local://tone%20one.wav"
@@ -370,7 +395,7 @@ def check_config(fixtures)
   cid = start_server(fixtures, extra_env: {"AP_PORT" => "8123", "AP_ALLOW_INSECURE" => "true"})
   port = published_port(cid, 8123)
   check "AP_PORT override takes effect without a rebuild" do
-    wait_for_health(port)
+    await_health(cid, port)
   end
   check "healthcheck follows AP_PORT" do
     # The HEALTHCHECK reads AP_PORT before PORT; if it did not, the container
@@ -430,7 +455,7 @@ def check_sigterm(fixtures)
   cid = start_server(fixtures, extra_env: {"AP_ALLOW_INSECURE" => "true", "AP_RENDER_TIMEOUT" => "600"})
   port = published_port(cid)
   check "container is healthy before SIGTERM" do
-    wait_for_health(port)
+    await_health(cid, port)
   end
 
   # Start a long render and walk away from it — the client never reads the body,
