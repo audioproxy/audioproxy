@@ -12,9 +12,15 @@
 # `runtime` MUST agree on the alpine version: the release links against musl
 # from the build stage, and the ffmpeg the argv contract is tested against comes
 # from the same alpine package repository as the one that is shipped.
+#
+# ELIXIR_IMAGE is derived from ALPINE_VERSION rather than written out, so the
+# two cannot drift. Overriding ALPINE_VERSION alone used to build a release
+# against one musl and run it on another, silently.
 
 ARG ALPINE_VERSION=3.24.1
-ARG ELIXIR_IMAGE=hexpm/elixir:1.20.2-erlang-28.5.0.4-alpine-3.24.1
+ARG ELIXIR_VERSION=1.20.2
+ARG OTP_VERSION=28.5.0.4
+ARG ELIXIR_IMAGE=hexpm/elixir:${ELIXIR_VERSION}-erlang-${OTP_VERSION}-alpine-${ALPINE_VERSION}
 
 # ---------------------------------------------------------------------------
 # build — compile and assemble the release

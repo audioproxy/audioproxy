@@ -10,21 +10,28 @@ toolchain named here.
 |---|---|---|
 | Erlang/OTP | `28.5.0.4` | `.tool-versions`, `Dockerfile` (`ELIXIR_IMAGE`), `.devcontainer/Dockerfile` |
 | Elixir | `1.20.2` (OTP 28) | `.tool-versions`, `Dockerfile` (`ELIXIR_IMAGE`), `.devcontainer/Dockerfile` |
-| Alpine | `3.24.1` | `Dockerfile` (`ALPINE_VERSION`, and the alpine suffix of `ELIXIR_IMAGE`) |
-| ffmpeg / ffprobe | `8.1.2` — **major 8** | Alpine 3.24's `ffmpeg` package; asserted in CI |
+| Alpine | `3.24.1` | `Dockerfile` (`ALPINE_VERSION`; `ELIXIR_IMAGE` is derived from it) |
+| ffmpeg / ffprobe | `8.1.2` | Alpine 3.24's `ffmpeg` package; the major is asserted in CI |
 
-The build and runtime stages must name the same Alpine version. The release
-links against musl from the build stage, and the ffmpeg the argv contract is
-tested against has to be the package the runtime stage installs — an Alpine
-mismatch silently breaks both.
+`ELIXIR_IMAGE` is derived from `ALPINE_VERSION` in the Dockerfile rather than
+written out, because the build and runtime stages must name the same Alpine
+version: the release links against musl from the build stage, and the ffmpeg the
+argv contract is tested against has to be the package the runtime stage
+installs.
 
 ## What CI asserts
 
-- `ffmpeg -version` in the runtime image reports major **8**. A bump that moves
-  the major fails the pipeline until this file and the expectation move with it.
-- The `:ffmpeg`-tagged suite runs inside the `test` stage, which installs ffmpeg
-  from the same Alpine version as the runtime stage — so the encoder the argv
-  contract is checked against is the one that ships.
+The ffmpeg major is recorded once, on the line below, and both
+[`bin/smoke-image`](bin/smoke-image) and the `image-ffmpeg` CI job parse *that
+line*. It is written as a key/value rather than as prose so there is exactly one
+place to change and no second copy to fall out of step:
+
+    FFMPEG_MAJOR=8
+
+- The runtime image's `ffmpeg -version` must report that major. A bump that
+  moves it fails the pipeline until this file moves with it.
+- The `test` and `runtime` stages must report the *same* ffmpeg build, so the
+  encoder the argv contract is checked against is the one that ships.
 
 ## Bumping a pin
 
@@ -35,9 +42,9 @@ bytes for the same URL — so it is a release, not a silent update. The procedur
    and `.devcontainer/Dockerfile` together; Elixir and OTP move as a pair.
 2. Rebuild and read the new ffmpeg version out of the image:
    `docker build -t audio_proxy:pin-check . && docker run --rm --entrypoint ffmpeg audio_proxy:pin-check -version | head -1`
-3. Update the table above. If the ffmpeg major moved, expect the argv contract
-   to need real work — run the full `:ffmpeg` suite and read the failures rather
-   than adjusting the assertion.
+3. Update the table above, and `FFMPEG_MAJOR` if the major moved. If it did,
+   expect the argv contract to need real work — run the full `:ffmpeg` suite and
+   read the failures rather than adjusting the assertion.
 4. Run `bin/smoke-image` locally, then let CI run it again.
 5. Cut a patch release (see [docs/development.md](docs/development.md#releases)).
 

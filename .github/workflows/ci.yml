@@ -134,8 +134,10 @@ jobs:
           fi
 
           # VERSIONS.md is the single record of the pin; a bump that moves the
-          # major has to move that file too, deliberately.
-          expected=$(grep -oE 'major \*\*[0-9]+\*\*' VERSIONS.md | grep -oE '[0-9]+')
+          # major has to move that file too, deliberately. The FFMPEG_MAJOR line
+          # exists to be parsed — matching prose instead once meant reading a
+          # restatement of the number rather than the number itself.
+          expected=$(grep -oE '^[[:space:]]*FFMPEG_MAJOR=[0-9]+$' VERSIONS.md | grep -oE '[0-9]+$')
           actual=$(printf '%s' "$ship_ffmpeg" | grep -oE 'ffmpeg version [0-9]+' | grep -oE '[0-9]+$')
           echo "expected major: $expected, actual: $actual"
           if [ "$expected" != "$actual" ]; then
@@ -213,6 +215,13 @@ jobs:
       #   main    -> :edge, :sha-<12>
       # The sha tag is the immutable one — it is what a deployment should pin
       # when it is not pinning a release.
+      #
+      # The shape check on the tag is load-bearing, not defensive tidiness. The
+      # `v*` trigger also matches `v1.2.3-rc1` and `v1.2`, and plain suffix
+      # stripping turned both into a `:latest` push: a release candidate would
+      # have moved the tag everyone follows, and `v2.0.0-beta.1` would have
+      # produced the nonsense `:2.0.0-beta`. Anything that is not exactly
+      # X.Y.Z fails here rather than publishing something surprising.
       - name: Compute image tags
         id: tags
         run: |
@@ -220,6 +229,10 @@ jobs:
           short_sha=$(printf '%s' "$GITHUB_SHA" | cut -c1-12)
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             version="${GITHUB_REF_NAME#v}"
+            if ! printf '%s' "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::tag $GITHUB_REF_NAME is not vX.Y.Z; pre-release and partial tags are not published"
+              exit 1
+            fi
             major_minor="${version%.*}"
             tags="${IMAGE_NAME}:${version},${IMAGE_NAME}:${major_minor},${IMAGE_NAME}:latest"
           else
@@ -241,6 +254,12 @@ jobs:
       # Rebuilt rather than carried over from the smoke job: the layer cache
       # makes it cheap, and the alternative (exporting a tarball between jobs)
       # buys nothing since the inputs are byte-identical.
+      #
+      # `cache-from` only. The smoke and image-ffmpeg jobs already exported every
+      # layer this build reads, in this same run, so exporting again would write
+      # a cache nobody reads — and it would be the one cache write happening
+      # under a narrowed `permissions:` block, which is a question not worth
+      # having.
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -252,4 +271,3 @@ jobs:
             VERSION=${{ steps.tags.outputs.version }}
             REVISION=${{ github.sha }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
