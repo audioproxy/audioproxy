@@ -19,6 +19,7 @@ defmodule AudioProxy.Config do
   | `AP_SALT` | hex-encoded binary | unset (`nil`) |
   | `AP_ALLOW_INSECURE` | boolean | `false` |
   | `AP_SOURCE_ALLOWLIST` | comma-separated list | `[]` |
+  | `AP_LOCAL_ROOT` | existing directory | unset (`nil`) — local sources disabled |
   | `AP_VARIANT_BUCKET` | string | unset (`nil`) — no variant cache |
   | `AP_MAX_CONCURRENCY` | positive integer | `System.schedulers_online/0` |
   | `AP_QUEUE_SIZE` | non-negative integer | `32` |
@@ -57,6 +58,7 @@ defmodule AudioProxy.Config do
           salt: binary() | nil,
           allow_insecure: boolean(),
           source_allowlist: [String.t()],
+          local_root: String.t() | nil,
           variant_bucket: String.t() | nil,
           max_concurrency: pos_integer(),
           queue_size: non_neg_integer(),
@@ -89,6 +91,7 @@ defmodule AudioProxy.Config do
       salt: hex(env, "AP_SALT"),
       allow_insecure: boolean(env, "AP_ALLOW_INSECURE", false),
       source_allowlist: list(env, "AP_SOURCE_ALLOWLIST"),
+      local_root: directory(env, "AP_LOCAL_ROOT"),
       variant_bucket: string(env, "AP_VARIANT_BUCKET"),
       max_concurrency: integer(env, "AP_MAX_CONCURRENCY", System.schedulers_online(), :positive),
       queue_size: integer(env, "AP_QUEUE_SIZE", @default_queue_size, :non_negative),
@@ -184,6 +187,21 @@ defmodule AudioProxy.Config do
   end
 
   defp string(env, var), do: fetch(env, var)
+
+  # Checked here rather than on the request path so that a container pointed at
+  # a directory that is not mounted fails to boot, instead of answering every
+  # local source with a 404 that looks like a missing file.
+  defp directory(env, var) do
+    with value when is_binary(value) <- fetch(env, var) do
+      expanded = Path.expand(value)
+
+      if File.dir?(expanded) do
+        expanded
+      else
+        raise Error, "#{var} must be an existing directory, got: #{inspect(value)}"
+      end
+    end
+  end
 
   defp integer(env, var, default, bound) do
     case fetch(env, var) do

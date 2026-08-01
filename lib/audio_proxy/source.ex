@@ -16,9 +16,9 @@ defmodule AudioProxy.Source do
   slice. Ask this module to parse a source and it will decode, vet, and hand
   the remainder to whichever type claims the scheme.
 
-  With no types registered, every source is `{:error, :unknown_scheme}`. That
-  is the state this slice ships in: `add-local-files-source` registers
-  `local://`, `add-remote-files-source` registers `s3://` and `https://`.
+  One type is registered: `local://`, files under `AP_LOCAL_ROOT`
+  (`AudioProxy.Source.Local`). Anything else is `{:error, :unknown_scheme}`
+  until `add-remote-files-source` adds `s3://` and `https://`.
 
   ## Decode exactly once
 
@@ -61,7 +61,7 @@ defmodule AudioProxy.Source do
 
   # Source types, in dispatch order. Each slice that adds one appends here;
   # nothing loads a type at runtime.
-  @types []
+  @types [AudioProxy.Source.Local]
 
   # A `%` that is not the start of a well-formed escape.
   @malformed_escape_re ~r/%(?![0-9A-Fa-f]{2})/
@@ -103,7 +103,10 @@ defmodule AudioProxy.Source do
   `AudioProxy.Plugs.VerifySignature`); passing it would decode twice.
 
   `types` overrides the registered source types, which is how this module is
-  tested without shipping one.
+  tested against a stand-in rather than a real one.
+
+      iex> AudioProxy.Source.parse("plain/local://previews/track.wav")
+      {:ok, {:local, "previews/track.wav"}}
 
       iex> AudioProxy.Source.parse("plain/s3://masters/a.wav")
       {:error, :unknown_scheme}
@@ -167,8 +170,8 @@ defmodule AudioProxy.Source do
   @doc """
   The registered source types.
 
-  Empty until a slice registers one; `parse/2` and friends take an override so
-  the contract can be exercised against a test-only type.
+  `parse/2` and friends take an override, so the contract can be exercised
+  against a test-only type without registering one.
   """
   @spec types() :: [module()]
   def types, do: @types

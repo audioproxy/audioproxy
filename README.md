@@ -4,26 +4,23 @@
 
 An imgproxy-style on-the-fly audio transcoding proxy.
 
-> **Status: early.** URL signing, the processing-options grammar and the
-> ffmpeg argument builder are done; rendering, streaming and S3 access are not.
-> Slices tracked under `openspec/changes/`.
-
+> **Status: early.** URL signing, the processing-options grammar, the ffmpeg
+> argument builder and `local://` source resolution are done; rendering,
+> streaming and S3 access are not. Slices tracked under `openspec/changes/`.
 ## What you can do with it
 
-Point it at a lossless master in S3 and ask for a variant by URL. Nothing is
-pre-rendered and nothing is configured server-side: the options in the path
-*are* the request, so a catalogue of one file can serve previews, waveforms,
-speech-ready mono and format-shifted downloads without you generating any of
-them in advance.
-
+Point it at a lossless master — a file in a directory you mounted, or later an
+S3 object — and ask for a variant by URL. Nothing is pre-rendered and nothing
+is configured server-side: the options in the path *are* the request, so a
+catalogue of one file can serve previews, waveforms, speech-ready mono and
+format-shifted downloads without you generating any of them in advance.
 The path is `/{signature}/{options}/{source}`. These examples use the literal
 `insecure` in place of a signature, which `AP_ALLOW_INSECURE=true` accepts in
 development; [Signing URLs](#signing-urls) covers the real thing.
 
 ```bash
 BASE=localhost:4000
-SRC='plain/s3://masters/piece.wav'
-
+SRC='plain/local://piece.wav'    # AP_LOCAL_ROOT/piece.wav
 # A 30-second preview: Opus at 96 kbps, starting 12.5 s in,
 # half-second fade in and one-second fade out.
 curl "$BASE/insecure/f:opus/br:96/t:12.5:30/fade:0.5:1/$SRC"
@@ -58,7 +55,7 @@ encodes; later requests are served from the variant bucket with `Range` support.
 
 ## Design
 
-Sources live in S3 (or any HTTP-reachable store). Variants — transcodes, trimmed
+Sources live on a mounted directory, in S3, or in any HTTP-reachable store. Variants — transcodes, trimmed
 previews, waveform peaks — are to be rendered on demand by ffmpeg, streamed to
 the first requester as they encode, and teed to a variant bucket, so that later
 requests for the same variant redirect to S3 and get `Range` support and
@@ -269,13 +266,34 @@ escapes has to be escaped *again*, so a URL ending in `a%20b.wav` is written
 `plain/https://h/a%2520b.wav`. Sign the source in the same spelling you
 request it in — the signature covers the raw path.
 
-**Which sources are available depends on which source types are built.**
-Each is its own slice: `local://` paths under a configured root, `s3://`
-objects, and `https://` URLs, each with its own rule for what it will serve.
-None of them are wired up yet, so today every source is refused as an
-unknown scheme — see [docs/sources.md](docs/sources.md) for the contract
-they plug into, and `openspec/changes/` for which slice adds which.
+### `local://` — files under a configured root
 
+`local://{path}` serves a path relative to `AP_LOCAL_ROOT`:
+
+```bash
+export AP_LOCAL_ROOT=/srv/audio
+# …serves /srv/audio/previews/track.wav
+curl "$BASE/insecure/f:mp3/br:128/plain/local://previews/track.wav"
+```
+
+The root is the whole access-control story for disk: **unset `AP_LOCAL_ROOT`
+and local sources are refused outright**, so a proxy serves exactly what you
+mounted for it and nothing else. Inside that, paths that climb out with `..`,
+absolute paths, and symlinks whose targets land outside the root are all
+refused — as `404`, the same answer as a file that is not there, so the root
+cannot be used to probe the filesystem around it.
+
+The root does not appear in the cache key. `local://previews/track.wav` names
+the same variant whether it is mounted at `/srv/audio` or `/data`, so moving
+or redeploying the root does not invalidate anything.
+
+A file that is missing, or that is not a regular file, is a `404`; one larger
+than `AP_MAX_SRC_BYTES` is a `413` before any render starts.
+
+**`s3://` and `https://` sources are not built yet** — each is its own slice,
+with its own rule for what it will serve, and until they land those schemes
+are refused as unknown. See [docs/sources.md](docs/sources.md) for the
+contract they plug into and `openspec/changes/` for which slice adds which.
 ## Configuration
 
 All configuration comes from `AP_`-prefixed environment variables — see
@@ -292,6 +310,7 @@ so several of them are parsed and validated but not yet consumed by anything.
 | `AP_SALT` | hex | unset | HMAC salt |
 | `AP_ALLOW_INSECURE` | boolean | `false` | Accept unsigned URLs (dev only) |
 | `AP_SOURCE_ALLOWLIST` | comma-separated | empty | Permitted source buckets/hosts (used once remote source types land) |
+| `AP_LOCAL_ROOT` | existing directory | unset | Root for `local://` sources; unset disables them. Must exist at boot |
 | `AP_VARIANT_BUCKET` | string | unset | Write-back target; unset = always render |
 | `AP_MAX_CONCURRENCY` | positive integer | schedulers online | Max simultaneous ffmpeg processes |
 | `AP_QUEUE_SIZE` | non-negative integer | `32` | Waiting renders before `429` |

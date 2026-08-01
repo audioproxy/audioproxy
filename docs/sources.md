@@ -13,10 +13,10 @@ fetch. The work splits in two, and the split is the design:
 
 For the URL grammar see [`audio-proxy-api-v1.md`](audio-proxy-api-v1.md) §1.
 
-> **Status.** The shared layer exists; no source types are registered yet, so
-> every source currently resolves to `{:error, :unknown_scheme}`. The forms
-> and their policies are documented by the slices that add them.
-
+> **Status.** The shared layer exists and one type is registered: `local://`
+> (`AudioProxy.Source.Local`, see the README's *Sources* section for its
+> policy). `s3://` and `https://` arrive with `add-remote-files-source`;
+> until then they resolve to `{:error, :unknown_scheme}`.
 ## Two encodings, one source
 
 | Form | Example |

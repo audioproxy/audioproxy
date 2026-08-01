@@ -15,9 +15,20 @@ GET /{signature}/{options}/{source}
 - **signature** — `base64url(HMAC-SHA256(key, salt ‖ path))` over everything after the signature segment: the exact byte sequence following `/{signature}`, leading `/` included, taken from the raw (still percent-encoded) request path. Signatures are emitted unpadded; the canonical padded form (one trailing `=`) is accepted, but non-canonical spellings (over-padding, variant final characters) are rejected, so each signature has exactly two accepted spellings. In dev mode the literal `insecure` is accepted (disabled by default in prod).
 - **options** — ordered, `/`-separated `key:value` segments (see §3). Order is normalized before hashing into the cache key, so `f:opus/br:96` and `br:96/f:opus` yield the same variant.
 - **source** — one of:
+  - `plain/local://{path}` — file below `AP_LOCAL_ROOT` (URL-escaped path)
   - `plain/s3://{bucket}/{key}` — S3 object (URL-escaped key)
   - `plain/{https-url}` — arbitrary HTTP(S) source, URL-escaped; subject to an allowlist
   - `enc/{base64url(source)}` — encoded form, avoids escaping headaches
+
+### Local sources
+
+`local://{path}` names a path relative to `AP_LOCAL_ROOT`. The root is deployment configuration and does not participate in identity: the canonical source string is `local://{path}` with no root in it, so the same relative path is the same variant however a deployment mounted it, and variants survive a root move.
+
+When `AP_LOCAL_ROOT` is unset, local sources are disabled — the root *is* the allowlist for disk, so nothing mounted means nothing served.
+
+Confinement is absolute and uniform. After the source has been decoded exactly once (never before — a check on a half-decoded string proves nothing), the path must be relative, must not climb out of the root with `..`, and must still resolve inside the root once every symlink on it has been followed. A path that fails any of these is refused, never normalized and retried. Every refusal is **404**, the same status as a missing file: §5 has no 403, and a distinct status would turn the root into an existence oracle for the filesystem around it.
+
+Metadata comes from the filesystem: regular files only (a directory, FIFO or device is a 404, as is a missing file), size checked against `AP_MAX_SRC_BYTES` for the 413, and size-plus-mtime as the ETag material behind conditional requests on `/info`.
 
 Example:
 
@@ -146,6 +157,7 @@ Mid-stream render failure after `200` is signaled by abnormal termination of the
 | `AP_KEY`, `AP_SALT` | Hex-encoded HMAC key/salt; key must decode to ≥ 32 bytes (generate: `openssl rand -hex 32`) |
 | `AP_ALLOW_INSECURE` | Accept unsigned URLs (dev only) |
 | `AP_SOURCE_ALLOWLIST` | Comma-separated bucket/host patterns |
+| `AP_LOCAL_ROOT` | Root directory for `local://` sources; unset = local sources disabled. Must exist at boot |
 | `AP_VARIANT_BUCKET` | Write-back target; unset = no cache, always render |
 | `AP_MAX_CONCURRENCY` | Max simultaneous ffmpeg processes (default: CPU count) |
 | `AP_QUEUE_SIZE` | Waiting renders before `429` |
