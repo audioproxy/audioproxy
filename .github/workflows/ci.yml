@@ -124,8 +124,15 @@ jobs:
       - name: Assert the tested ffmpeg is the shipped ffmpeg
         run: |
           set -euo pipefail
-          test_ffmpeg=$(docker run --rm --entrypoint ffmpeg audio_proxy:test -version | head -1)
-          ship_ffmpeg=$(docker run --rm --entrypoint ffmpeg audio_proxy:runtime -version | head -1)
+          # Captured whole, then sliced to the first line with parameter
+          # expansion. Piping into `head -1` closes the pipe after one line,
+          # ffmpeg dies of EPIPE partway through its banner, docker exits
+          # non-zero, and `pipefail` turns that into a failed step — a failure
+          # about plumbing that reads exactly like a failed assertion.
+          test_ffmpeg=$(docker run --rm --entrypoint ffmpeg audio_proxy:test -version)
+          ship_ffmpeg=$(docker run --rm --entrypoint ffmpeg audio_proxy:runtime -version)
+          test_ffmpeg=${test_ffmpeg%%$'\n'*}
+          ship_ffmpeg=${ship_ffmpeg%%$'\n'*}
           echo "test stage:    $test_ffmpeg"
           echo "runtime stage: $ship_ffmpeg"
           if [ "$test_ffmpeg" != "$ship_ffmpeg" ]; then
@@ -203,7 +210,9 @@ jobs:
         run: |
           set -euo pipefail
           tag_version="${GITHUB_REF_NAME#v}"
-          mix_version=$(grep -oE 'version:\s*"[^"]+"' mix.exs | head -1 | grep -oE '"[^"]+"' | tr -d '"')
+          # Same reason as above: no `| head -1` under pipefail. `awk NR==1`
+          # consumes its whole input, so nothing upstream ever sees EPIPE.
+          mix_version=$(grep -oE 'version:[[:space:]]*"[^"]+"' mix.exs | awk 'NR==1' | grep -oE '"[^"]+"' | tr -d '"')
           echo "tag: $tag_version, mix.exs: $mix_version"
           if [ "$tag_version" != "$mix_version" ]; then
             echo "::error::tag $GITHUB_REF_NAME does not match mix.exs version $mix_version"
