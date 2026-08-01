@@ -249,6 +249,33 @@ cache objects. Collapsing them is tracked as follow-up work. The property suite
 (`test/audio_proxy/options_property_test.exs`) holds this line: normalization
 is idempotent, order-insensitive, and always re-parses.
 
+## Sources
+
+The last portion of the path names what to render, in one of two forms:
+
+| Form | Example |
+|---|---|
+| `plain/{source}` | `plain/s3://masters/2026/piece-final.wav` |
+| `enc/{base64url(source)}` | `enc/czM6Ly9tYXN0ZXJzLzIwMjYvcGllY2UtZmluYWwud2F2` |
+
+Both name the same thing and produce the same cache key. `enc/` exists
+because escaping a URL inside a URL is easy to get wrong: base64url the
+source as written and you are done.
+
+In the `plain/` form the source is percent-escaped, and it is unescaped
+exactly once. A space is `%20`, a literal percent is `%25`, and `+` is a
+literal plus. One consequence to watch: a source that already carries
+escapes has to be escaped *again*, so a URL ending in `a%20b.wav` is written
+`plain/https://h/a%2520b.wav`. Sign the source in the same spelling you
+request it in — the signature covers the raw path.
+
+**Which sources are available depends on which source types are built.**
+Each is its own slice: `local://` paths under a configured root, `s3://`
+objects, and `https://` URLs, each with its own rule for what it will serve.
+None of them are wired up yet, so today every source is refused as an
+unknown scheme — see [docs/sources.md](docs/sources.md) for the contract
+they plug into, and `openspec/changes/` for which slice adds which.
+
 ## Configuration
 
 All configuration comes from `AP_`-prefixed environment variables — see
@@ -264,7 +291,7 @@ so several of them are parsed and validated but not yet consumed by anything.
 | `AP_KEY` | hex, ≥ 32 bytes decoded | unset | HMAC key for URL signatures |
 | `AP_SALT` | hex | unset | HMAC salt |
 | `AP_ALLOW_INSECURE` | boolean | `false` | Accept unsigned URLs (dev only) |
-| `AP_SOURCE_ALLOWLIST` | comma-separated | empty | Permitted source buckets/hosts |
+| `AP_SOURCE_ALLOWLIST` | comma-separated | empty | Permitted source buckets/hosts (used once remote source types land) |
 | `AP_VARIANT_BUCKET` | string | unset | Write-back target; unset = always render |
 | `AP_MAX_CONCURRENCY` | positive integer | schedulers online | Max simultaneous ffmpeg processes |
 | `AP_QUEUE_SIZE` | non-negative integer | `32` | Waiting renders before `429` |
@@ -292,6 +319,7 @@ migrate.
 | Document | What it covers |
 |---|---|
 | [docs/audio-proxy-api-v1.md](docs/audio-proxy-api-v1.md) | **The source of truth.** URL grammar, every processing option, cache-key rules, response headers, error codes |
+| [docs/sources.md](docs/sources.md) | Source encodings and escaping, what is refused, the source-type contract and canonical identity |
 | [docs/development.md](docs/development.md) | Toolchain, per-slice worktrees and devcontainers, the test suite and its tags, CI |
 | [docs/ffmpeg-arguments.md](docs/ffmpeg-arguments.md) | How options become ffmpeg arguments — filter order, per-format flags, known gaps |
 | `openspec/specs/` | Capability specs for what is built; `openspec/changes/` holds what is planned |

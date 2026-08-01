@@ -1,0 +1,138 @@
+# Source resolution
+
+How the source segment of a signed URL becomes something the renderer can
+fetch. The work splits in two, and the split is the design:
+
+- **`AudioProxy.Source`** owns what the *encodings* imply — `plain/` versus
+  `enc/`, decoding exactly once, the rejections no source should survive,
+  dispatch by scheme, and the canonical-identity contract that
+  `AudioProxy.CacheKey` hashes. It is pure and offline.
+- **`AudioProxy.Source.Type`** is what a source *is*. One module per scheme,
+  each shipping in its own slice: `local://` with `add-local-files-source`,
+  `s3://` and `https://` with `add-remote-files-source`.
+
+For the URL grammar see [`audio-proxy-api-v1.md`](audio-proxy-api-v1.md) §1.
+
+> **Status.** The shared layer exists; no source types are registered yet, so
+> every source currently resolves to `{:error, :unknown_scheme}`. The forms
+> and their policies are documented by the slices that add them.
+
+## Two encodings, one source
+
+| Form | Example |
+|---|---|
+| `plain/{source}` | `plain/s3://masters/2026/piece-final.wav` |
+| `enc/{base64url(source)}` | `enc/czM6Ly9tYXN0ZXJzLzIwMjYvcGllY2UtZmluYWwud2F2` |
+
+The `enc/` payload is decoded to the plain *source string* first, and from
+there both encodings share one code path. That is what keeps them from
+drifting semantically: there is exactly one parser per scheme, and the
+encoding is peeled off before it runs. Both forms therefore land on the same
+typed source, the same canonical string, and the same cache key.
+
+It also fixes an ordering every source type depends on — decode fully, *then*
+interpret. A path-confinement check or a URL parse is only sound on a
+fully-decoded string, and doing it in the wrong order is how traversal bugs
+happen.
+
+Base64url is accepted padded or unpadded. Unlike a signature, an encoded
+source has nothing to gain from being non-malleable: every spelling decodes to
+the same bytes, so every spelling is the same variant.
+
+## Escaping
+
+The `plain/` payload is percent-decoded **exactly once**. So a literal `%` is
+written `%25`, a space `%20`, and `+` is left alone — `+` is a literal plus in
+a path, and the plus-means-space convention belongs to query strings. A
+malformed escape (`%zz`, a trailing `%`) is rejected rather than passed
+through, because passing it through would give one source two spellings:
+`%zz` and `%25zz` would both decode to `%zz`, and one source with two
+spellings is one variant with two cache keys.
+
+That single decode has a consequence worth stating plainly. A source that
+**already carries escapes has to be escaped again** for the `plain/` form,
+since the outer layer is what gets stripped:
+
+```
+https://h/a%20b.wav                the source
+plain/https://h/a%2520b.wav        …as a plain source
+enc/aHR0cHM6Ly9oL2ElMjBiLndhdg     …as an encoded source
+```
+
+This is exactly the headache `enc/` exists to avoid — base64url the source as
+written and be done with it.
+
+Remember that the signature covers the raw request path, so a source must be
+signed in the same spelling it is requested in. Re-encoding anything between
+signing and requesting breaks the signature.
+
+## Refused for everyone, once
+
+Control, format and line/paragraph-separator code points are refused in any
+decoded source, whatever its type. Matching is by Unicode category (`Cc`,
+`Cf`, `Zl`, `Zp`) rather than by the ASCII range, because `\x00-\x1f` alone
+lets U+0085, U+2028 and a right-to-left override straight through.
+
+Nothing legitimate needs one, and they would otherwise reach ffmpeg argv,
+object keys, `Content-Disposition` and log lines — where a right-to-left
+override is a filename-spoofing tool. Doing this in the shared layer rather
+than per type is the point: a source type cannot forget it, so a NUL byte
+never reaches a confinement check.
+
+The failures the shared layer produces, each an `{:error, reason}` the HTTP
+layer maps to a status. A source type adds its own on top.
+
+| Reason | Cause |
+|---|---|
+| `:unknown_encoding` | Segment starts with neither `plain/` nor `enc/` |
+| `:invalid_encoding` | `enc/` payload is not base64url, or does not decode to UTF-8 |
+| `:malformed_escape` | A `%` not followed by two hex digits |
+| `:empty_source` | Nothing after the encoding prefix |
+| `:control_character` | A control, format or separator code point |
+| `:unknown_scheme` | No registered source type claims the scheme |
+
+## The source-type contract
+
+A type is a module implementing `AudioProxy.Source.Type`, registered in a
+compile-time list. Nothing loads a source type from configuration.
+
+| Callback | Answers |
+|---|---|
+| `scheme/0`, `tag/0` | Which scheme it claims, and the tag its sources carry |
+| `parse/1` | The decoded body (everything after `scheme://`) → a typed source |
+| `canonical/1` | That source's identity string, which the cache key hashes |
+| `authorize/1` | May this source be served? |
+| `stat/1` | Size and ETag material, or "not there" |
+| `ffmpeg_input/1` | What ffmpeg gets as its input argument |
+
+**Authorization is a callback, not shared policy.** "Permitted" means a host
+allowlist for HTTPS, a bucket allowlist for S3, and confinement under a
+configured root for local files. A shared implementation would have to know
+all three, so there isn't one — the shared layer guarantees only that every
+type has an answer, not what answering means. Failures are uniformly
+`{:error, :not_allowed}`, which the HTTP layer renders as **404**: §5 of the
+API doc has no 403, and a distinct status would turn the policy into an
+existence oracle.
+
+**`stat/1` and `ffmpeg_input/1` are the storage seam** — exactly what the
+render and info flows need from a source, and the only two things they need.
+Size and ETag material answer 404/413 before a subprocess starts; the ffmpeg
+input is a path for a local source and a URL for a remote one, always a single
+argv element and never a shell string. `size` may be `nil` when the backing
+store genuinely does not know it; that is not an error, and `AP_MAX_SRC_BYTES`
+is then enforced downstream by the render byte cap.
+
+Declaring the seam alongside the rest of the contract is what makes a new
+backend a registration rather than an edit to the render and info flows.
+
+## Canonical identity
+
+`canonical/1` produces the "what" half of a variant's identity — the string
+`AudioProxy.CacheKey` hashes alongside the normalized options. Each type
+renders its own, under two rules the shared layer imposes:
+
+- **Both encodings of one source must render identical bytes.** Guaranteed by
+  construction: they parse to the same typed source.
+- **Deployment configuration must not appear in it.** A filesystem root or an
+  endpoint override is where a deployment put things, not what the source is,
+  and folding it in would mean variants did not survive a redeployment.
