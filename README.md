@@ -80,18 +80,44 @@ the spec when you need the exact contract.
 
 ## Running it
 
+The container is the way to run this. It carries the release with its own
+Erlang runtime and the ffmpeg the renders are tested against, so there is
+nothing to install and nothing to keep in step.
+
 ```bash
-mise install          # Elixir and Erlang/OTP, pinned in .tool-versions
-mix deps.get
-PORT=4000 mix run --no-halt
+docker run --rm -p 4000:4000 \
+  -e AP_KEY="$AP_KEY" -e AP_SALT="$AP_SALT" \
+  -e AP_LOCAL_ROOT=/audio \
+  -v /path/to/your/audio:/audio:ro \
+  ghcr.io/audioproxy/audioproxy:0.1.0
 
 curl -s localhost:4000/health
 # {"status":"ok","version":"0.1.0"}
 ```
 
-Rendering needs `ffmpeg` and `ffprobe` on `PATH`; the release image will bundle
-them. For a development container that already has them, and for the test
-suite, see [docs/development.md](docs/development.md).
+That is the whole configuration for serving files off a mounted directory — no
+credentials, no bucket, no database. Point `AP_LOCAL_ROOT` at the mount,
+**mount it read-only**, and sign your URLs with the key and salt.
+
+**Pin a version.** `:0.1.0` and `:sha-<commit>` name an exact image; `:0.1`
+follows patch releases; `:latest` and `:edge` move under you, and `:edge` is
+whatever last landed on `main`. Pinning matters more here than for most
+services, because a different ffmpeg encodes the same URL to different bytes —
+which is also why a pin bump always cuts a release. The pinned versions are in
+[VERSIONS.md](VERSIONS.md).
+
+To run it from a checkout instead — for development, or to build your own
+image:
+
+```bash
+mise install          # Elixir and Erlang/OTP, pinned in .tool-versions
+mix deps.get
+PORT=4000 mix run --no-halt
+```
+
+That path needs `ffmpeg` and `ffprobe` on `PATH`. For a development container
+that already has them, and for the test suite, see
+[docs/development.md](docs/development.md).
 
 ## Signing URLs
 
@@ -336,15 +362,11 @@ docker run -p 4000:4000 \
   -e AP_ALLOW_INSECURE=true \
   -e AP_LOCAL_ROOT=/srv/audio \
   -v /path/to/your/audio:/srv/audio:ro \
-  ghcr.io/audioproxy/audioproxy:latest
+  ghcr.io/audioproxy/audioproxy:0.1.0
 
 # …renders /srv/audio/previews/track.wav
 curl "$BASE/insecure/f:mp3/br:128/plain/local://previews/track.wav"
 ```
-
-> The image is not published yet — the container ships with the release slice
-> under `openspec/changes/add-docker-release`. Until then, set `AP_LOCAL_ROOT`
-> in your environment and run it as under [Running it](#running-it).
 
 Unset `AP_LOCAL_ROOT` and local sources are refused outright: the root is the
 whole access-control story for disk. **Mount it read-only** — write access to
@@ -423,7 +445,8 @@ migrate.
 |---|---|
 | [docs/audio-proxy-api-v1.md](docs/audio-proxy-api-v1.md) | **The source of truth.** URL grammar, every processing option, cache-key rules, response headers, error codes |
 | [docs/sources.md](docs/sources.md) | Source encodings and escaping, what is refused, the source-type contract and canonical identity |
-| [docs/development.md](docs/development.md) | Toolchain, per-slice worktrees and devcontainers, the test suite and its tags, CI |
+| [docs/development.md](docs/development.md) | Toolchain, per-slice worktrees and devcontainers, the test suite and its tags, CI, how a release is cut |
+| [VERSIONS.md](VERSIONS.md) | What the image is built from — Alpine, Elixir/OTP and ffmpeg pins, and how to bump one |
 | [docs/ffmpeg-arguments.md](docs/ffmpeg-arguments.md) | How options become ffmpeg arguments — filter order, per-format flags, known gaps |
 | [docs/rendering.md](docs/rendering.md) | How a render runs — the subprocess, the chunk stream, buffering and lifecycle guarantees |
 | `openspec/specs/` | Capability specs for what is built; `openspec/changes/` holds what is planned |
