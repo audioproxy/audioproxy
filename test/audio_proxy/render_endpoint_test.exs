@@ -31,11 +31,14 @@ defmodule AudioProxy.RenderEndpointTest do
     File.write!(Path.join(tmp_dir, "piece.wav"), @piece_content)
     File.write!(Path.join(tmp_dir, "a track.wav"), "RIFF")
 
+    # Pin every config value the chain reads: a boot-time AP_MAX_SRC_BYTES in
+    # the environment must not be able to flip these tests' 501s to 413s.
     put_config(%{
       key: @key,
       salt: @salt,
       allow_insecure: false,
-      local_root: tmp_dir
+      local_root: tmp_dir,
+      max_src_bytes: 2_000_000_000
     })
 
     :ok
@@ -105,6 +108,29 @@ defmodule AudioProxy.RenderEndpointTest do
       put_config(%{max_src_bytes: byte_size(@piece_content)})
 
       assert get(signed("/f:mp3/plain/local://piece.wav")).status == 501
+    end
+
+    test "a malformed escape in a signed request is the generic 404, never a bare 400" do
+      # Tripwire for Plug.Router's match-time decode: if a Plug upgrade starts
+      # raising MalformedURIError on %zz, hostile paths get a bare 400 *before*
+      # VerifySignature — breaking both the uniform 404 and 401-first. The
+      # current Plug version matches the route without decoding; keep it pinned.
+      conn = get(signed("/f:mp3/plain/local://a%zztrack.wav"))
+
+      assert conn.status == 404
+      assert JSON.decode!(conn.resp_body) == @generic_404
+    end
+
+    test "an existing, oversized file outside the root is 404, not 413", %{tmp_dir: tmp_dir} do
+      # Authorize-before-stat on the wire: the file exists and exceeds the
+      # limit, but confinement refuses it before size is ever read.
+      File.write!(Path.join(tmp_dir, "../big-outside-root.wav"), String.duplicate("x", 64))
+      put_config(%{max_src_bytes: 10})
+
+      conn = get(signed("/f:mp3/plain/local://../big-outside-root.wav"))
+
+      assert conn.status == 404
+      assert JSON.decode!(conn.resp_body) == @generic_404
     end
   end
 
