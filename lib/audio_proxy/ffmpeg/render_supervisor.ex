@@ -32,11 +32,17 @@ defmodule AudioProxy.Ffmpeg.RenderSupervisor do
   Starts a supervised render. See `AudioProxy.Ffmpeg.Render.start_link/1` for
   the options.
 
-  `:consumer` should be given explicitly: it defaults to the caller, which
-  here is the supervisor rather than the process that wanted the bytes.
+  `:consumer` is **required** here, unlike in `Render.start_link/1` where it
+  defaults to the caller. Under a `DynamicSupervisor` the caller is the
+  supervisor, so that default would quietly mail the whole chunk stream into
+  the supervisor's mailbox and leave the process that wanted the bytes waiting
+  forever. Omitting it raises at the call site instead, because it is a bug in
+  the caller rather than a condition to handle.
   """
   @spec start_render(keyword()) :: DynamicSupervisor.on_start_child()
   def start_render(opts) when is_list(opts) do
+    _consumer = Keyword.fetch!(opts, :consumer)
+
     DynamicSupervisor.start_child(__MODULE__, {Render, opts})
   end
 end

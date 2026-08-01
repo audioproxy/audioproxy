@@ -61,6 +61,8 @@ defmodule AudioProxy.Ffmpeg.Render do
 
   use GenServer
 
+  require Logger
+
   # Forwarded-but-unacknowledged bytes at which forwarding pauses. Roughly a
   # second of 128 kbps audio is worth ~16 KB, so this is generous for previews
   # while still bounding a stalled consumer's cost to something a container can
@@ -171,6 +173,18 @@ defmodule AudioProxy.Ffmpeg.Render do
 
   @impl true
   def handle_cast({:ack, bytes}, state) do
+    # Acknowledging more than was ever forwarded is a bug in the consumer, and
+    # a silent clamp would hide it while quietly disabling the bound — the
+    # count would sit at zero and forwarding would never pause again. Clamp
+    # anyway, since crashing a render over an accounting slip helps nobody, but
+    # say so.
+    if bytes > state.outstanding do
+      Logger.warning(
+        "render consumer acknowledged #{bytes} bytes with only #{state.outstanding} outstanding; " <>
+          "the buffer bound is only as good as this count"
+      )
+    end
+
     %{state | outstanding: max(state.outstanding - bytes, 0)} |> flush()
   end
 

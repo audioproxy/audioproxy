@@ -96,11 +96,17 @@ defmodule AudioProxy.Ffmpeg.RenderTest do
 
       # A consumer that never acks: forwarding stalls, and the completion
       # message is withheld with it.
-      assert {:timeout, stalled} = RenderHarness.collect(render, ack: false, idle_timeout: 500)
-      assert byte_size(stalled) > 0
-      assert byte_size(stalled) < size
+      assert {:timeout, stalled} = RenderHarness.collect(render, ack: false, idle_timeout: 1_000)
 
-      # One chunk may cross the mark; nothing may be forwarded after it.
+      # Both bounds are load-bearing, and the lower one especially: asserting
+      # only that *something* arrived would pass a render that stalled after a
+      # single byte, which is the opposite bug and would look identical here.
+      #
+      # The upper bound allows exactly one chunk to cross the mark. 64 KiB is
+      # the port's read buffer rather than a documented guarantee, so this is
+      # an empirical ceiling — generous enough not to be fragile, tight enough
+      # that "forwarded everything" fails it.
+      assert byte_size(stalled) >= @high_water
       assert byte_size(stalled) < @high_water + 65_536
 
       # Acking what was held releases the rest, and it is still the same stream.
@@ -122,6 +128,18 @@ defmodule AudioProxy.Ffmpeg.RenderTest do
 
       assert {:ok, bytes, _info} = RenderHarness.collect(render)
       assert bytes == RenderHarness.pattern(1024)
+    end
+
+    test "refuses to start without an explicit consumer", %{fake_cmd: fake_cmd} do
+      # Under the supervisor the caller is the supervisor, so inheriting
+      # `Render.start_link/1`'s `self()` default would mail the stream into the
+      # supervisor's mailbox and strand whoever wanted the bytes.
+      assert_raise KeyError, fn ->
+        AudioProxy.Ffmpeg.RenderSupervisor.start_render(
+          executable: fake_cmd,
+          args: ["emit", "16"]
+        )
+      end
     end
   end
 
