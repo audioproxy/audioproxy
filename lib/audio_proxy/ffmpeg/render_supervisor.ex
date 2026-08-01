@@ -25,7 +25,21 @@ defmodule AudioProxy.Ffmpeg.RenderSupervisor do
 
   @impl true
   def init(_init_arg) do
+    sweep_scratch()
+
     DynamicSupervisor.init(strategy: :one_for_one)
+  end
+
+  # Each render deletes its own stderr file, so anything still here belongs to
+  # a render that died with the VM — a `kill -9`, an OOM, a crashed container.
+  # Boot is the one moment at which "nothing is running, so everything here is
+  # stale" is true, which makes it the one safe moment to sweep.
+  defp sweep_scratch do
+    scratch = Render.scratch_dir()
+
+    with {:ok, entries} <- File.ls(scratch) do
+      Enum.each(entries, &File.rm(Path.join(scratch, &1)))
+    end
   end
 
   @doc """

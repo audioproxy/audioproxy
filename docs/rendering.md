@@ -78,11 +78,79 @@ A render runs at full speed into the write-back; the client's chunked stream
 lags it rather than throttling it. A client listening in real time must not be
 able to pin a CPU slot for the duration of the audio.
 
-## Lifecycle
+## Lifecycle: no ffmpeg outlives its render
 
-> **Incomplete.** The `SIGTERM` → `SIGKILL` escalation, `AP_RENDER_TIMEOUT`
-> enforcement, cancellation and failure classification are the hardening slice
-> (`add-ffmpeg-port-pipeline` tasks 1.3 and 1.4). Until then, consumer death and
-> application shutdown close the port, which drops the subprocess' stdout and
-> usually kills it by `SIGPIPE` — *usually* being exactly the gap that slice
-> closes.
+This is the guarantee the module is arranged around, because the failure it
+prevents is the expensive one: an orphaned encoder holds a CPU slot, and a
+proxy that leaks one per cancelled request degrades until it is restarted.
+
+Every way a render can end — a clean finish, `cancel/1`, the timeout, a dead
+consumer, the supervisor shutting down at VM stop — arrives at the same
+`terminate/2`, which is why exits are trapped: shutdown becomes one of the
+ordinary paths rather than an exception to them. From there:
+
+1. close the port,
+2. `SIGTERM` the subprocess,
+3. `SIGKILL` after a two-second grace, if it is still there.
+
+**Closing the port is not enough on its own**, and that is the whole reason for
+steps 2 and 3. The BEAM does not signal the process on the far side of a closed
+port. An ffmpeg blocked reading a slow HTTP input may not touch its stdout for
+minutes, never notice that nobody is listening, and sit there holding a slot.
+Measured on this project: a `SIGTERM`-ignoring subprocess survives
+`Port.close/1` indefinitely.
+
+The grace is a trade. Two seconds is long enough for ffmpeg to flush and close
+cleanly, short enough that a cancelled request is not noticeably held open.
+Within that window a PID could in principle be reused and the `SIGKILL` land on
+an innocent process; on any real system the window makes that implausible, and
+the alternative — never escalating — is the orphan this exists to prevent.
+
+## Timeout
+
+A render exceeding `AP_RENDER_TIMEOUT` (seconds, default 300) is killed by the
+same discipline and reported as `:timeout`, which the HTTP layer maps to 504.
+The timer is armed at spawn from configuration, so an operator raising the
+limit for long masters changes one environment variable and nothing else.
+
+## Failure classification
+
+ffmpeg exits 1 for almost everything, so the exit status alone cannot separate
+"the file isn't there" from "the file isn't audio" — and those want different
+HTTP statuses. The class therefore comes from matching a bounded tail of
+stderr:
+
+| Class | Recognised from | HTTP |
+|---|---|---|
+| `:not_found` | `No such file or directory`, `Server returned 404`, `403`/`Forbidden` | 404 |
+| `:undecodable` | `Invalid data found when processing input`, `could not find codec parameters` | 415 |
+| `:timeout` | the render timer, not stderr | 504 |
+| `:cancelled` | `cancel/1` | — the client has already gone |
+| `:render_failed` | anything else | 5xx |
+
+The consumer receives `%{class: _, exit_status: _, stderr: _}`. Keeping the raw
+tail alongside the class matters: the class is what the proxy acts on, the tail
+is what an operator needs when the class is `:render_failed` and the question
+is *why*.
+
+stderr goes to a per-render file in a scratch directory, never merged into
+stdout — merging would splice diagnostics into the audio. Only the last 4 KiB
+is read back, so a decoder in a complaining mood cannot turn a failed render
+into a memory problem. Each render deletes its own file, and the supervisor
+sweeps the directory at boot for the renders that died with the VM.
+
+One note on how that file is arranged, since it is the only place a shell
+appears in a project that otherwise forbids them. Erlang ports offer stdout, or
+stdout with stderr merged in, and nothing else: there is no port option for
+redirecting stderr to a file. So the subprocess is spawned as
+
+```
+/bin/sh -c 'exec "$0" "$@" 2>"$AP_RENDER_STDERR"' <binary> <args…>
+```
+
+The script is a compile-time constant with no user data in it. The binary
+arrives as `$0`, its arguments as `"$@"`, and the path through the environment,
+so a source URL full of metacharacters is quoted shell *data* and never shell
+text. `exec` then replaces the shell with ffmpeg, which means the pid the kill
+discipline signals is ffmpeg's own and there is no intermediate process left to
+orphan.

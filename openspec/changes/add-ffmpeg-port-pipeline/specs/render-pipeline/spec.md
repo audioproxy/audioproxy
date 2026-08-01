@@ -27,7 +27,7 @@ The system SHALL kill renders exceeding `AP_RENDER_TIMEOUT` and report a timeout
 
 #### Scenario: Hanging subprocess
 - **WHEN** the subprocess produces no exit within the configured timeout
-- **THEN** it is killed and the consumer receives `{:error, :timeout}`
+- **THEN** it is killed and the consumer receives a failure classified `:timeout`, distinct from every other failure class
 
 ### Requirement: Failure classification
 The system SHALL capture exit status and a bounded stderr tail, classifying failures so the HTTP layer can map them: unreadable/nonexistent input (404), undecodable input (415), timeout (504), other (500-class).
