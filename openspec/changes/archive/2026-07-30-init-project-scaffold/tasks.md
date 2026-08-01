@@ -9,7 +9,7 @@
 
 - [x] 2.1 `.devcontainer/devcontainer.json`: Elixir/OTP + ffmpeg/ffprobe image, `postCreateCommand: bin/agent-setup`
 - [x] 2.2 Binstubs: `bin/agent-setup` (deps.get + compile), `bin/agent-server` (boot on `PORT`), `bin/agent-cleanup` (no per-branch state to drop, so it only removes the worktree's container), plus `bin/agent-exec` (host → container command runner). All four branch on `DEVCONTAINER` so they work on both sides.
-- [x] 2.3 `.config/wt.toml`: post-create/post-start/pre-remove/post-remove hooks with `{{ branch | hash_port }}` port scheme (adapted from the jr-rails-new agentic-worktree reference)
+- [x] 2.3 `.config/wt.toml`: post-create/post-start/pre-remove/post-remove hooks with `{{ branch | hash_port }}` port scheme (adapted from an existing agentic-worktree pattern)
 - [x] 2.4 `.claude/settings.json` permissions for `git worktree`, `wt`, `bin/agent-*`, `devcontainer`
 - [x] 2.5 Smoke-verify: `wt start` on a scratch branch boots the app on its hashed port; document in README
 
