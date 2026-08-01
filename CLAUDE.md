@@ -55,12 +55,12 @@ Stay with the stdlib and core/OTP tooling as far as possible. GenStage is accept
 
 "Do an adversarial review" (or "second opinion") on this repo means one specific thing: **delegate the review to the `opencode` CLI running a non-Claude model, then reconcile its findings against your own self-review.** Do not substitute an in-session review or a subagent — the entire value is that the reviewer is a different model that did not write the code. Findings from past rounds that a self-review missed entirely (a float-comparison bug, a silently dropped struct field) are why this is the rule.
 
-The `jr-rails-second-opinion` skill holds the general workflow; read it for the loop structure. What follows is what this project has already learned, so it is not rediscovered every time.
+The loop is: write your own review first, run the CLI, reconcile the two, then act only on what survives. What follows is what this project has learned about running it, so it is not rediscovered every time.
 
-**Invocation** — from the worktree under review, backgrounded, never in the foreground:
+**Invocation** — from the worktree under review, backgrounded, never in the foreground. `$SCRATCH` is any scratch directory outside the repo:
 
 ```bash
-opencode models openrouter | grep kimi        # verify the id resolves before the real run
+opencode models | grep kimi                   # verify the id resolves before the real run
 
 cat > "$SCRATCH/oc-config.json" <<'JSON'
 {
@@ -72,19 +72,29 @@ cat > "$SCRATCH/oc-config.json" <<'JSON'
 }
 JSON
 
-cd <worktree> && OPENCODE_CONFIG="$SCRATCH/oc-config.json" PATH=/opt/homebrew/bin:$PATH \
-  nohup opencode run --pure -m openrouter/moonshotai/kimi-k2.7-code \
+cd <worktree> && OPENCODE_CONFIG="$SCRATCH/oc-config.json" \
+  nohup opencode run --print-logs -m opencode-go/kimi-k2.7-code \
   --title "second-opinion-<change-name>" "$(cat "$SCRATCH/brief.md")" \
   > "$SCRATCH/review.md" 2> "$SCRATCH/review.err" &
 ```
 
-- **Model:** `openrouter/moonshotai/kimi-k2.7-code`. The full provider path is required — `openrouter/kimi-k2.7-code` fails slowly and silently. Fallbacks when OpenRouter 502s: `openrouter/deepseek-v4-pro`, `openai/gpt-5.6-pro`.
-- **The config override is mandatory.** `~/.config/opencode/opencode.json` denies `bash`/`glob`/`grep`/`read` on purpose. With them denied, `opencode run` hangs forever at `message=init` with a 0-byte output file — indistinguishable from a crash. Override per-run via `OPENCODE_CONFIG`; **never edit the user's config.** Denying `edit`/`write`/`patch` in the same override is also the only no-write guarantee opencode has, since no flag provides one.
+If the agent harness runs a non-login shell, `opencode` may not be on its `PATH`; prepend the directory it actually lives in rather than assuming the inherited environment is the interactive one.
+
+- **Model:** `opencode-go/kimi-k2.7-code`. First-party ids are flat; OpenRouter's need the vendor path (`openrouter/moonshotai/kimi-k2.7-code`, never `openrouter/kimi-k2.7-code`, which fails slowly and silently). Prefer a first-party route where one exists — an aggregator that degrades presents as an unexplained hang, and swapping the route is a one-flag way to rule that out. Fallbacks: `openrouter/deepseek-v4-pro`, `openai/gpt-5.6-pro`.
+- **`--print-logs` on every run.** It puts structured logs on stderr and leaves the answer on stdout, which is the only way to tell a working run from a hung one — both are a 0-byte output file otherwise. Poll `review.err` and watch `message=loop step=N` advance. It is a diagnostic, not a fix: a run that seems to start working when you add it was working already.
+- **Override the tool permissions for the run.** If opencode's user config denies `bash`/`glob`/`grep`/`read` — a reasonable thing to do when MCP equivalents are preferred — `opencode run` hangs forever at `message=init` with a 0-byte output file, because a review needs to read the code and has no way to. Override per-run via `OPENCODE_CONFIG` as above; **never edit the user's own config.** Denying `edit`/`write`/`patch` in that same override is also the only no-write guarantee opencode has, since no flag provides one.
 - **Smoke-test with a prompt that uses a tool** (`"Run 'git rev-parse --abbrev-ref HEAD' and reply BRANCH=<name>"`). A tool-less "reply OK" prompt passes under a config that makes review impossible, and has burned a whole session that way.
 - **Commit before running** so `git status --short` afterwards proves the reviewer mutated nothing.
-- Runs take 5–20 minutes and are I/O-bound. Poll the output file for growth; a stalled byte count plus a live process is normal mid-thought.
+- Runs take 5–20 minutes and are I/O-bound. A stalled byte count plus a live process is normal mid-thought.
 
-**Brief** — always include: the artifact (`git diff main...HEAD` on the worktree), hunting priorities in order, H/M/L severity on *every* finding, `file:line` citations not vibes, "do not edit any files", and this project's hard rules so the reviewer does not fight them: no new dependencies (see *Dependency policy*), config is `AP_`-prefixed env vars only, errors are data not exceptions, ffmpeg args are argv lists never shell strings, and every option must round-trip to an identical cache key.
+**A clean exit with an empty output file is a distinct failure — do not confuse it with the hang above.** A reasoning model can spend its entire final turn thinking and never emit a text part: exit 0, a full log ending in `exiting loop`, several completed steps, and nothing to print. Observed at 131,000 characters of reasoning, much of it degenerating into repetition, with no answer at the end. The two failures share the 0-byte symptom and nothing else — tell them apart by exit status and log tail, never by the size of the output file. Two consequences:
+
+- **The brief must demand the findings as the final message** — "think briefly, then write; if you are running long, write what you have." This is the actual prevention: three consecutive runs returned nothing, and the first run carrying that instruction returned a review that found a real bug.
+- **Recover rather than re-run.** Recent opencode keeps sessions in a SQLite database under its data directory; the analysis sits in the `part` table and can be pulled out with `sqlite3` and mined with `grep` for severity markers, which beats paying another 5–20 minutes for a result that may fail the same way. Treat what comes back as findings, not as a review — it never went through whatever produces the final answer, so it carries lines of thought the model later abandoned.
+
+**Brief** — always include: the artifact (`git diff main...HEAD` on the worktree), hunting priorities in order, H/M/L severity on *every* finding, `file:line` citations not vibes, "do not edit any files", the findings-as-final-message instruction above, and this project's hard rules so the reviewer does not fight them: no new dependencies (see *Dependency policy*), config is `AP_`-prefixed env vars only, errors are data not exceptions, ffmpeg args are argv lists never shell strings, and every option must round-trip to an identical cache key.
+
+**Scope the brief's "deliberately absent" list explicitly** when reviewing one of a stack of PRs. Say what lands in the next slice and that reporting it is noise. Without it the reviewer spends its budget on the gap you already know about, and the findings you needed arrive as an afterthought — or not at all.
 
 **After the run:** write your own self-review *before* reading the CLI output, then build a reconciliation table (Issue | Self-Review | CLI | Agreement), verify every CLI finding independently before accepting it, and present a synthesis with a gate status. **Never act on a finding without approval** — the CLI is a signal generator, not a judge. The working log is `second-opinion.md` (already gitignored); delete it once the findings are addressed. The improved code is the deliverable, not the log.
 
