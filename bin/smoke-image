@@ -21,7 +21,6 @@ require "json"
 require "net/http"
 require "openssl"
 require "securerandom"
-require "socket"
 require "tmpdir"
 require "uri"
 
@@ -29,8 +28,11 @@ IMAGE = ENV.fetch("IMAGE", "audio_proxy:smoke")
 REPO_ROOT = File.expand_path("..", __dir__)
 
 # Read out of VERSIONS.md rather than duplicated here, so the pin has one home.
+# The `FFMPEG_MAJOR=` line exists precisely to be parsed: an earlier version of
+# this matched prose, and there were two spellings of the number in that file,
+# so it read the restatement rather than the record.
 EXPECTED_FFMPEG_MAJOR = File.read(File.join(REPO_ROOT, "VERSIONS.md"))
-  .then { |doc| doc[/ffmpeg .*?major \*\*(\d+)\*\*/m, 1] }
+  .then { |doc| doc[/^\s*FFMPEG_MAJOR=(\d+)\s*$/, 1] }
   &.to_i
 
 # Hex, because that is what AP_KEY and AP_SALT take. 32 decoded bytes is the
@@ -91,11 +93,16 @@ def docker_rm(cid)
   @containers.delete(cid)
 end
 
-def free_port
-  server = TCPServer.new("127.0.0.1", 0)
-  port = server.addr[1]
-  server.close
-  port
+# Docker picks the host port and we read back what it bound. Picking one here
+# first — bind port 0, read it, close, hand it over — leaves a window in which
+# anything on a busy runner can take it, and the failure looks like the proxy
+# rather than the race it is.
+def published_port(cid, container_port = 4000)
+  ports = JSON.parse(sh!("docker", "inspect", cid)).first.dig("NetworkSettings", "Ports")
+  binding = ports["#{container_port}/tcp"]&.first
+  raise "container #{cid} published no host port for #{container_port}" unless binding
+
+  Integer(binding["HostPort"])
 end
 
 def wait_for_health(port, timeout: 60)
@@ -146,32 +153,50 @@ end
 # the precondition for the hardlink and TOCTOU exposures documented in
 # docs/sources.md.
 def generate_fixtures(dir)
+  # `--user` matters on Linux, where bind-mount ownership is not remapped:
+  # without it ffmpeg writes as root, and the chmod below — run as the
+  # unprivileged host user — dies with EPERM. macOS remaps ownership and hides
+  # this entirely, so it is a CI-only failure that passes locally.
+  as_host_user = ["--user", "#{Process.uid}:#{Process.gid}"]
+
   # The space in the name is deliberate — it is what makes the signed URL below
   # carry a percent-escape.
-  sh!("docker", "run", "--rm", "-v", "#{dir}:/out", "--entrypoint", "ffmpeg", IMAGE,
+  sh!("docker", "run", "--rm", *as_host_user, "-v", "#{dir}:/out", "--entrypoint", "ffmpeg", IMAGE,
       "-hide_banner", "-loglevel", "error",
       "-f", "lavfi", "-i", "sine=frequency=440:duration=#{FIXTURE_SECONDS}",
       "-ac", "1", "-ar", "44100", "/out/tone one.wav")
 
   # A long source, so a render is still in flight when SIGTERM arrives.
-  sh!("docker", "run", "--rm", "-v", "#{dir}:/out", "--entrypoint", "ffmpeg", IMAGE,
+  sh!("docker", "run", "--rm", *as_host_user, "-v", "#{dir}:/out", "--entrypoint", "ffmpeg", IMAGE,
       "-hide_banner", "-loglevel", "error",
       "-f", "lavfi", "-i", "sine=frequency=220:duration=900",
       "-ac", "2", "-ar", "48000", "/out/long.wav")
 
+  # Dir.mktmpdir is 0700 and owned by the host user, but the server runs as uid
+  # 1000 inside the container. On Linux that uid cannot even traverse the
+  # directory, so every render would 404 on a source that is plainly there.
+  # World-readable, never world-writable: the point of the mount is that the
+  # proxy cannot change what it serves.
+  FileUtils.chmod(0o755, dir)
   FileUtils.chmod(0o444, Dir.glob(File.join(dir, "*.wav")))
   log "fixtures: #{Dir.children(dir).sort.join(", ")}"
 end
 
+# `--user` for the same reason as in generate_fixtures, from the other side: the
+# image's default user is `app` (uid 1000), and the directory being mounted here
+# is a 0700 mktmpdir owned by whoever runs this script. On Linux uid 1000 cannot
+# traverse it, so ffprobe reports "Permission denied" on a file that is plainly
+# there. Running as the host user makes the mount readable by construction.
 def probe_duration(path)
   dir = File.dirname(path)
-  out = sh!("docker", "run", "--rm", "-v", "#{dir}:/probe:ro", "--entrypoint", "ffprobe", IMAGE,
+  out = sh!("docker", "run", "--rm", "--user", "#{Process.uid}:#{Process.gid}",
+            "-v", "#{dir}:/probe:ro", "--entrypoint", "ffprobe", IMAGE,
             "-v", "error", "-show_entries", "format=duration",
             "-of", "default=nw=1:nk=1", "/probe/#{File.basename(path)}")
   Float(out.strip)
 end
 
-def start_server(fixtures, port, extra_env: {})
+def start_server(fixtures, extra_env: {})
   env = {
     "AP_LOCAL_ROOT" => "/fixtures",
     "AP_KEY" => KEY,
@@ -180,7 +205,7 @@ def start_server(fixtures, port, extra_env: {})
 
   docker_run(
     *env.flat_map { |k, v| ["-e", "#{k}=#{v}"] },
-    "-p", "#{port}:#{extra_env["AP_PORT"] || 4000}",
+    "-p", "127.0.0.1::#{extra_env["AP_PORT"] || 4000}",
     "-v", "#{fixtures}:/fixtures:ro",
     IMAGE
   )
@@ -228,8 +253,8 @@ def check_image_properties
 end
 
 def check_render(fixtures)
-  port = free_port
-  cid = start_server(fixtures, port, extra_env: {"AP_ALLOW_INSECURE" => "true"})
+  cid = start_server(fixtures, extra_env: {"AP_ALLOW_INSECURE" => "true"})
+  port = published_port(cid)
 
   health = wait_for_health(port)
   check "container reaches /health" do
@@ -264,13 +289,36 @@ def check_render(fixtures)
     end
   end
 
-  # A read-only root is the documented posture; a render that needed to write
-  # there would surface as a failure above, not as a silent fallback.
-  check "fixture mount stayed read-only" do
-    !sh("docker", "exec", cid, "sh", "-c", "touch /fixtures/probe").last
+  docker_rm(cid)
+end
+
+# The `:ro` flag is the documented posture, and it has to be tested by something
+# that would otherwise succeed. Doing this from the server container proves
+# nothing: it runs as uid 1000 against a directory owned by the host user, so
+# the write fails on permissions whether or not the mount is read-only, and the
+# check passes with the flag removed.
+#
+# Running as root with the same mount is the discriminating test — root defeats
+# the file mode, so a refused write can only be the mount.
+def check_readonly_mount(fixtures)
+  writable = sh("docker", "run", "--rm", "--user", "0:0",
+                "-v", "#{fixtures}:/fixtures:ro", "--entrypoint", "sh", IMAGE,
+                "-c", "touch /fixtures/probe").last
+
+  check "a :ro mount refuses a write even from root" do
+    !writable && !File.exist?(File.join(fixtures, "probe"))
   end
 
-  docker_rm(cid)
+  # The control: the same command against the same directory mounted rw must
+  # succeed. Without it, a check that "fails to write" proves nothing — a typo
+  # in the command would look identical to a working guarantee.
+  rw_ok = sh("docker", "run", "--rm", "--user", "0:0",
+             "-v", "#{fixtures}:/fixtures", "--entrypoint", "sh", IMAGE,
+             "-c", "touch /fixtures/probe && rm /fixtures/probe").last
+
+  check "the same write succeeds when the mount is writable (control)" do
+    rw_ok
+  end
 end
 
 # Bandit builds request_path separately on its HTTP/2 path, so the signed-bytes
@@ -278,8 +326,8 @@ end
 # The escape is real: the source is `local://tone one.wav`, and the signature
 # covers the still-escaped `tone%20one.wav`.
 def check_signed_h2c(fixtures)
-  port = free_port
-  cid = start_server(fixtures, port)
+  cid = start_server(fixtures)
+  port = published_port(cid)
   check "signed-mode container reaches /health" do
     wait_for_health(port)
   end
@@ -319,8 +367,8 @@ def check_config(fixtures)
   # An env change with no rebuild has to take effect. AP_PORT is the one
   # variable whose effect is observable from outside today — the others are
   # parsed and validated but not yet consumed (see the README's config table).
-  port = free_port
-  cid = start_server(fixtures, port, extra_env: {"AP_PORT" => "8123", "AP_ALLOW_INSECURE" => "true"})
+  cid = start_server(fixtures, extra_env: {"AP_PORT" => "8123", "AP_ALLOW_INSECURE" => "true"})
+  port = published_port(cid, 8123)
   check "AP_PORT override takes effect without a rebuild" do
     wait_for_health(port)
   end
@@ -372,17 +420,15 @@ def run_until_exit(env, timeout: 30)
   [code, logs]
 end
 
-# SIGTERM while a render streams. Two things are being asserted, and only the
-# first is about orphans in any meaningful sense: the container shares a PID
-# namespace, so once PID 1 exits nothing can survive it — "no orphan in the
-# final process table" is true by construction and worth nothing on its own.
-# What is worth something is that ffmpeg is gone from the table *before* the
-# container exits (the supervisor killed it, rather than the namespace teardown
-# doing it), and that the exit is prompt rather than the stop grace period
-# running out.
+# SIGTERM while a render streams. The container shares a PID namespace, so once
+# PID 1 exits nothing can survive it — "no orphan in the final process table" is
+# true by construction and worth nothing as an assertion. What is worth
+# something is that ffmpeg is gone from the table *before* the container exits,
+# which is the supervisor having killed it rather than the namespace teardown
+# doing it, and that the exit is prompt.
 def check_sigterm(fixtures)
-  port = free_port
-  cid = start_server(fixtures, port, extra_env: {"AP_ALLOW_INSECURE" => "true", "AP_RENDER_TIMEOUT" => "600"})
+  cid = start_server(fixtures, extra_env: {"AP_ALLOW_INSECURE" => "true", "AP_RENDER_TIMEOUT" => "600"})
+  port = published_port(cid)
   check "container is healthy before SIGTERM" do
     wait_for_health(port)
   end
@@ -392,63 +438,76 @@ def check_sigterm(fixtures)
   url = "http://127.0.0.1:#{port}/insecure/f:mp3/br:320/plain/local://long.wav"
   reader = IO.popen(["curl", "-s", "--max-time", "120", "-o", "/dev/null", url], err: :close)
 
-  ffmpeg_running = wait_until(timeout: 30) { container_processes(cid).any? { |p| p.include?("ffmpeg") } }
-  check "ffmpeg is in flight when the signal is sent" do
-    ffmpeg_running
-  end
-
-  sent_at = Time.now
-  sh!("docker", "kill", "--signal=TERM", cid)
-
-  # Poll the process table until ffmpeg leaves it or the container goes away.
-  ffmpeg_gone_before_exit = false
-  still_running = true
-  while Time.now - sent_at < 20
-    procs = container_processes(cid)
-    if procs.nil?
-      still_running = false
-      break
-    end
-    if procs.none? { |p| p.include?("ffmpeg") }
-      ffmpeg_gone_before_exit = true
-      break
-    end
-    sleep 0.05
-  end
-
-  exited = wait_until(timeout: 20) do
-    JSON.parse(sh!("docker", "inspect", cid)).first.dig("State", "Running") == false
-  end
-  elapsed = Time.now - sent_at
-  state = JSON.parse(sh!("docker", "inspect", cid)).first["State"]
-
-  check "container exits after SIGTERM (took #{elapsed.round(2)}s)" do
-    exited
-  end
-  # `docker kill --signal=TERM` applies no grace period of its own — nothing
-  # will SIGKILL this container, so a beam that ignored the signal would hang
-  # rather than be cut off. The bound is therefore about promptness, not about
-  # beating a deadline: an idle container exits in ~1s and one mid-render in
-  # ~3s, so 15s is loose enough to survive a loaded CI runner and tight enough
-  # that "waits for the 900-second render to finish" cannot pass.
-  check "exit is prompt rather than waiting out the in-flight render" do
-    elapsed < 15
-  end
-  check "exit code is a clean shutdown (got #{state["ExitCode"]})" do
-    [0, 143].include?(state["ExitCode"])
-  end
-  check "ffmpeg left the process table before the container did" do
-    # `still_running` distinguishes the meaningful observation from the vacuous
-    # one: if the container was gone on the first poll we never saw the table.
-    ffmpeg_gone_before_exit || !still_running
-  end
-
   begin
-    Process.kill("TERM", reader.pid)
-  rescue StandardError
-    nil
+    ffmpeg_running = wait_until(timeout: 30) do
+      (container_processes(cid) || []).any? { |p| p.include?("ffmpeg") }
+    end
+    check "ffmpeg is in flight when the signal is sent" do
+      ffmpeg_running
+    end
+
+    sent_at = Time.now
+    sh!("docker", "kill", "--signal=TERM", cid)
+
+    # Poll the process table until ffmpeg leaves it or the container goes away.
+    #
+    # `observed_table` starts false and is only set once a `docker top` actually
+    # came back: if the container vanishes before the first poll we saw nothing,
+    # and the check below must fail rather than credit an observation that never
+    # happened. An earlier version treated "container already gone" as a pass,
+    # which made the whole check satisfiable without ever looking.
+    ffmpeg_gone_before_exit = false
+    observed_table = false
+    while Time.now - sent_at < 20
+      procs = container_processes(cid)
+      break if procs.nil?
+
+      observed_table = true
+      if procs.none? { |p| p.include?("ffmpeg") }
+        ffmpeg_gone_before_exit = true
+        break
+      end
+      sleep 0.05
+    end
+
+    exited = wait_until(timeout: 20) do
+      JSON.parse(sh!("docker", "inspect", cid)).first.dig("State", "Running") == false
+    end
+    elapsed = Time.now - sent_at
+    state = JSON.parse(sh!("docker", "inspect", cid)).first["State"]
+
+    check "container exits after SIGTERM (took #{elapsed.round(2)}s)" do
+      exited
+    end
+    # `docker kill --signal=TERM` applies no grace period of its own — nothing
+    # will SIGKILL this container, so a beam that ignored the signal would hang
+    # rather than be cut off. The bound is therefore about promptness, not about
+    # beating a deadline: an idle container exits in ~1s and one mid-render in
+    # ~3s, so 15s is loose enough to survive a loaded CI runner and tight enough
+    # that "waits for the 900-second render to finish" cannot pass.
+    check "exit is prompt rather than waiting out the in-flight render" do
+      elapsed < 15
+    end
+    check "exit code is a clean shutdown (got #{state["ExitCode"]})" do
+      [0, 143].include?(state["ExitCode"])
+    end
+    check "ffmpeg left the process table before the container exited" do
+      observed_table && ffmpeg_gone_before_exit
+    end
+  ensure
+    # The curl client outlives an exception here otherwise; --max-time would
+    # eventually reap it, but "eventually" is not cleanup.
+    begin
+      Process.kill("TERM", reader.pid)
+    rescue StandardError
+      nil
+    end
+    begin
+      reader.close
+    rescue StandardError
+      nil
+    end
   end
-  reader.close rescue nil
 
   docker_rm(cid)
 end
@@ -493,6 +552,7 @@ begin
   Dir.mktmpdir("audio-proxy-smoke") do |fixtures|
     step("fixtures") { generate_fixtures(fixtures) }
     step("render (insecure, read-only mount)") { check_render(fixtures) }
+    step("read-only fixture mount") { check_readonly_mount(fixtures) }
     step("signed URL over h2c") { check_signed_h2c(fixtures) }
     step("runtime configuration") { check_config(fixtures) }
     step("SIGTERM during a render") { check_sigterm(fixtures) }
