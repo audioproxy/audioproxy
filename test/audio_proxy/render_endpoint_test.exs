@@ -1,12 +1,16 @@
 defmodule AudioProxy.RenderEndpointTest do
   @moduledoc """
   The signed render request path, end to end through the router: signature,
-  options, source, stat — and then the 501 placeholder, which is as far as a
-  valid request gets until `add-render-endpoint` replaces the action.
+  options, source, stat — and, for a request that survives all of it, the
+  streaming action's response head.
 
-  All of it is `Plug.Test`: the chain spawns no subprocess, so the only state
-  to arrange is config (key/salt, the local root, the size limit) and files
-  under a per-test tmp dir.
+  All of it is `Plug.Test`. The error paths halt before any subprocess is
+  spawned, and the requests that do reach the action render through
+  `AudioProxy.FakeFfmpeg` rather than the real encoder, so the only state to
+  arrange is config (key/salt, the local root, the size limit) and files under
+  a per-test tmp dir. What `Plug.Test` cannot show — chunk cadence, a client
+  that disappears, a stream torn down after its 200 — belongs to
+  `AudioProxy.RenderEndpointStreamTest`, over a real socket.
   """
 
   use ExUnit.Case, async: false
@@ -23,6 +27,8 @@ defmodule AudioProxy.RenderEndpointTest do
   @salt Base.decode16!("FFEEDDCCBBAA99887766554433221100")
 
   @opts AudioProxy.Router.init([])
+  @fake_opts AudioProxy.FakeFfmpeg.Router.init([])
+  @payload "fake-audio-payload"
 
   @piece_content "RIFF-fake-wav-bytes"
   @generic_404 %{"error" => "not_found", "message" => "Source not found"}
@@ -30,6 +36,7 @@ defmodule AudioProxy.RenderEndpointTest do
   setup %{tmp_dir: tmp_dir} do
     File.write!(Path.join(tmp_dir, "piece.wav"), @piece_content)
     File.write!(Path.join(tmp_dir, "a track.wav"), "RIFF")
+    File.write!(Path.join(tmp_dir, "notaudio.txt"), "definitely not audio")
 
     # Pin every config value the chain reads: a boot-time AP_MAX_SRC_BYTES in
     # the environment must not be able to flip these tests' 501s to 413s.
@@ -46,6 +53,13 @@ defmodule AudioProxy.RenderEndpointTest do
 
   defp get(path) do
     conn(:get, path) |> AudioProxy.Router.call(@opts)
+  end
+
+  # The same route, rendered by the stand-in encoder. Everything before the
+  # action is the identical plug chain, so an error asserted through `get/1`
+  # is asserted against the production mounting.
+  defp render(path) do
+    conn(:get, path) |> AudioProxy.FakeFfmpeg.Router.call(@fake_opts)
   end
 
   defp signed(rest) do
@@ -107,7 +121,7 @@ defmodule AudioProxy.RenderEndpointTest do
     test "a source of exactly AP_MAX_SRC_BYTES is allowed through" do
       put_config(%{max_src_bytes: byte_size(@piece_content)})
 
-      assert get(signed("/f:mp3/plain/local://piece.wav")).status == 501
+      assert render(signed("/f:mp3/plain/local://piece.wav")).status == 200
     end
 
     test "a malformed escape in a signed request is the generic 404, never a bare 400" do
@@ -148,25 +162,77 @@ defmodule AudioProxy.RenderEndpointTest do
     end
   end
 
-  describe "the placeholder" do
-    # Pinned so the gap is visible: add-render-endpoint replaces the action
-    # and removes this test.
-    test "a fully valid request is a 501 naming the missing capability" do
-      conn = get(signed("/f:opus/br:96/plain/local://piece.wav"))
+  describe "the streaming response" do
+    test "a fully valid request streams the render as a chunked 200" do
+      conn = render(signed("/f:opus/br:96/plain/local://piece.wav"))
 
-      assert conn.status == 501
+      assert conn.status == 200
+      assert conn.state == :chunked
+      assert conn.resp_body == @payload
 
-      assert JSON.decode!(conn.resp_body) == %{
-               "error" => "not_implemented",
-               "message" => "Rendering is not implemented yet"
-             }
+      # No Content-Length and no Accept-Ranges, per §5: the length is not
+      # known when the head goes out, and the proxy does not serve ranges on
+      # a MISS.
+      assert get_resp_header(conn, "content-length") == []
+      assert get_resp_header(conn, "accept-ranges") == []
     end
 
     test "a valid request with escapes in the filename reaches the action" do
       # The signature covers the raw %20 spelling; the source parser decodes
       # exactly once; stat finds the file on disk — the whole raw-bytes
       # round trip this chain exists to protect.
-      assert get(signed("/f:mp3/plain/local://a%20track.wav")).status == 501
+      assert render(signed("/f:mp3/plain/local://a%20track.wav")).status == 200
+    end
+
+    test "the §5 headers describe the variant" do
+      rest = "/f:opus/br:96/plain/local://piece.wav"
+      conn = render(signed(rest))
+
+      key = AudioProxy.CacheKey.derive!("f:opus/br:96", "local://piece.wav")
+
+      assert get_resp_header(conn, "content-type") == ["audio/ogg"]
+      assert get_resp_header(conn, "cache-control") == ["public, max-age=31536000, immutable"]
+      assert get_resp_header(conn, "etag") == [~s("#{key}")]
+      assert get_resp_header(conn, "x-audio-proxy") == ["MISS"]
+      assert get_resp_header(conn, "content-disposition") == []
+    end
+
+    test "the ETag is the cache key, so option order cannot change it" do
+      one = render(signed("/f:opus/br:96/plain/local://piece.wav"))
+      other = render(signed("/br:96/f:opus/plain/local://piece.wav"))
+
+      assert get_resp_header(one, "etag") == get_resp_header(other, "etag")
+    end
+
+    test "dl becomes a Content-Disposition naming the file" do
+      conn = render(signed("/f:mp3/dl:preview.mp3/plain/local://piece.wav"))
+
+      assert get_resp_header(conn, "content-disposition") ==
+               [~s(attachment; filename="preview.mp3")]
+    end
+
+    test "a dl that would break the header is escaped, not passed through" do
+      # `dl` is opaque past the control-character check, so a quote in it
+      # would otherwise end the filename parameter and turn the rest into
+      # header syntax.
+      conn = render(signed(~s(/f:mp3/dl:a"b\\c.mp3/plain/local://piece.wav)))
+
+      assert get_resp_header(conn, "content-disposition") ==
+               [~s(attachment; filename="a\\"b\\\\c.mp3")]
+    end
+
+    test "a non-ASCII dl is carried by filename*, with an ASCII fallback" do
+      conn = render(signed("/f:mp3/dl:stück.mp3/plain/local://piece.wav"))
+
+      assert get_resp_header(conn, "content-disposition") ==
+               [~s(attachment; filename="st_ck.mp3"; filename*=UTF-8''st%C3%BCck.mp3)]
+    end
+
+    test "an undecodable source is a 415, from the render's own diagnosis" do
+      conn = render(signed("/f:mp3/plain/local://notaudio.txt"))
+
+      assert conn.status == 415
+      assert JSON.decode!(conn.resp_body)["error"] == "undecodable_source"
     end
   end
 end
