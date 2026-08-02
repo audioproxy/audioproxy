@@ -242,7 +242,7 @@ curl -D - -o preview.mp3 "localhost:4000/$SIG$REST"
 HTTP/1.1 200 OK
 transfer-encoding: chunked
 content-type: audio/mpeg
-cache-control: public, max-age=31536000, immutable
+cache-control: public, max-age=31536000, immutable, no-transform
 etag: "6f1c…"
 x-audio-proxy: MISS
 ```
@@ -394,6 +394,27 @@ Note that the variables below are the full configuration surface for the design,
 Booleans accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`, case-insensitively. An empty value counts as unset.
 
 The listener port is read from `AP_PORT`, then `PORT`, then `4000`.
+
+## Caching and CDNs
+
+The proxy is built to sit behind a CDN without special configuration on either side: the URL names the variant completely, the `ETag` is the cache key, there are no cookies and no `Vary`, and changing `cb` busts every tier at once. Every response states how long it may be held rather than inheriting a framework default:
+
+| Response | `Cache-Control` | Why |
+|---|---|---|
+| `200` media / peaks | `public, max-age=31536000, immutable, no-transform` | The URL encodes the variant, so it *is* immutable; `no-transform` keeps edge features from recompressing or mangling the bytes |
+| `404` | `max-age=10` | Sources appear — a file uploaded moments after the miss is served within seconds |
+| `413`, `415` | `max-age=10` | Verdicts about the current source bytes, which a re-upload changes |
+| `401`, `422` | `max-age=60` | Pure functions of the URL: a bad signature never becomes good, invalid options never become valid — only a deploy changes that |
+| `429`, `500`, `504` | `no-store` | Transient — caching a transient failure amplifies it (`429` carries `Retry-After`) |
+| `/health` | `no-store` | Liveness is only worth anything fresh |
+
+The error rows are a deliberate relaxation, worth knowing if you operate a shared cache: without them every response would carry Plug's `max-age=0, private, must-revalidate`, so errors were previously not cacheable at all and never shareable. Dropping `private` is safe here because an error body is a pure function of the URL — no cookies, no auth headers, nothing per-user in it. The practical effect is that a hot 404 or a bad-signature storm is absorbed at the edge instead of reaching the origin every time. If you need the old behavior for a specific deployment, an edge rule overriding `Cache-Control` on 4xx is the place to do it; the proxy has no knob for it by design.
+
+Three behaviors round out the CDN-facing surface:
+
+- **Revalidation costs no render.** A request whose `If-None-Match` matches the variant's `ETag` answers `304` before the proxy touches storage or spawns anything — the ETag derives from the URL alone. The signature still gates: an unsigned request is `401`, matching validator or not.
+- **HEAD works.** `HEAD` on a signed URL runs every check a `GET` runs — signature, options, source authorization and stat — with an empty body and no render. Errors answer as `GET` does, bodiless. `HEAD /health` works too. One caveat if you use it to validate URLs: because it does not decode, it cannot report a source ffmpeg would reject, so a `HEAD` can answer `200` where the `GET` answers `415`. Everything decidable without decoding (`401`, `404`, `413`, `422`) matches the `GET` exactly.
+- **`Range` on an uncached variant is ignored.** A `Range` header on a variant that has to be rendered gets the full `200` chunked stream (RFC 9110 permits this), with no `Accept-Ranges` and no `206`. Range serving belongs to cached variants: once the variant cache lands, a `HIT` redirects to storage, which serves `206` natively — that discipline arrives with that slice.
 
 ## Logs
 

@@ -1,6 +1,8 @@
 ## Why
 
-The API is already CDN-shaped — URL = immutable variant identity, `ETag` = cache key, no cookies, `cb` busts every tier at once. What's missing is discipline at the edges: error responses carry no `Cache-Control` at all (CDN negative-caching defaults decide how long a 404 sticks), a CDN revalidation triggers a full re-render even though the ETag is derivable from the URL alone, HEAD answers 404, and Range-on-MISS behavior is accidental rather than spec'd. Every gap is the proxy failing to state intent explicitly — and CDN defaults, where Cloudflare/CloudFront/Fastly differ most, filling the silence.
+The API is already CDN-shaped — URL = immutable variant identity, `ETag` = cache key, no cookies, `cb` busts every tier at once. What's missing is discipline at the edges: every error inherits `Plug.Conn`'s blanket default (`max-age=0, private, must-revalidate`), which is not a decision this project made and forbids the edge from absorbing *any* repeated failure; a CDN revalidation triggers a full re-render even though the ETag is derivable from the URL alone; HEAD answers 404; and Range-on-MISS behavior is accidental rather than spec'd.
+
+So this is not filling a silence — the header was always there. It is replacing a framework default with a stated policy, and the change is a deliberate *relaxation*: dropping `private` so shared caches may hold errors, and trading `max-age=0` for short per-class TTLs so a 404 storm costs the origin one render's worth of attention rather than all of it. That is safe here precisely because the API is CDN-shaped: an error body is a pure function of the URL, carries nothing per-user, and has no cookie or auth header to vary on.
 
 ## What Changes
 
