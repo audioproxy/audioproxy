@@ -110,7 +110,10 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 **Deliberately not planned**
 
 - **Video.** This is an audio proxy and will refuse video input rather than become a general ffmpeg gateway; video transcoding is far more expensive and carries most of ffmpeg's CVE history.
-- **HLS and segmented streaming.** The URL space is reserved, nothing more.
+
+**Wanted, but not designed yet**
+
+- **HLS and segmented streaming.** A v2 goal rather than a rejected one: the URL space is reserved, and segmented output is the honest answer to mid-stream render failure, which plain chunked HTTP cannot signal. A segment is close to a variant with a trim, so signing, cache keys and deduplication carry over unchanged. The unsolved part is gapless boundaries, since encoding each segment independently gives each one its own encoder priming.
 
 `0.x` means the URL contract can still change. It will settle at `1.0`, after which a change to what an existing URL means, or to how cache keys are derived, is a major version. The per-slice detail, including rationale and trade-offs, lives in [`openspec/changes/`](openspec/changes).
 
