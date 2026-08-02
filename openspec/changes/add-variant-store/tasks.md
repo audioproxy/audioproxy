@@ -1,14 +1,14 @@
 ## 1. Behaviour and config
 
-- [ ] 1.1 `AudioProxy.VariantStore` behaviour: `head/1`, `get_stream/2` (Range-aware), `put_stream/3` (bytes + metadata), `presign/2`, `capabilities/0`; `@type t`/`@spec` on the seam
+- [x] 1.1 `AudioProxy.VariantStore` behaviour: `head/1`, `get_stream/2` (Range-aware), `put_stream/3` (bytes + metadata), `presign/2`, `capabilities/0`; `@type t`/`@spec` on the seam
 - [ ] 1.2 `AP_VARIANT_STORE` in `AudioProxy.Config`: scheme parse + backend dispatch, unknown scheme rejected; remove `AP_VARIANT_BUCKET`
 - [ ] 1.3 Boot validation: `file://` path exists and writable; `AP_SERVE_MODE=redirect` against a store without `presign` aborts naming both variables
 
 ## 2. Local backend
 
-- [ ] 2.1 `VariantStore.Local`: key→path with prefix fan-out; `head/1` via `File.stat/1`
-- [ ] 2.2 `put_stream/3`: temp file inside the store → `File.rename/2` on completion; metadata persisted (sidecar/xattr, tested via store-direct fetch)
-- [ ] 2.3 `get_stream/2`: chunked streaming reads (never whole-file into memory), Range slices
+- [x] 2.1 `VariantStore.Local`: key→path with prefix fan-out; `head/1` via `File.stat/1`
+- [x] 2.2 `put_stream/3`: temp file inside the store → `File.rename/2` on completion; metadata persisted (sidecar/xattr, tested via store-direct fetch)
+- [x] 2.3 `get_stream/2`: chunked streaming reads (never whole-file into memory), Range slices
 
 ## 3. Tee write-back
 
