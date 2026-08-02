@@ -85,6 +85,12 @@ defmodule AudioProxy.Source.Allowlist do
   @spec matches?(kind(), String.t(), String.t()) :: boolean()
   def matches?(_kind, "*", _subject), do: true
 
+  # Config yields binaries, so this is unreachable from a request — but this
+  # module's contract is that it answers rather than raises, and that has to
+  # hold for the whole module, not just for `authorize/2`.
+  def matches?(_kind, pattern, subject) when not is_binary(pattern) or not is_binary(subject),
+    do: false
+
   def matches?(:bucket, pattern, bucket) do
     case String.split(pattern, "*") do
       # No `*` at all: an exact, case-sensitive name.

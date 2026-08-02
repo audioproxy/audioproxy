@@ -82,6 +82,20 @@ defmodule AudioProxy.Source.AllowlistTest do
     end
   end
 
+  describe "matches?/3 on input it was never meant to get" do
+    test "answers false rather than raising" do
+      # The module's contract is that it answers. That has to hold for the
+      # whole module, not just for `authorize/2`.
+      for pattern <- [nil, 42, :masters, ["masters"]] do
+        refute Allowlist.matches?(:bucket, pattern, "masters")
+        refute Allowlist.matches?(:host, pattern, "media.example")
+      end
+
+      refute Allowlist.matches?(:host, "media.example", nil)
+      refute Allowlist.matches?(:bucket, "masters", 42)
+    end
+  end
+
   describe "authorize/2" do
     test "refuses anything that is not a non-empty binary, rather than interpreting it" do
       for subject <- [nil, 42, "", :media, {:http, "x"}] do
