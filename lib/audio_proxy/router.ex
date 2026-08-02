@@ -14,6 +14,15 @@ defmodule AudioProxy.Router do
   `AudioProxy.Plugs.VerifySignature` re-splits from `conn.request_path` —
   route bindings are percent-decoded and re-segmented, so they can never
   reproduce the signed bytes.
+
+  ## What the router owes the log
+
+  `:endpoint_class` names the route in the log line and is what filters
+  `/health` down to debug (`AudioProxy.LogHandler`). It is assigned here
+  rather than in the pipeline because a 401 halts before any pipeline plug
+  could say what the request was asking for. `Plug.RequestId` runs ahead of
+  matching, so every line a request produces — its own and its render's —
+  carries the same id, and the client gets it back in `x-request-id`.
   """
 
   use Plug.Router
@@ -22,19 +31,27 @@ defmodule AudioProxy.Router do
 
   @render_pipeline RenderPipeline.init([])
 
+  plug Plug.RequestId
   plug :match
   plug :dispatch
 
   get "/health" do
-    send_json(conn, 200, %{status: "ok", version: version()})
+    conn
+    |> assign(:endpoint_class, :health)
+    |> send_json(200, %{status: "ok", version: version()})
   end
 
   get "/:sig/*rest" do
-    RenderPipeline.call(conn, @render_pipeline)
+    conn
+    |> assign(:endpoint_class, :render)
+    |> RenderPipeline.call(@render_pipeline)
   end
 
   match _ do
-    send_json(conn, 404, %{error: "not_found", message: "No such resource"})
+    conn
+    |> assign(:endpoint_class, :unknown)
+    |> assign(:error_class, :not_found)
+    |> send_json(404, %{error: "not_found", message: "No such resource"})
   end
 
   defp send_json(conn, status, body) do

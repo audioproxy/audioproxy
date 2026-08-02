@@ -42,11 +42,16 @@ defmodule AudioProxy.FakeFfmpeg.Router do
 
   @pipeline Pipeline.init([])
 
+  # Mirrors `AudioProxy.Router`'s own pre-dispatch work, so the log a test
+  # captures here is the log production emits.
+  plug Plug.RequestId
   plug :match
   plug :dispatch
 
   get "/:sig/*rest" do
-    Pipeline.call(conn, @pipeline)
+    conn
+    |> assign(:endpoint_class, :render)
+    |> Pipeline.call(@pipeline)
   end
 
   match _ do
