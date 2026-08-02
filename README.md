@@ -105,7 +105,7 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 
 **Next: what makes it production-shaped**
 
-- **A variant cache.** Requests that overlap already share a render, but nothing survives it, so the next one encodes the variant again. Rendered variants will be written back to a store and served from there on later requests, with `Range` support and byte-serving. Where they are stored is a separate choice from where sources come from: a local directory for a single node, object storage when you have more than one.
+- **A variant cache.** The write-back half exists: completed renders persist to a configurable store (a local directory today, object storage when the S3 backend lands), atomically and with the headers they were served with. What remains is serving from it — cache hits answered from the store, with `Range` support and byte-serving, instead of rendering again.
 - **Bounded concurrency.** A cap on simultaneous renders with a wait queue, so a burst of traffic queues instead of thrashing the machine.
 - **S3 sources**, so the audio itself can live in object storage.
 
@@ -383,7 +383,7 @@ Note that the variables below are the full configuration surface for the design,
 | `AP_ALLOW_INSECURE` | boolean | `false` | Accept unsigned URLs (dev only) |
 | `AP_SOURCE_ALLOWLIST` | comma-separated | empty | Permitted source buckets/hosts (used once remote source types land) |
 | `AP_LOCAL_ROOT` | existing directory | unset | Root for `local://` sources; unset disables them. Must exist at boot, and may not be `/` |
-| `AP_VARIANT_BUCKET` | string | unset | Write-back target; unset = always render |
+| `AP_VARIANT_STORE` | URL (`file:///path`) | unset | Where rendered variants are written back; unset = no cache, always render. See [Variant store](#variant-store) |
 | `AP_MAX_CONCURRENCY` | positive integer | schedulers online | Max simultaneous ffmpeg processes |
 | `AP_QUEUE_SIZE` | non-negative integer | `32` | Waiting renders before `429` |
 | `AP_MAX_SRC_BYTES` | positive integer | `2000000000` | Reject larger sources with `413`; also caps the bytes a render may hold in memory |
@@ -394,6 +394,27 @@ Note that the variables below are the full configuration surface for the design,
 Booleans accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`, case-insensitively. An empty value counts as unset.
 
 The listener port is read from `AP_PORT`, then `PORT`, then `4000`.
+
+### Variant store
+
+Point `AP_VARIANT_STORE` at where completed renders should be kept:
+
+```bash
+AP_VARIANT_STORE=file:///var/cache/audio_proxy AP_SERVE_MODE=proxy …
+```
+
+The scheme picks the backend. `file://` stores variants in a local directory, which must exist and be writable at boot; `s3://` arrives with the S3 backend. Unset means no cache: every request renders.
+
+With a store configured, every successful render is written back under its cache key, together with the headers it was served with — atomically, so a failed or cancelled render leaves nothing behind. It also changes what a disconnect means: the render of a variant nobody is waiting for anymore is completed into the store rather than cancelled. Serving cache hits *from* the store is the next slice; until it lands, the store fills but requests still render.
+
+Two things about a `file://` store are yours to own:
+
+- **It is unbounded.** Nothing evicts, expires, or size-caps it; it grows until the disk is full. Manage it like any cache directory you operate — a dedicated volume, disk alerts, a sweep of your choosing.
+- **It should live on a volume.** A store on the container's writable layer disappears with the container, taking every cached variant with it.
+
+A `file://` store is also per-node: two nodes with separate directories each render a variant once. That is the intended trade — shared caches are what `s3://` is for.
+
+`AP_SERVE_MODE=redirect` (the default) serves cache hits as a redirect to a presigned URL, which is a capability of the store's backend — a `file://` store has no URLs to sign, so `redirect` against it is refused at boot, naming both variables. Use `AP_SERVE_MODE=proxy` with a `file://` store.
 
 ## Logs
 

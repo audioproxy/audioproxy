@@ -25,5 +25,5 @@
 
 ## 5. Docs
 
-- [ ] 5.1 API doc §6: `AP_VARIANT_STORE` (store, not bucket); serve mode as a backend capability
-- [ ] 5.2 README: configuring a store; **a `file://` store is unbounded and the operator owns it**; a store on the container's writable layer wants a volume
+- [x] 5.1 API doc §6: `AP_VARIANT_STORE` (store, not bucket); serve mode as a backend capability
+- [x] 5.2 README: configuring a store; **a `file://` store is unbounded and the operator owns it**; a store on the container's writable layer wants a volume

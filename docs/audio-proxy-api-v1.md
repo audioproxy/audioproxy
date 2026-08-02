@@ -165,11 +165,13 @@ Mid-stream render failure after `200` is signaled by abnormal termination of the
 | `AP_ALLOW_INSECURE` | Accept unsigned URLs (dev only) |
 | `AP_SOURCE_ALLOWLIST` | Comma-separated bucket/host patterns |
 | `AP_LOCAL_ROOT` | Root directory for `local://` sources; unset = local sources disabled. Must exist at boot |
-| `AP_VARIANT_BUCKET` | Write-back target; unset = no cache, always render |
+| `AP_VARIANT_STORE` | Variant store, scheme-tagged: `file:///path` or `s3://bucket` (S3 backend pending); unset = no cache, always render. `file://` must exist and be writable at boot |
 | `AP_MAX_CONCURRENCY` | Max simultaneous ffmpeg processes (default: CPU count) |
 | `AP_QUEUE_SIZE` | Waiting renders before `429` |
 | `AP_MAX_SRC_BYTES`, `AP_RENDER_TIMEOUT` | Abuse limits |
 | `AP_SERVE_MODE` | `redirect` \| `proxy` |
+
+Redirect serving is a *capability of the store's backend*: `redirect` answers a HIT with a 302 to a presigned variant URL, which only a backend that can presign (`s3://`) can produce. `AP_SERVE_MODE=redirect` against a store without that capability (`file://`) is refused at boot, with an error naming both variables — never per request.
 
 ---
 
