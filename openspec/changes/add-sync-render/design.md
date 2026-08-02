@@ -21,9 +21,25 @@ The question is what mechanism lets a client say "I would rather wait and get so
 
 - **Not a processing option, and this is the load-bearing decision.** `sync:1` in the options path would be the obvious spelling and is wrong: the option does not change a single output byte, so two URLs would render identical audio under two cache keys. That breaks the project's rule that every option round-trips to an identical cache key, doubles storage, and halves hit rate. Delivery preferences do not belong in an identifier for content.
 
-- **Trigger: a `Range` header on a MISS.** Preferred mechanism, because it requires no new API surface and matches what clients already do. A browser that wants to seek sends `Range`; today it is ignored and answered with a chunked `200`. Honouring it means: materialise the variant, then answer `206`. The client asked a question that only a complete object can answer, and gets one.
-  - Weighed against an explicit request header (`Prefer: wait`, or `X-Audio-Proxy-Sync: 1`). That is more precise and allows a non-Range client to opt in, but adds surface, needs a `Vary` for correctness behind a CDN, and duplicates a signal HTTP already has. **Recommendation: honour `Range` first; add an explicit header only if a real client needs materialisation without wanting a byte range.**
-  - Weighed against a query parameter: rejected for the same cache-key reason as a path option, plus it would have to be excluded from the signature or it changes the URL identity.
+- **Trigger: `Range` on a MISS — proposed, then measured, and it does not work for browsers.** The idea was that a client wanting to seek sends `Range`, so honouring it needs no new API surface. Measurement against Chrome killed it. With a logging server and two `<audio>` elements:
+
+  ```
+  GET /chunked  | Range="bytes=0-"       <- first load, before any interaction
+  GET /seekable | Range="bytes=0-"       <- same
+  GET /seekable | Range="bytes=131072-"  <- an actual seek
+  GET /chunked  | Range="bytes=0-"       <- "seek" on the unseekable one: a restart
+  ```
+
+  Three findings, each closing off a rescue:
+
+  1. **A browser sends `Range: bytes=0-` on the first media request, always.** Treating bare `Range` as the signal would make every `<audio>` playback wait for a full render, destroying streaming for the most common client there is.
+  2. **Narrowing the trigger to a non-zero offset does not help.** A chunked response without `Accept-Ranges` marks the element non-seekable — measured `seekable.end(0)` of `0` against `20` for a range-capable response — so the user cannot drag the scrubber and the browser never issues a seek range. The trigger cannot fire for the case that motivated it. To let a browser seek, the *first* response must already carry `Content-Length` and `Accept-Ranges`, which means deciding to materialise before anything is known about intent.
+  3. **`<audio src>` cannot set request headers**, so `Prefer: wait` is equally unreachable from HTML. A page author would need `fetch()` plus an object URL, and having fetched the bytes they no longer need the server to materialise anything.
+
+  **Conclusion: there is no trigger that serves a browser.** Any mechanism reaches only clients that construct requests deliberately — scripts, downloaders, ffmpeg. That is a much smaller audience than the player UI this change was written for.
+
+- **What actually serves a browser is warming the cache.** Fetch the URL once and discard it, then set `src`; the second request is a HIT with `Content-Length` and `Accept-Ranges` and seeks normally. Two requests, no new API surface, no held render slot, nothing to build here. It is available to any page author in three lines, and it works today the moment `add-variant-cache` lands.
+  - Query parameter: rejected for the same cache-key reason as a path option, plus it would have to be excluded from the signature or it changes URL identity.
 
 - **Materialise means render → store → serve as a HIT.** With a variant store configured, this is not a new delivery path at all: render to completion, write back, then answer from the store using the machinery `add-variant-cache` already builds. That is why this change depends on it. The alternative — a bespoke buffer-and-serve path — would duplicate range handling and metadata for no gain.
 
@@ -35,7 +51,7 @@ The question is what mechanism lets a client say "I would rather wait and get so
 
 ## Risks / Trade-offs
 
-- **[Is this worth building at all?]** The honest counter-argument: once `add-variant-cache` ships, a client that needs seeking can request the variant, discard the response, and request again — two requests, no new API, no held slot. That is ugly but free, and it is what a CDN-fronted deployment does naturally on the second hit. This change earns its place only if first-request seeking matters for real players. **Decide with a real client before implementing.** The proposal is recorded now because the question arose from a real observation, not because the answer is settled.
+- **[Is this worth building at all?] The evidence now says probably not.** The trigger cannot reach a browser (see Decisions), so this feature would serve only clients that build requests deliberately. Those clients can already warm the cache with one discarded request. **The recommendation is to close this change unless a concrete non-browser client needs materialisation and cannot warm.** It is kept on record because the question was worth asking and the measurement is worth not repeating.
 - [Held connections are a denial-of-service surface] → bounded by the semaphore, the queue, and `AP_RENDER_TIMEOUT`. The residual risk is that a materialising request is strictly more expensive than a streaming one for the same URL, so an attacker prefers it. Mitigation is the same 429 path; worth measuring before assuming it suffices.
 - [Time to first byte becomes the whole render] → the trade the client explicitly asked for. It should still be documented loudly, because a `Range` header is a *quiet* way to opt into a much slower response, and a client that sends `Range` by reflex would get a surprise.
 - [Two shapes for a MISS complicates the contract] → API doc §5 gains a second row. Acceptable, but it is the reason this is not simply "always honour Range": the streaming default is the one that makes this project useful, and it must stay the default.

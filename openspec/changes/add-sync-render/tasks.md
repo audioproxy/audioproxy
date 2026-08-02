@@ -1,6 +1,6 @@
 ## 0. Decide whether to build this
 
-- [ ] 0.1 Confirm with a real client that first-request seeking matters. Once `add-variant-cache` ships, a client can request once to warm the cache and request again — two requests, no new surface, no held render slot. **If nobody needs first-request seek, close this change instead of implementing it.** Everything below assumes that question was answered yes.
+- [ ] 0.1 **Decide whether to close this change.** Measurement (design.md) shows no trigger reaches a browser: Chrome sends `Range: bytes=0-` on every first media request, and a chunked response marks the element non-seekable so a seek range is never sent. Any mechanism therefore serves only deliberate, non-browser clients — who can already warm the cache with one discarded request. **Closing is the expected outcome.** Implement only if a concrete client needs materialisation and cannot warm; everything below assumes that.
 
 ## 1. Trigger and delivery
 
