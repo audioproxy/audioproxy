@@ -120,7 +120,7 @@ defmodule AudioProxy.LogHandler do
   """
   @spec attach() :: :ok
   def attach do
-    events = [@bandit_stop | Telemetry.render_events()]
+    events = [@bandit_stop, Telemetry.store_write_failure_event() | Telemetry.render_events()]
 
     case :telemetry.attach_many(@handler_id, events, &__MODULE__.handle_event/4, nil) do
       :ok -> :ok
@@ -193,6 +193,18 @@ defmodule AudioProxy.LogHandler do
         "#{field(metadata, :format)} #{field(metadata, :source)} " <>
         "after #{bytes(measurements, :bytes)} bytes " <>
         "in #{ms(measurements[:duration])}#{detail(metadata[:detail])}"
+    end)
+  end
+
+  # Warning, not error: clients were served and the render succeeded — but
+  # the cache silently stopped filling, which an operator watching only
+  # request lines would never see. `reason` is inspected text this module did
+  # not build (an exception message can embed anything), so it is redacted
+  # like a diagnostic tail.
+  defp emit([:audio_proxy, :variant_store, :write_failure], _measurements, metadata, _config) do
+    log(:warning, fn ->
+      "variant store write failed for #{field(metadata, :key)}: " <>
+        redact(inspect(metadata[:reason]))
     end)
   end
 

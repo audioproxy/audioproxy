@@ -34,9 +34,11 @@ defmodule AudioProxy.Application do
     # connection must find somewhere to start a subprocess. The coalescing
     # registry and its supervisor sit between them, because a coordinator
     # spawns a render in `init/1` and must therefore stop before the thing it
-    # spawns into — which reverse-order shutdown gives for free.
+    # spawns into — which reverse-order shutdown gives for free. The tee
+    # supervisor sits first for the same reason: coordinators spawn tees too,
+    # and a coordinator stopping is what tells its tee to abort.
     children =
-      [AudioProxy.Ffmpeg.RenderSupervisor] ++
+      [AudioProxy.VariantStore.Tee.supervisor(), AudioProxy.Ffmpeg.RenderSupervisor] ++
         AudioProxy.RenderCoordinator.children() ++ listener(config)
 
     Logger.info("audio_proxy #{vsn()} starting (serve_mode: #{config.serve_mode})")

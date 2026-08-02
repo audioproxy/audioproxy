@@ -218,6 +218,31 @@ defmodule AudioProxy.LogHandlerTest do
     end
   end
 
+  describe "the write-back" do
+    test "a store write failure logs at warning, naming the key" do
+      log =
+        capture_log(fn ->
+          AudioProxy.Telemetry.store_write_failure(%{key: "abc123", reason: :enospc})
+        end)
+
+      assert log =~ "[warning]"
+      assert log =~ "variant store write failed for abc123"
+      assert log =~ "enospc"
+    end
+
+    test "a reason that embeds a URL is redacted like any diagnostic" do
+      reason = %RuntimeError{message: "https://b.s3.test/k?X-Amz-Signature=deadbeef failed"}
+
+      log =
+        capture_log(fn ->
+          AudioProxy.Telemetry.store_write_failure(%{key: "abc123", reason: reason})
+        end)
+
+      assert log =~ "variant store write failed"
+      refute log =~ "deadbeef"
+    end
+  end
+
   describe "the handler cannot be killed by a bad event" do
     # `:telemetry` detaches a handler that raises — permanently, silently, and
     # for the whole VM. One malformed event would therefore cost every future

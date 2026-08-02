@@ -179,7 +179,18 @@ defmodule AudioProxy.Plugs.RenderAction do
   end
 
   defp subscribe(conn, input, opts) do
-    spec = [args: Command.build(conn.assigns.options, input)] ++ Keyword.take(opts, [:executable])
+    # What the write-back stores alongside the bytes: the headers `begin/1`
+    # sends, so a store-direct fetch serves the variant the way this response
+    # would have. Built here because only this module knows them.
+    metadata = %{
+      content_type: Command.content_type(conn.assigns.options),
+      cache_control: @cache_control,
+      etag: ~s("#{conn.assigns.cache_key}")
+    }
+
+    spec =
+      [args: Command.build(conn.assigns.options, input), metadata: metadata] ++
+        Keyword.take(opts, [:executable])
 
     case RenderCoordinator.subscribe(conn.assigns.cache_key, spec) do
       {:ok, status, render, backlog} ->

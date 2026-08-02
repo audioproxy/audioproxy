@@ -12,15 +12,15 @@
 
 ## 3. Tee write-back
 
-- [ ] 3.1 Tee Task subscriber: coordinator stream → `put_stream/3` with response metadata; abort on error/cancel; write failure logged + instrumented, client streams untouched
-- [ ] 3.2 Coordinator integration: tee starts when a store is configured; disconnect policy (tee counts as subscriber — complete when cache on, cancel when off)
+- [x] 3.1 Tee Task subscriber: coordinator stream → `put_stream/3` with response metadata; abort on error/cancel; write failure logged + instrumented, client streams untouched
+- [x] 3.2 Coordinator integration: tee starts when a store is configured; disconnect policy (tee counts as subscriber — complete when cache on, cancel when off)
 
 ## 4. Tests
 
-- [ ] 4.1 Write-back byte-equality (response bytes == stored bytes); metadata round trip via store-direct fetch
-- [ ] 4.2 No-partial: mid-render failure and cancel → nothing readable; write failure → client unaffected
-- [ ] 4.3 Slow-client full-speed: throttled reader, variant complete before client finishes
-- [ ] 4.4 Disconnect policy both ways (store on: completes; store off: cancels)
+- [x] 4.1 Write-back byte-equality (response bytes == stored bytes); metadata round trip via store-direct fetch
+- [x] 4.2 No-partial: mid-render failure and cancel → nothing readable; write failure → client unaffected
+- [x] 4.3 Slow-client full-speed: throttled reader, variant complete before client finishes
+- [x] 4.4 Disconnect policy both ways (store on: completes; store off: cancels)
 - [x] 4.5 Boot: unknown scheme, unusable path, redirect+`file://` each abort naming their variables
 
 ## 5. Docs
