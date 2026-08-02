@@ -19,11 +19,22 @@ defmodule AudioProxy.PresigningStore do
 
   ## Misbehaving on purpose
 
-  `declare_size/2` makes `head/1` report a size the bytes do not back — a
-  store whose object shrank under a reader, which is what makes a proxied hit
-  promise a `Content-Length` it cannot deliver. The `file://` backend cannot
-  produce that disagreement, because its `get_stream/2` re-runs `head/1`
-  itself.
+  Two states a real store can reach and the `file://` one structurally cannot,
+  because both need `head/1` and `get_stream/2` to disagree:
+
+    * `vanish_reads/1` — `head/1` still reports the entry, reads answer
+      `{:error, :not_found}`. The eviction window between the two calls, which
+      `AudioProxy.VariantStore.Local.get_stream/2` closes by re-running
+      `head/1` itself.
+    * `declare_size/2` — `head/1` reports a size the bytes do not back. A store
+      whose object shrank under a reader, which is what makes a proxied hit
+      promise a `Content-Length` it cannot deliver.
+
+  And one that needs no disagreement at all:
+
+    * `fail_presign/2` — `presign/2` answers `{:error, reason}` for an entry
+      that is otherwise fine, which is what sends redirect mode down its
+      proxy-instead fallback.
   """
 
   @behaviour AudioProxy.VariantStore
@@ -49,6 +60,9 @@ defmodule AudioProxy.PresigningStore do
   @impl true
   def presign(key, opts) do
     case objects() do
+      %{^key => %{presign_error: reason}} ->
+        {:error, reason}
+
       %{^key => _object} ->
         {:ok, "#{@base}/#{key}?expires_in=#{Keyword.fetch!(opts, :expires_in)}"}
 
@@ -58,12 +72,28 @@ defmodule AudioProxy.PresigningStore do
   end
 
   @doc """
+  Makes `key` readable by `head/1` and unreadable by `get_stream/2`.
+
+  See *Misbehaving on purpose*.
+  """
+  @spec vanish_reads(AudioProxy.VariantStore.key()) :: :ok
+  def vanish_reads(key), do: update(key, &%{&1 | readable: false})
+
+  @doc """
   Makes `head/1` report `size` for `key`, whatever its bytes actually are.
 
   See *Misbehaving on purpose*.
   """
   @spec declare_size(AudioProxy.VariantStore.key(), non_neg_integer()) :: :ok
   def declare_size(key, size), do: update(key, &%{&1 | size: size})
+
+  @doc """
+  Makes `presign/2` fail for `key` with `reason`.
+
+  See *Misbehaving on purpose*.
+  """
+  @spec fail_presign(AudioProxy.VariantStore.key(), term()) :: :ok
+  def fail_presign(key, reason), do: update(key, &Map.put(&1, :presign_error, reason))
 
   @impl true
   def head(key) do
@@ -78,16 +108,21 @@ defmodule AudioProxy.PresigningStore do
     with {:ok, %{size: size}} <- head(key) do
       object = Map.fetch!(objects(), key)
 
-      case slice(range, size) do
-        # Clamped against the *real* bytes, which is what lets `declare_size/2`
-        # under-deliver instead of raising on a read past the end.
-        {:ok, offset, length} ->
-          available = max(min(length, byte_size(object.bytes) - offset), 0)
+      if object.readable do
+        case slice(range, size) do
+          # Clamped against the *real* bytes, which is what lets
+          # `declare_size/2` under-deliver instead of raising on a read past
+          # the end.
+          {:ok, offset, length} ->
+            available = max(min(length, byte_size(object.bytes) - offset), 0)
 
-          {:ok, [binary_part(object.bytes, offset, available)]}
+            {:ok, [binary_part(object.bytes, offset, available)]}
 
-        :error ->
-          {:error, :invalid_range}
+          :error ->
+            {:error, :invalid_range}
+        end
+      else
+        {:error, :not_found}
       end
     end
   end
@@ -96,7 +131,7 @@ defmodule AudioProxy.PresigningStore do
   def put_stream(key, chunks, metadata) do
     bytes = chunks |> Enum.to_list() |> IO.iodata_to_binary()
 
-    object = %{bytes: bytes, metadata: metadata, size: byte_size(bytes)}
+    object = %{bytes: bytes, metadata: metadata, size: byte_size(bytes), readable: true}
 
     :persistent_term.put(@storage_key, Map.put(objects(), key, object))
 

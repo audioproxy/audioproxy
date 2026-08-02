@@ -282,6 +282,22 @@ defmodule AudioProxy.VariantCacheTest do
       assert request(signed(@rest), [{"range", "bytes=-0"}]).status == 416
     end
 
+    test "every range against a zero-length variant is a 416" do
+      # Contested during review, so pinned. A zero-length variant makes `last`
+      # clamp to -1, which looks like a malformed range and would be *ignored*
+      # if the first-byte-pos check ran after the clamp. It does not: `last <
+      # first` compares the value as parsed, so these all reach the bounds
+      # check and are refused rather than answered with an empty 200.
+      :ok = VariantStore.put_stream(cache_key(), [""], %{@metadata | etag: ~s("empty")})
+
+      for header <- ["bytes=0-0", "bytes=0-1", "bytes=1-2", "bytes=0-", "bytes=-5"] do
+        conn = request(signed(@rest), [{"range", header}])
+
+        assert conn.status == 416, "#{header} against a 0-byte variant should be unsatisfiable"
+        assert get_resp_header(conn, "content-range") == ["bytes */0"]
+      end
+    end
+
     test "a range this proxy does not implement is ignored, not refused" do
       # RFC 9110 §14.2 permits ignoring `Range` outright; multi-range and
       # non-`bytes` units get the whole variant rather than a 416 or a
@@ -327,6 +343,33 @@ defmodule AudioProxy.VariantCacheTest do
       assert location =~ "expires_in=42"
     end
 
+    test "a presign that fails serves the bytes instead, with the reason redacted" do
+      # The bytes are readable and the client asked for audio, not for a URL,
+      # so the fallback is to proxy. What must not happen is the log carrying
+      # the credential the failing backend was handling: this is the one
+      # inspect/1 on the path, and the backend it inspects deals in signed
+      # URLs by definition.
+      key = cache_key()
+
+      PresigningStore.fail_presign(
+        key,
+        "clock skew signing https://variants.example.test/#{key}?X-Amz-Signature=deadbeef"
+      )
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          conn = request(signed(@rest))
+
+          assert conn.status == 200
+          assert conn.resp_body == @variant
+          assert get_resp_header(conn, "x-audio-proxy") == ["HIT"]
+        end)
+
+      assert log =~ "could not presign"
+      assert log =~ "[redacted]"
+      refute log =~ "deadbeef"
+    end
+
     test "a miss still renders: nothing to redirect to" do
       conn = request(signed("/f:opus/br:96/plain/local://piece.wav"))
 
@@ -350,6 +393,20 @@ defmodule AudioProxy.VariantCacheTest do
     setup do
       put_config(%{variant_store: {:module, PresigningStore}, serve_mode: :proxy})
       :ok
+    end
+
+    test "an entry readable by head/1 but not by get_stream/2 falls through to a render" do
+      # The eviction window the local backend closes by re-heading inside
+      # get_stream/2, and a shared store does not. Nothing has been sent yet,
+      # so the only correct answer is to render.
+      store!(@variant, "local://piece.wav")
+      PresigningStore.vanish_reads(CacheKey.derive!(@options, "local://piece.wav"))
+
+      conn = request(signed("/f:opus/br:96/plain/local://piece.wav"))
+
+      assert conn.status == 200
+      assert get_resp_header(conn, "x-audio-proxy") == ["MISS"]
+      assert conn.resp_body == @payload
     end
 
     test "a body short of its declared Content-Length tears the response down" do

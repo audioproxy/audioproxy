@@ -124,17 +124,20 @@ defmodule AudioProxy.VariantCacheStreamTest do
 
       socket = RawHttp.get(signed(@rest), port)
 
-      # One read, deliberately: the socket's buffers cannot hold 24 MiB, so
-      # having *any* bytes here means delivery began long before the last one
-      # was read out of the store.
-      assert {:ok, first} = :gen_tcp.recv(socket, 0, @deadline)
-      assert byte_size(first) < @large_bytes
+      # One read, then stop: the socket's buffers cannot hold 24 MiB, so the
+      # server is now blocked on a write, part-way through the variant. That
+      # is the moment worth measuring — a proxy that read the object into
+      # memory before sending would be holding all of it right now.
+      assert {:ok, _first} = :gen_tcp.recv(socket, 0, @deadline)
 
-      # And with the client not reading, the server is blocked on the socket
-      # mid-variant — which is the moment a proxy that buffered the whole
-      # object would be holding it.
-      assert :erlang.memory(:binary) - baseline < div(@large_bytes, 4),
-             "the proxy is holding a substantial fraction of the variant in memory"
+      # 2 MiB, not a quarter of the variant. The store reads in 64 KiB chunks
+      # and the socket buffers a little more, so anything near this bound is
+      # read-ahead rather than streaming — the loose threshold this started
+      # with would have passed an implementation buffering 5 MiB.
+      resident = :erlang.memory(:binary) - baseline
+
+      assert resident < 2 * 1024 * 1024,
+             "the proxy is holding #{div(resident, 1024)} KiB of a #{div(@large_bytes, 1024 * 1024)} MiB variant"
 
       :ok = :gen_tcp.close(socket)
     end
