@@ -411,7 +411,7 @@ Levels:
 
 | Level | What appears |
 |---|---|
-| `error` | Nothing routine — crashes only |
+| `error` | Nothing routine: a render the host could not start at all (no encoder on `PATH`), a subprocess that survived `SIGKILL`, and crashes |
 | `warning` | `5xx` and `504` responses, and the ffmpeg diagnostic behind a failed render |
 | `info` | **Default.** The above, plus one line per request, `4xx` included: a `401` is a normal outcome for a public endpoint, not an incident |
 | `debug` | The above, plus `/health` (silent otherwise, so a liveness probe every second does not become the log), the render lifecycle, and client disconnects |

@@ -226,6 +226,9 @@ defmodule AudioProxy.ConfigTest do
       assert is_integer(config.port)
       assert config.serve_mode in Config.serve_modes()
       assert Config.get(:serve_mode) == config.serve_mode
+
+      assert config.log_level in Config.log_levels()
+      assert Config.get(:log_level) == config.log_level
     end
 
     test "get/1 raises for an unknown key" do

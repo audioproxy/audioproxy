@@ -49,6 +49,28 @@ defmodule AudioProxy.LogHandler do
   plug crash unrelated to a render produces Bandit's error report and no
   request line, which is a bug report either way.
 
+  ## A handler that raises is a handler that stops existing
+
+  `:telemetry` detaches a handler that raises, permanently and silently — so
+  one malformed event does not lose one line, it loses *every* line for the
+  life of the VM, and nothing says so. That makes total-ness the property
+  this module cares about most, and it is defended twice.
+
+  Nothing here reads a field it has not proved is there: statuses that are
+  not integers render as `-`, durations that are not integers as `?ms`,
+  absent metadata falls back rather than raising. `Integer.to_string/1` on a
+  status was the concrete bug — Bandit emits `[:bandit, :request, :stop]`
+  with a conn but no status when a request dies of a protocol or transport
+  error (`Bandit.Pipeline`'s error path), and `conn.status >= 500` did not
+  even fail loudly on it: in Elixir's term order an atom sorts above every
+  number, so `nil >= 500` is `true` and a status-less request was already
+  being levelled as a server error.
+
+  Behind that, `handle_event/4` rescues anything it did not anticipate and
+  logs a terse line about itself instead of dying. Swallowing an exception is
+  normally the wrong instinct; here the alternative is losing the log
+  wholesale, and the rescue still says what happened.
+
   ## Redaction
 
   `detail` on a render exception is the one field carrying text this
@@ -74,8 +96,18 @@ defmodule AudioProxy.LogHandler do
   # marker replaces the parameter *name* too: a line reading
   # "X-Amz-Signature=[redacted]" still tells a reader which credential was in
   # play, and the guarantee is that no credential material appears at all.
+  #
+  # The first pattern is what actually covers a presigned URL, since an ffmpeg
+  # input always has a scheme. The second is for credential parameters that
+  # reach a diagnostic detached from their URL, and lists the three signing
+  # schemes a proxy is plausibly pointed at — S3, GCS, and Azure's `sig`.
+  # Anything it does not know is a name to add here, not a design to revisit.
+  #
+  # Both are backtracking patterns over untrusted text, which is safe only
+  # because the text is bounded: `AudioProxy.Ffmpeg.Render` caps its stderr
+  # tail at 4 KB. That cap is load-bearing, not incidental.
   @url_query ~r{(://\S*?)\?\S*}
-  @credential_param ~r/\b(?:X-Amz-[\w-]+|Signature|AWSAccessKeyId|Expires)=[^\s&]*/i
+  @credential_param ~r/\b(?:X-Amz-[\w-]+|X-Goog-[\w-]+|AWSAccessKeyId|Signature|Expires|sig)=[^\s&]*/i
 
   @redacted "[redacted]"
 
@@ -117,58 +149,78 @@ defmodule AudioProxy.LogHandler do
 
   @doc false
   @spec handle_event(:telemetry.event_name(), map(), map(), term()) :: :ok
-  def handle_event(@bandit_stop, measurements, %{conn: conn}, _config) do
-    log(request_level(conn), fn -> request_line(conn, measurements) end)
+  def handle_event(event, measurements, metadata, config) do
+    emit(event, measurements, metadata, config)
+    :ok
+  rescue
+    exception ->
+      # See the moduledoc: dying here would take every future line with it.
+      Logger.error("log handler failed on #{inspect(event)}: #{Exception.message(exception)}")
+      :ok
+  catch
+    kind, reason ->
+      Logger.error("log handler failed on #{inspect(event)}: #{kind} #{inspect(reason)}")
+      :ok
+  end
+
+  defp emit(@bandit_stop, measurements, %{conn: conn} = metadata, _config) do
+    log(request_level(conn), fn -> request_line(conn, measurements, metadata) end)
   end
 
   # Bandit omits `conn` when it could not build one — a malformed request line,
   # a TLS handshake that never became HTTP. There is no request to describe.
-  def handle_event(@bandit_stop, _measurements, _metadata, _config), do: :ok
+  defp emit(@bandit_stop, _measurements, _metadata, _config), do: :ok
 
-  def handle_event([:audio_proxy, :render, :start], _measurements, metadata, _config) do
-    log(:debug, fn -> "render start #{metadata.format} #{metadata.source}" end)
+  defp emit([:audio_proxy, :render, :start], _measurements, metadata, _config) do
+    log(:debug, fn -> "render start #{field(metadata, :format)} #{field(metadata, :source)}" end)
   end
 
-  def handle_event([:audio_proxy, :render, :stop], measurements, metadata, _config) do
+  defp emit([:audio_proxy, :render, :stop], measurements, metadata, _config) do
     log(:debug, fn ->
-      "render #{metadata.outcome} #{metadata.format} #{metadata.source} " <>
-        "#{measurements.bytes} bytes in #{ms(measurements.duration)}"
+      "render #{field(metadata, :outcome)} #{field(metadata, :format)} " <>
+        "#{field(metadata, :source)} #{bytes(measurements, :bytes)} bytes " <>
+        "in #{ms(measurements[:duration])}"
     end)
   end
 
-  def handle_event([:audio_proxy, :render, :exception], measurements, metadata, _config) do
+  defp emit([:audio_proxy, :render, :exception], measurements, metadata, _config) do
     log(:warning, fn ->
-      "render failed (#{metadata.class}, exit #{inspect(metadata.exit_status)}) " <>
-        "#{metadata.format} #{metadata.source} after #{measurements.bytes} bytes " <>
-        "in #{ms(measurements.duration)}#{detail(metadata.detail)}"
+      "render failed (#{field(metadata, :class)}, exit #{inspect(metadata[:exit_status])}) " <>
+        "#{field(metadata, :format)} #{field(metadata, :source)} " <>
+        "after #{bytes(measurements, :bytes)} bytes " <>
+        "in #{ms(measurements[:duration])}#{detail(metadata[:detail])}"
     end)
   end
 
   ## The line
 
-  defp request_line(conn, measurements) do
+  defp request_line(conn, measurements, metadata) do
     [
       class(conn),
-      Integer.to_string(conn.status),
+      status(conn),
       error_class(conn),
       options(conn),
       source(conn),
-      "#{Map.get(measurements, :resp_body_bytes, 0)} bytes",
-      "in #{ms(measurements.duration)}"
+      transport_error(metadata),
+      "#{bytes(measurements, :resp_body_bytes)} bytes",
+      "in #{ms(measurements[:duration])}"
     ]
     |> Enum.reject(&is_nil/1)
     |> Enum.join(" ")
   end
 
-  defp class(conn), do: conn.assigns |> Map.get(:endpoint_class, :unknown) |> Atom.to_string()
+  defp class(conn), do: conn.assigns |> Map.get(:endpoint_class, :unknown) |> to_string()
+
+  # `-` rather than a number: the response never got far enough to have one.
+  defp status(%{status: status}) when is_integer(status), do: Integer.to_string(status)
+  defp status(_conn), do: "-"
 
   defp error_class(conn) do
-    with class when not is_nil(class) <- conn.assigns[:error_class], do: Atom.to_string(class)
+    with class when not is_nil(class) <- conn.assigns[:error_class], do: to_string(class)
   end
 
   defp options(conn) do
-    with opts when not is_nil(opts) <- conn.assigns[:options],
-         do: "opts=" <> Options.normalize(opts)
+    with %Options{} = opts <- conn.assigns[:options], do: "opts=" <> Options.normalize(opts)
   end
 
   defp source(conn) do
@@ -177,28 +229,50 @@ defmodule AudioProxy.LogHandler do
     end
   end
 
+  # Bandit puts its own message here when the span ended in a protocol or
+  # transport failure — the only account of what happened to a request that
+  # never got a status.
+  defp transport_error(metadata) do
+    with error when is_binary(error) <- metadata[:error], do: "error=" <> redact(error)
+  end
+
   # A render that dies after its 200 never reaches `[:bandit, :request, :stop]`
-  # at all, so the status here is always one the chain chose.
+  # at all, so a status that *is* there is always one the chain chose. One that
+  # is not means the request died below the plug, which is never routine.
   defp request_level(conn) do
     cond do
+      not is_integer(conn.status) -> :warning
       conn.assigns[:endpoint_class] == :health -> :debug
       conn.status >= 500 -> :warning
       true -> :info
     end
   end
 
-  defp detail(nil), do: ""
-  defp detail(""), do: ""
-  defp detail(text), do: ": " <> (text |> String.trim() |> redact())
+  defp detail(text) when is_binary(text) and text != "" do
+    ": " <> (text |> String.trim() |> redact())
+  end
+
+  defp detail(_absent), do: ""
+
+  defp bytes(measurements, key) do
+    case measurements[key] do
+      count when is_integer(count) and count >= 0 -> count
+      _absent -> 0
+    end
+  end
+
+  defp field(metadata, key), do: metadata |> Map.get(key, "-") |> to_string()
 
   # Native units are meaningless to a reader and their scale is
   # platform-dependent; one decimal place of milliseconds is what a duration
   # is compared against.
-  defp ms(native) do
+  defp ms(native) when is_integer(native) do
     micro = System.convert_time_unit(native, :native, :microsecond)
 
     :erlang.float_to_binary(micro / 1_000, decimals: 1) <> "ms"
   end
+
+  defp ms(_absent), do: "?ms"
 
   # A handler runs in the process that emitted the event, so a `Logger` call
   # here is the same call the emitting code would have made — level filtering

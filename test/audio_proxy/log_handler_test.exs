@@ -185,6 +185,77 @@ defmodule AudioProxy.LogHandlerTest do
     end
   end
 
+  describe "the handler cannot be killed by a bad event" do
+    # `:telemetry` detaches a handler that raises — permanently, silently, and
+    # for the whole VM. One malformed event would therefore cost every future
+    # line rather than just its own. Each case below asserts the handler is
+    # still attached afterwards; without that assertion they would all pass by
+    # logging nothing at all.
+
+    test "a stop event whose conn never got a status logs a warning and survives" do
+      log =
+        capture_log(fn ->
+          :telemetry.execute(
+            [:bandit, :request, :stop],
+            %{duration: System.convert_time_unit(900, :microsecond, :native)},
+            %{conn: statusless_conn(), error: "connection reset by peer"}
+          )
+        end)
+
+      assert attached?()
+      assert [line] = request_lines(log)
+      assert line =~ "[warning]"
+      assert line =~ "render -"
+      assert line =~ "error=connection reset"
+    end
+
+    test "a stop event missing every measurement the line reads" do
+      conn = render(signed("/f:mp3/plain/local://piece.wav"))
+
+      log =
+        capture_log(fn -> :telemetry.execute([:bandit, :request, :stop], %{}, %{conn: conn}) end)
+
+      assert attached?()
+      assert [line] = request_lines(log)
+      assert line =~ "0 bytes"
+      assert line =~ "?ms"
+    end
+
+    test "render events with absent and ill-typed metadata" do
+      log =
+        at_level(:debug, fn ->
+          capture_log(fn ->
+            for event <- [:start, :stop, :exception] do
+              :telemetry.execute([:audio_proxy, :render, event], %{}, %{})
+            end
+
+            :telemetry.execute(
+              [:audio_proxy, :render, :exception],
+              %{duration: :not_a_number, bytes: nil},
+              %{format: :mp3, source: "local://x.wav", class: :undecodable, detail: :not_binary}
+            )
+          end)
+        end)
+
+      assert attached?()
+      refute log =~ "log handler failed"
+      assert log =~ "render failed (undecodable"
+    end
+
+    test "the rescue backstop reports rather than dies" do
+      # Nothing defends against this one — a "conn" with no fields at all.
+      # Whatever it hits must come back as a line about the handler rather
+      # than as a detachment.
+      log =
+        capture_log(fn ->
+          :telemetry.execute([:bandit, :request, :stop], %{duration: 1}, %{conn: %{}})
+        end)
+
+      assert attached?()
+      assert log =~ "log handler failed"
+    end
+  end
+
   describe "credentials never reach the log" do
     test "a diagnostic quoting a presigned URL is redacted, source identity intact" do
       log =
@@ -249,6 +320,16 @@ defmodule AudioProxy.LogHandlerTest do
     |> AudioProxy.ErrorJSON.halt_with(reason)
   end
 
+  # What Bandit hands the handler when a request dies of a protocol or
+  # transport error: the conn as built at request start — no status, no
+  # assigns — plus its own message. See `Bandit.Pipeline`'s error path.
+  defp statusless_conn do
+    conn(:get, "/sig/f:mp3/plain/local://piece.wav")
+    |> Plug.Conn.assign(:endpoint_class, :render)
+  end
+
+  defp attached?, do: :telemetry.list_handlers([:bandit, :request, :stop]) != []
+
   # Bandit's `:stop` event, reproduced. `resp_body_bytes` is the byte count as
   # sent on the wire, `duration` is in native units.
   defp log_request(conn, bytes \\ nil) do
@@ -269,7 +350,7 @@ defmodule AudioProxy.LogHandlerTest do
   defp request_lines(log) do
     log
     |> String.split("\n")
-    |> Enum.filter(&Regex.match?(~r/\] (render|health|unknown) \d{3}/, &1))
+    |> Enum.filter(&Regex.match?(~r/\] (render|health|unknown) (\d{3}|-)/, &1))
   end
 
   defp at_level(level, fun) do

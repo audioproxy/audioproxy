@@ -14,6 +14,7 @@ defmodule AudioProxy.TelemetryTest do
   use ExUnit.Case, async: false
 
   import AudioProxy.ConfigHelper
+  import ExUnit.CaptureLog
   import Plug.Test
 
   alias AudioProxy.Signature
@@ -120,10 +121,15 @@ defmodule AudioProxy.TelemetryTest do
 
   ## Helpers
 
+  # Wrapped in `capture_log/1` because the boot-attached `AudioProxy.LogHandler`
+  # is listening to these same events: a failed render here would otherwise put
+  # its warning in the suite's output, where it reads as something going wrong.
+  # What the handler *says* is `AudioProxy.LogHandlerTest`'s subject, not this
+  # file's — here the log is a side effect to be swallowed.
   defp render(rest) do
     path = "/#{Signature.sign(rest, @key, @salt)}#{rest}"
 
-    conn(:get, path) |> AudioProxy.FakeFfmpeg.Router.call(@fake_opts)
+    capture_log(fn -> conn(:get, path) |> AudioProxy.FakeFfmpeg.Router.call(@fake_opts) end)
   end
 
   @doc false
