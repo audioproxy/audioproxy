@@ -32,3 +32,6 @@ audio_proxy-*.tar
 
 # Second-opinion review working log (session artifact).
 /second-opinion.md
+
+# macOS Finder metadata
+.DS_Store
