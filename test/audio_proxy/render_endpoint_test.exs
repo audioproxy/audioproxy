@@ -334,6 +334,18 @@ defmodule AudioProxy.RenderEndpointTest do
       assert conn.resp_body == @payload
     end
 
+    test "a matching validator outranks a missing source: 304, not 404" do
+      # Deliberate, and pinned so it is not "fixed" into a stat per
+      # revalidation: the ETag names immutable variant bytes, so a cache still
+      # holding them is not wrong to keep them even though the source is gone.
+      etag = quoted_etag("f:mp3", "local://gone.wav")
+      path = signed("/f:mp3/plain/local://gone.wav")
+
+      assert render(path).status == 404
+      assert render(path, [{"if-none-match", etag}]).status == 304
+      assert no_render_spawned?()
+    end
+
     test "the signature still gates: unsigned plus a matching validator is 401" do
       etag = quoted_etag("f:opus/br:96", "local://piece.wav")
 
@@ -380,6 +392,17 @@ defmodule AudioProxy.RenderEndpointTest do
       assert missing.status == 404
       assert get_resp_header(missing, "cache-control") == ["max-age=10"]
       assert no_render_spawned?()
+    end
+
+    test "HEAD answers 200 where GET answers 415, and cannot do better" do
+      # Not a lie the chain could avoid: 415 is ffmpeg's verdict while
+      # decoding, and HEAD exists precisely to skip the decode. Pinned so the
+      # divergence stays a documented property rather than a surprise — and so
+      # anyone tempted to "fix" it has to notice they would be rendering.
+      path = signed("/f:mp3/plain/local://notaudio.txt")
+
+      assert render(path).status == 415
+      assert request(:head, path).status == 200
     end
 
     test "HEAD runs the stat: an oversized source is 413, exactly like GET" do

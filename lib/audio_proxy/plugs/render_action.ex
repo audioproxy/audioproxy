@@ -24,9 +24,25 @@ defmodule AudioProxy.Plugs.RenderAction do
   An `If-None-Match` matching the URL-derived `ETag` answers `304` before the
   stat — the ETag is the cache key, a pure function of the URL, so
   revalidation is pure computation. And a HEAD runs the full check chain
-  including the stat but ends bodiless after it: same status and headers as
-  the GET would answer, no subprocess. Both sit after the signature plug by
-  pipeline order, so neither is an existence oracle for unsigned probes.
+  including the stat but ends bodiless after it, with no subprocess. Both sit
+  after the signature plug by pipeline order, so neither is an existence
+  oracle for unsigned probes.
+
+  Two consequences worth stating, because both look like bugs and are not:
+
+  A HEAD answers the status the *check chain* can determine, which is not
+  always the status a GET answers. 415 is diagnosed by ffmpeg while decoding,
+  so a HEAD on an undecodable source answers 200 where the GET answers 415 —
+  and it cannot do better without rendering, which is the entire point of
+  HEAD. The same holds for 500 and 504. Everything the chain *can* know —
+  401, 404, 413, 422 — is identical to the GET.
+
+  And the 304 outranks the stat, so a revalidation for a variant whose source
+  has since been deleted answers 304, not 404. That is deliberate: the ETag
+  names immutable variant bytes, and a cache still holding them is not wrong
+  to keep them. Moving the check after the stat would buy a more "honest" 404
+  at the cost of a stat on every revalidation — the cost this path exists to
+  avoid.
 
   ## Coalescing, from this side
 
@@ -154,9 +170,11 @@ defmodule AudioProxy.Plugs.RenderAction do
     end
   end
 
-  # HEAD runs every check a GET runs, including stat — a HEAD that lies about
-  # 404s is worse than none — and skips only the spawn. No `X-Audio-Proxy`:
-  # that header reports what *this response's* render did, and none ran.
+  # HEAD runs every check the chain can run, including stat — a HEAD that lies
+  # about 404s is worse than none — and skips only the spawn, along with the
+  # statuses only a render can discover (see the moduledoc: 415, 500, 504). No
+  # `X-Audio-Proxy`: that header reports what *this response's* render did, and
+  # none ran.
   defp respond(%Plug.Conn{method: "HEAD"} = conn, source, _opts) do
     with {:ok, stat} <- Source.stat(source),
          :ok <- within_limit(stat.size) do
