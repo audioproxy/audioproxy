@@ -13,6 +13,7 @@ defmodule AudioProxy.TelemetryTest do
 
   use ExUnit.Case, async: false
 
+  import AudioProxy.CoalesceHelper
   import AudioProxy.ConfigHelper
   import ExUnit.CaptureLog
   import Plug.Test
@@ -39,6 +40,11 @@ defmodule AudioProxy.TelemetryTest do
       max_src_bytes: 2_000_000_000
     })
 
+    # `cache_status` is only meaningful against a known-empty registry: a
+    # coordinator left lingering by another test would turn a `:miss` here
+    # into a `:coalesced`.
+    reset_coordinators()
+
     :ok
   end
 
@@ -52,12 +58,41 @@ defmodule AudioProxy.TelemetryTest do
       assert_receive {:consumer, [:audio_proxy, :render, :stop], stop_measurements, stop_meta}
 
       assert is_integer(start_measurements.system_time)
-      assert start_meta == %{format: :opus, source: "local://piece.wav"}
+
+      assert start_meta == %{
+               format: :opus,
+               source: "local://piece.wav",
+               cache_status: :miss
+             }
 
       assert stop_measurements.bytes == @payload_bytes
       assert is_integer(stop_measurements.duration) and stop_measurements.duration >= 0
 
-      assert stop_meta == %{format: :opus, source: "local://piece.wav", outcome: :ok}
+      assert stop_meta == %{
+               format: :opus,
+               source: "local://piece.wav",
+               cache_status: :miss,
+               outcome: :ok
+             }
+    end
+
+    test "a request that attaches to a running render says so in its metadata" do
+      attach(:consumer)
+
+      # Sequential, and still coalesced: the finished coordinator stays
+      # registered briefly, so the second request is served from its backlog.
+      # Without `cache_status` that span reports the whole payload in
+      # microseconds and reads as an impossibly fast encode.
+      render("/f:opus/br:96/cb:coalesce/plain/local://piece.wav")
+      render("/f:opus/br:96/cb:coalesce/plain/local://piece.wav")
+
+      assert_receive {:consumer, [:audio_proxy, :render, :start], _, %{cache_status: :miss}}
+      assert_receive {:consumer, [:audio_proxy, :render, :stop], _, %{cache_status: :miss}}
+
+      assert_receive {:consumer, [:audio_proxy, :render, :start], _, %{cache_status: :coalesced}}
+
+      assert_receive {:consumer, [:audio_proxy, :render, :stop], _,
+                      %{cache_status: :coalesced, outcome: :ok}}
     end
 
     test "no exception event fires" do

@@ -18,6 +18,7 @@ defmodule AudioProxy.RenderEndpointFfmpegTest do
 
   use ExUnit.Case, async: false
 
+  import AudioProxy.CoalesceHelper
   import AudioProxy.ConfigHelper
 
   alias AudioProxy.{RawHttp, Signature}
@@ -63,6 +64,8 @@ defmodule AudioProxy.RenderEndpointFfmpegTest do
       max_src_bytes: 2_000_000_000,
       render_timeout: 60
     })
+
+    reset_coordinators()
 
     bandit =
       start_supervised!(
@@ -126,6 +129,31 @@ defmodule AudioProxy.RenderEndpointFfmpegTest do
 
       assert streamed_for > 500,
              "the whole response arrived within #{streamed_for}ms, which is what buffering looks like"
+    end
+
+    test "a second client for the same variant shares one ffmpeg", %{port: port} do
+      # The ten-minute source is what makes the overlap real: the second
+      # request lands while ffmpeg is still encoding, so it exercises the
+      # backlog-then-live seam rather than the post-completion linger.
+      rest = "/f:mp3/plain/local://long.wav"
+      path = "/#{Signature.sign(rest, @key, @salt)}#{rest}"
+
+      first = Task.async(fn -> path |> RawHttp.get(port) |> RawHttp.read(@deadline) end)
+      Process.sleep(500)
+      second = Task.async(fn -> path |> RawHttp.get(port) |> RawHttp.read(@deadline) end)
+
+      first = Task.await(first, @deadline)
+      second = Task.await(second, @deadline)
+
+      assert first.head =~ "x-audio-proxy: miss"
+      assert second.head =~ "x-audio-proxy: coalesced"
+
+      assert RawHttp.complete?(first.body)
+      assert RawHttp.complete?(second.body)
+
+      # The whole point, stated in bytes: the joiner's stream is the starter's
+      # stream, not a second encode that merely resembles it.
+      assert RawHttp.dechunk(second.body) == RawHttp.dechunk(first.body)
     end
 
     test "a source ffmpeg cannot decode is a 415", %{port: port} do

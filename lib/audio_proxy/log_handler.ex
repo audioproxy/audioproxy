@@ -15,15 +15,19 @@ defmodule AudioProxy.LogHandler do
   wire. `Plug.Logger` would cost two lines per request and could not see
   either. What the line says comes from `conn.assigns`, stashed upstream:
 
-      render 200 opts=br:96/f:opus src=local://piece.wav 18 bytes in 3.2ms
+      render 200 opts=br:96/f:opus src=local://piece.wav cache=MISS 18 bytes in 3.2ms
+      render 200 opts=f:mp3 src=local://long.wav cache=COALESCED 9600567 bytes in 3.1ms
       render 422 invalid_options 61 bytes in 0.4ms
       health 200 45 bytes in 0.1ms
 
   The endpoint class leads (`AudioProxy.Router` assigns it), the error class
   follows the status when a request failed (`AudioProxy.ErrorJSON` assigns
-  it), and the normalized options string and canonical source appear once the
-  chain has got far enough to know them — a 401 knows neither, and says so by
-  omission rather than with placeholders. The request id is not in the line:
+  it), and the normalized options string, canonical source and coalescing
+  status appear once the chain has got far enough to know them — a 401 knows
+  none of them, and says so by omission rather than with placeholders. The
+  second line above is why `cache=` is worth a column: it is a request that
+  attached to a render already in flight, and without the field its duration
+  reads as an impossibly fast encode. The request id is not in the line:
   `Plug.RequestId` puts it in Logger metadata, which the formatter renders on
   every line including the render lifecycle's, so correlation works across
   all of them rather than only this one.
@@ -201,6 +205,7 @@ defmodule AudioProxy.LogHandler do
       error_class(conn),
       options(conn),
       source(conn),
+      cache_status(conn),
       transport_error(metadata),
       "#{bytes(measurements, :resp_body_bytes)} bytes",
       "in #{ms(measurements[:duration])}"
@@ -226,6 +231,17 @@ defmodule AudioProxy.LogHandler do
   defp source(conn) do
     with source when not is_nil(source) <- conn.assigns[:source] do
       "src=" <> AudioProxy.Source.canonical(source)
+    end
+  end
+
+  # Without this a coalesced request is actively misleading rather than merely
+  # terse: it delivers the whole variant out of a running render's backlog, so
+  # the line reports megabytes in a few milliseconds and reads as an
+  # impossibly fast encode. Absent before the action subscribes, and so absent
+  # from every line that never got that far.
+  defp cache_status(conn) do
+    with status when not is_nil(status) <- conn.assigns[:render_status] do
+      "cache=" <> (status |> to_string() |> String.upcase())
     end
   end
 

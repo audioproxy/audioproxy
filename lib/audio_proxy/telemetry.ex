@@ -14,9 +14,9 @@ defmodule AudioProxy.Telemetry do
 
   | Event | Measurements | Metadata |
   |---|---|---|
-  | `[:audio_proxy, :render, :start]` | `system_time` | `format`, `source` |
-  | `[:audio_proxy, :render, :stop]` | `duration` (native), `bytes` | `format`, `source`, `outcome` |
-  | `[:audio_proxy, :render, :exception]` | `duration` (native), `bytes` | `format`, `source`, `class`, `exit_status`, `detail` |
+  | `[:audio_proxy, :render, :start]` | `system_time` | `format`, `source`, `cache_status` |
+  | `[:audio_proxy, :render, :stop]` | `duration` (native), `bytes` | `format`, `source`, `cache_status`, `outcome` |
+  | `[:audio_proxy, :render, :exception]` | `duration` (native), `bytes` | `format`, `source`, `cache_status`, `class`, `exit_status`, `detail` |
 
   `outcome` is `:ok` for a render the client received whole and `:cancelled`
   for one abandoned because the client went away. `class` is the failure
@@ -24,6 +24,16 @@ defmodule AudioProxy.Telemetry do
   …); `exit_status` is ffmpeg's exit code where there is one and `nil`
   otherwise; `detail` is the diagnostic tail — an ffmpeg stderr excerpt or an
   inspected exit reason.
+
+  ## `cache_status` is what makes a duration readable
+
+  `:miss` means this request ran the encoder; `:coalesced` means it attached to
+  a render another request had already started. Without it a span is genuinely
+  misleading rather than merely incomplete: a request that joins a nearly
+  finished render and drains its backlog reports megabytes in single-digit
+  milliseconds, which reads as an impossibly fast ffmpeg. It is also the
+  numerator `add-metrics-endpoint` needs for a coalescing ratio, which is a
+  headline number for a proxy whose whole point is not rendering twice.
 
   ## `source` is the canonical identity, never the ffmpeg input
 
@@ -46,8 +56,15 @@ defmodule AudioProxy.Telemetry do
 
   @render [:audio_proxy, :render]
 
-  @typedoc "What every render event describes: the variant and its source."
-  @type meta :: %{format: atom(), source: String.t()}
+  @typedoc """
+  What every render event describes: the variant, its source, and whether this
+  request rendered it or attached to a render already running.
+  """
+  @type meta :: %{
+          format: atom(),
+          source: String.t(),
+          cache_status: :miss | :coalesced
+        }
 
   @typedoc """
   An in-flight render, threaded through the action's loop.

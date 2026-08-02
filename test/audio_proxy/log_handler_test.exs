@@ -24,6 +24,7 @@ defmodule AudioProxy.LogHandlerTest do
 
   doctest AudioProxy.LogHandler
 
+  import AudioProxy.CoalesceHelper
   import AudioProxy.ConfigHelper
   import ExUnit.CaptureLog
   import Plug.Test
@@ -55,6 +56,9 @@ defmodule AudioProxy.LogHandlerTest do
       max_src_bytes: 2_000_000_000
     })
 
+    # `cache=` is only meaningful against a known-empty registry.
+    reset_coordinators()
+
     :ok
   end
 
@@ -70,8 +74,37 @@ defmodule AudioProxy.LogHandlerTest do
       assert line =~ "render 200"
       assert line =~ "opts=br:96/f:opus"
       assert line =~ "src=local://piece.wav"
+      assert line =~ "cache=MISS"
       assert line =~ "18 bytes"
       assert line =~ ~r/in \d+\.\d+ms/
+    end
+
+    test "a coalesced render says so, so its duration cannot be read as an encode" do
+      rest = signed("/f:opus/br:96/cb:logged/plain/local://piece.wav")
+
+      log =
+        capture_log(fn ->
+          log_request(render(rest))
+          # Within the finished coordinator's linger, so this one attaches to
+          # it rather than encoding again.
+          log_request(render(rest))
+        end)
+
+      assert [first, second] = request_lines(log)
+      assert first =~ "cache=MISS"
+      assert second =~ "cache=COALESCED"
+
+      # Same bytes on both, which is the thing that makes the field necessary:
+      # nothing else in the line distinguishes them.
+      assert second =~ "18 bytes"
+    end
+
+    test "a request that never reached the action omits the field entirely" do
+      log = capture_log(fn -> log_request(get("/insecure/f:mp3/plain/local://piece.wav")) end)
+
+      assert [line] = request_lines(log)
+      assert line =~ "render 401"
+      refute line =~ "cache="
     end
 
     test "the line carries the request id, so a render's own lines correlate with it" do

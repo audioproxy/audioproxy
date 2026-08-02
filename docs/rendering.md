@@ -72,6 +72,13 @@ reads have run on dirty I/O schedulers since OTP 21). It is a change of
 mechanism behind the same consumer contract, which is why it can wait until
 there is a measurement asking for it.
 
+**In the running system this high-water mark is not what bounds memory**, and
+the reason is the next section. The render's only consumer is the coalescing
+coordinator, which retains every byte anyway and therefore acknowledges each
+chunk the moment it arrives. The bound that applies is the coordinator's
+retention cap. The mechanism above is still what protects a *direct* consumer
+of the contract, and is what the FIFO escalation replaces.
+
 ## Render policy
 
 A render runs at full speed; the client's chunked stream lags it rather than
@@ -160,18 +167,69 @@ text. `exec` then replaces the shell with ffmpeg, which means the pid the kill
 discipline signals is ffmpeg's own and there is no intermediate process left to
 orphan.
 
+## Coalescing: one render per cache key
+
+Requests do not reach `AudioProxy.Ffmpeg.Render` directly. They go through
+`AudioProxy.RenderCoordinator`, which is a single-flight in front of it: a
+`Registry` of unique cache keys, one coordinator process per key, and a
+`DynamicSupervisor` holding them. Twenty simultaneous requests for the same
+variant run one ffmpeg, not twenty.
+
+Subscribing and starting are the same operation, which is what makes the start
+race a non-event. `DynamicSupervisor.start_child/2` either succeeds — this
+caller started the render, and is `MISS` — or answers `{:error, {:already_started,
+pid}}`, which is `COALESCED` and a join. Nobody has to check whether a render
+exists before deciding to start one.
+
+The coordinator broadcasts the consumer contract above, with itself as the
+handle, so a consumer written against the render works against the coordinator
+unchanged. Two calls differ, because they name a handle:
+
+| Render | Coordinator | Why |
+|---|---|---|
+| `ack/2` | — | the coordinator retains the bytes and acknowledges for you |
+| `cancel/1` | `unsubscribe/1` | one subscriber leaving must not cancel a render the others are reading |
+
+**Late joiners are handed a backlog.** Everything produced so far, in order,
+returned by the same call that registers the subscriber — one coordinator
+callback, so there is no window in which a chunk could be both broadcast and
+backlogged, or neither. The consumer writes the backlog, then the live chunks.
+
+**Retention is the memory bound.** The bytes are held anyway (the variant-cache
+slice tees the same ones to storage), so what stops a render growing without
+limit is a cap: output past `AP_MAX_SRC_BYTES` fails the render for every
+subscriber. That is a source-size limit doing double duty, which is honest for
+preview-sized outputs and is the reason the FIFO escalation above is written
+down — spooling instead of retaining changes nothing in the contract.
+
+Three ways a coordinator ends, differing in what happens to the key:
+
+- **Done** — the completion is broadcast, then it lingers about a second, still
+  registered, so a request that arrives just too late gets the finished bytes
+  instead of re-rendering. A straggler past the linger starts a fresh render:
+  wasteful, never wrong.
+- **Failure** — broadcast to every current subscriber, then the key is
+  unregistered *immediately*, so the next request retries rather than attaching
+  to a corpse.
+- **Last subscriber gone** — nobody is listening, so the subprocess is
+  cancelled. `unsubscribe/1` returns only once that has happened, which makes
+  it a barrier the way `cancel/1` is. One subscriber dying among several is
+  just a removal; the render continues.
+
+`AP_MAX_CONCURRENCY` is not enforced here yet — the semaphore slice acquires a
+slot before the coordinator spawns its pipeline and releases it on terminate,
+so the slot's lifetime is the subprocess' lifetime and queue waiting happens
+before deduplicated work starts. Coalescing already bounds the worst hot-key
+case; what is still uncapped is a burst across *distinct* keys.
+
 ## Delivery over HTTP
 
 The render endpoint (`AudioProxy.Plugs.RenderAction`) is a consumer of the
-contract above and nothing more: it spawns a render with itself as consumer,
-then loops on the mailbox, writing each chunk with `Plug.Conn.chunk/2` and
-acknowledging it. Acknowledging is not bookkeeping — forwarding stops above the
-high-water mark, so a loop that stopped acking would receive one buffer's worth
-of audio and then silence, `{:done, _, _}` included.
-
-The spawn is deliberately a single call site. Coalescing replaces exactly that
-call with a subscription to a shared render; the message contract is the same,
-so the loop does not change.
+contract above and nothing more: it subscribes to the coordinator for its cache
+key, writes the catch-up backlog if it was handed one, then loops on the mailbox
+writing each chunk with `Plug.Conn.chunk/2`. It reports which it was in
+`X-Audio-Proxy`: `MISS` for the request that started the render, `COALESCED` for
+one that attached to it.
 
 **Before and after the first byte are different worlds.** Before it, nothing has
 been sent and a failure is an ordinary JSON error: the class maps to 404, 415,
@@ -182,9 +240,11 @@ chunked stream". A client that treats a truncated chunked response as a
 complete file will believe a failed render succeeded.
 
 **Disconnect is detected by writing.** `chunk/2` answering `{:error, _}` means
-the socket is gone, and the render is cancelled on the spot. That is not the
-only guarantee — the render monitors its consumer and kills the subprocess when
-it dies — but it is the prompt one. It costs a caveat: detection happens on the
+the socket is gone, and the request unsubscribes on the spot; whether the render
+stops is the coordinator's call, since another client may still be reading the
+same variant. That is not the only guarantee — the coordinator monitors its
+subscribers and the render monitors its consumer — but it is the prompt one. It
+costs a caveat: detection happens on the
 *next* chunk, so teardown is bounded by chunk cadence rather than by wall clock.
 For an encoder producing output continuously that is milliseconds; for one
 stalled on a slow input it is the render timeout, which is the same bound that

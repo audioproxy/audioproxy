@@ -31,8 +31,13 @@ defmodule AudioProxy.Application do
     end
 
     # Renders before the listener: a request that arrives on the first accepted
-    # connection must find somewhere to start a subprocess.
-    children = [AudioProxy.Ffmpeg.RenderSupervisor] ++ listener(config)
+    # connection must find somewhere to start a subprocess. The coalescing
+    # registry and its supervisor sit between them, because a coordinator
+    # spawns a render in `init/1` and must therefore stop before the thing it
+    # spawns into — which reverse-order shutdown gives for free.
+    children =
+      [AudioProxy.Ffmpeg.RenderSupervisor] ++
+        AudioProxy.RenderCoordinator.children() ++ listener(config)
 
     Logger.info("audio_proxy #{vsn()} starting (serve_mode: #{config.serve_mode})")
 

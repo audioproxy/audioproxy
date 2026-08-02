@@ -15,6 +15,7 @@ defmodule AudioProxy.RenderEndpointTest do
 
   use ExUnit.Case, async: false
 
+  import AudioProxy.CoalesceHelper
   import AudioProxy.ConfigHelper
   import Plug.Conn
   import Plug.Test
@@ -47,6 +48,10 @@ defmodule AudioProxy.RenderEndpointTest do
       local_root: tmp_dir,
       max_src_bytes: 2_000_000_000
     })
+
+    # Every request below is its own render unless the test says otherwise —
+    # see `AudioProxy.CoalesceHelper` for why that needs saying.
+    reset_coordinators()
 
     :ok
   end
@@ -195,6 +200,31 @@ defmodule AudioProxy.RenderEndpointTest do
       assert get_resp_header(conn, "etag") == [~s("#{key}")]
       assert get_resp_header(conn, "x-audio-proxy") == ["MISS"]
       assert get_resp_header(conn, "content-disposition") == []
+    end
+
+    test "a request that attaches to a running render is COALESCED, not MISS" do
+      rest = signed("/f:opus/br:96/plain/local://piece.wav")
+
+      first = render(rest)
+      # Sequential, and still coalesced: the coordinator stays registered
+      # briefly after finishing, so a request that arrives just too late to
+      # start the render gets its bytes instead of running ffmpeg again.
+      second = render(rest)
+
+      assert get_resp_header(first, "x-audio-proxy") == ["MISS"]
+      assert get_resp_header(second, "x-audio-proxy") == ["COALESCED"]
+
+      # The point of joining: the same bytes, not merely the same status.
+      assert second.resp_body == first.resp_body
+      assert get_resp_header(second, "etag") == get_resp_header(first, "etag")
+    end
+
+    test "a different variant of the same source is its own render" do
+      first = render(signed("/f:opus/br:96/plain/local://piece.wav"))
+      second = render(signed("/f:opus/br:128/plain/local://piece.wav"))
+
+      assert get_resp_header(first, "x-audio-proxy") == ["MISS"]
+      assert get_resp_header(second, "x-audio-proxy") == ["MISS"]
     end
 
     test "the ETag is the cache key, so option order cannot change it" do

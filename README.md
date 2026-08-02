@@ -6,7 +6,7 @@ Transcode audio on demand, from a URL.
 
 Point it at your audio and ask for a variant by URL: a 30-second preview, a mono file for speech-to-text, a normalised podcast MP3, a 24-bit FLAC excerpt. The options are in the path, so one master can serve all of them and you generate none of them in advance. If you know [imgproxy](https://imgproxy.net), this is that, for audio.
 
-> **Status: early, `v0.1.0`.** Transcoding works end to end from a mounted directory and you can try it in about a minute. Do not put it in front of production traffic yet: every request re-renders, because there is no variant cache, and nothing bounds how many renders run at once. See the [Roadmap](#roadmap).
+> **Status: early, `v0.1.0`.** Transcoding works end to end from a mounted directory and you can try it in about a minute. Do not put it in front of production traffic yet: nothing is kept once a render finishes, so a variant is encoded again for every request that does not overlap another, and nothing bounds how many renders run at once. See the [Roadmap](#roadmap).
 
 ## Quick start
 
@@ -100,13 +100,13 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 - Signed URLs, the full processing-options grammar, and the cache-key rules
 - Transcoding to MP3, AAC/M4A, Opus, Vorbis, FLAC and WAV, with trimming, fades, loudness normalisation, channel and sample-rate control
 - Renders stream while they encode, from files in a mounted directory
+- Concurrent requests for the same variant share one render, with mid-render joiners catching up from the start
 - A single container, published per release
 
 **Next: what makes it production-shaped**
 
-- **A variant cache.** Today every request re-renders. Rendered variants will be written back to a store and served from there on later requests, with `Range` support and byte-serving. Where they are stored is a separate choice from where sources come from: a local directory for a single node, object storage when you have more than one.
+- **A variant cache.** Requests that overlap already share a render, but nothing survives it, so the next one encodes the variant again. Rendered variants will be written back to a store and served from there on later requests, with `Range` support and byte-serving. Where they are stored is a separate choice from where sources come from: a local directory for a single node, object storage when you have more than one.
 - **Bounded concurrency.** A cap on simultaneous renders with a wait queue, so a burst of traffic queues instead of thrashing the machine.
-- **Deduplication.** Concurrent requests for the same variant will share one render rather than starting several.
 - **S3 sources**, so the audio itself can live in object storage.
 
 **After that**
@@ -249,11 +249,13 @@ x-audio-proxy: MISS
 
 The first bytes leave before ffmpeg has finished, so a long transcode starts playing immediately rather than after it completes. There is no `Content-Length` and no `Accept-Ranges` on this response: the length is not known when the head goes out, and ranges arrive with the variant cache, whose `HIT` redirects to storage that serves them natively.
 
-`x-audio-proxy: MISS` is currently on every response, because there is no cache to hit yet, so each request renders. `etag` is the variant's cache key, which is a pure function of the normalized options and the source, so the same variant requested with its options in a different order carries the same one.
+`x-audio-proxy` says where the bytes came from. `MISS` is this request's own render. `COALESCED` means another request was already rendering exactly this variant and this one attached to it: the same bytes, no second ffmpeg. `HIT` arrives with the variant cache, which does not exist yet, so today every response is one of the first two. `etag` is the variant's cache key, which is a pure function of the normalized options and the source, so the same variant requested with its options in a different order carries the same one.
 
-If the client goes away mid-stream, the render goes with it: closing the connection kills the ffmpeg process rather than leaving it encoding into a socket nobody is reading. A render that fails *before* any bytes are sent is one of the JSON errors below; one that fails after them can only be signalled by cutting the connection short, so treat a chunked response that ends without its terminating chunk as a failed download.
+Requests for the same variant share a render, so a burst — a page that loads the same preview for fifty visitors at once — costs one encode rather than fifty. A request arriving mid-render is sent everything encoded so far, then the rest as it comes, so it gets the whole file and not the tail. A shared render is held in memory for as long as it runs, and output past `AP_MAX_SRC_BYTES` fails rather than growing without limit — so that variable bounds variant size as well as source size.
 
-For what happens behind that (the subprocess, buffering, the timeout and the kill discipline) see [docs/rendering.md](docs/rendering.md).
+If the client goes away mid-stream, the render goes with it, unless someone else is still listening to the same one: closing the last connection kills the ffmpeg process rather than leaving it encoding into a socket nobody is reading. A render that fails *before* any bytes are sent is one of the JSON errors below; one that fails after them can only be signalled by cutting the connection short, so treat a chunked response that ends without its terminating chunk as a failed download.
+
+For what happens behind that (the subprocess, coalescing, buffering, the timeout and the kill discipline) see [docs/rendering.md](docs/rendering.md).
 
 ## Processing options
 
@@ -384,7 +386,7 @@ Note that the variables below are the full configuration surface for the design,
 | `AP_VARIANT_BUCKET` | string | unset | Write-back target; unset = always render |
 | `AP_MAX_CONCURRENCY` | positive integer | schedulers online | Max simultaneous ffmpeg processes |
 | `AP_QUEUE_SIZE` | non-negative integer | `32` | Waiting renders before `429` |
-| `AP_MAX_SRC_BYTES` | positive integer | `2000000000` | Reject larger sources with `413` |
+| `AP_MAX_SRC_BYTES` | positive integer | `2000000000` | Reject larger sources with `413`; also caps the bytes a render may hold in memory |
 | `AP_RENDER_TIMEOUT` | positive integer | `300` | Seconds a render may take before ffmpeg is killed and the request answered `504`. Raise it for full-length transcodes of long masters; the default suits previews. See [docs/rendering.md](docs/rendering.md) |
 | `AP_SERVE_MODE` | `redirect` \| `proxy` | `redirect` | Serve cache hits by redirect or proxied |
 | `AP_LOG_LEVEL` | `debug` \| `info` \| `warning` \| `error` | `info` | Lowest level written to stdout. See [Logs](#logs) |
@@ -398,12 +400,15 @@ The listener port is read from `AP_PORT`, then `PORT`, then `4000`.
 Everything goes to stdout, one line per completed request:
 
 ```
-12:31:07.442 request_id=GMf5ECU8WG_tDMEAAAJC [info] render 200 opts=br:96/f:opus src=local://piece.wav 27141 bytes in 63.4ms
+12:31:07.442 request_id=GMf5ECU8WG_tDMEAAAJC [info] render 200 opts=br:96/f:opus src=local://piece.wav cache=MISS 27141 bytes in 63.4ms
+12:31:07.981 request_id=GMf5ECU9xK2sPQ1AAAJD [info] render 200 opts=br:96/f:opus src=local://piece.wav cache=COALESCED 27141 bytes in 2.8ms
 12:31:09.118 request_id=GMf5EGolMMyBOD4AAA7B [info] render 422 invalid_options 74 bytes in 0.3ms
-12:31:11.006 request_id=GMf5ECRh8raItPUAAAOl [warning] render 504 render_timeout opts=f:mp3 src=local://long.wav 72 bytes in 300004.7ms
+12:31:11.006 request_id=GMf5ECRh8raItPUAAAOl [warning] render 504 render_timeout opts=f:mp3 src=local://long.wav cache=MISS 72 bytes in 300004.7ms
 ```
 
-Reading one left to right: the endpoint (`render`, `health`, or `unknown` for a path that matched no route), the status, the error code from the [Errors](#errors) table when the request failed, the normalized options string and the canonical source once the proxy has got far enough to know them (a `401` knows neither and omits both), the bytes sent, and how long it took.
+Reading one left to right: the endpoint (`render`, `health`, or `unknown` for a path that matched no route), the status, the error code from the [Errors](#errors) table when the request failed, the normalized options string and the canonical source once the proxy has got far enough to know them (a `401` knows neither and omits both), whether the request rendered or shared one, the bytes sent, and how long it took.
+
+`cache=` is the field to read before drawing conclusions from a duration. The second line above delivered the same 27 kB as the first in a fortieth of the time because it attached to the render already running for that variant — not because ffmpeg was fast.
 
 `request_id` is on every line, and the same id comes back to the client in the `x-request-id` response header — so a report of "this URL was slow at 12:31" can be traced to the render behind it. Send your own `x-request-id` and it is used instead, which is what makes the log line up with a proxy or gateway in front.
 
@@ -436,5 +441,5 @@ Elixir with Plug and [Bandit](https://github.com/mtrudel/bandit), and no Phoenix
 | [examples/](examples) | A one-file browser player for trying variants, and why it has to be served rather than opened |
 | [VERSIONS.md](VERSIONS.md) | What the image is built from: Debian, Elixir/OTP and ffmpeg pins, why not Alpine, and how to bump one |
 | [docs/ffmpeg-arguments.md](docs/ffmpeg-arguments.md) | How options become ffmpeg arguments: filter order, per-format flags, known gaps |
-| [docs/rendering.md](docs/rendering.md) | How a render runs: the subprocess, the chunk stream, buffering and lifecycle guarantees |
+| [docs/rendering.md](docs/rendering.md) | How a render runs: the subprocess, the chunk stream, coalescing, buffering and lifecycle guarantees |
 | `openspec/specs/` | Capability specs for what is built; `openspec/changes/` holds what is planned |
