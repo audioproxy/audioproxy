@@ -1,6 +1,8 @@
 ## Context
 
-Header-level work throughout — no new processes, no deps, all `Plug.Test`-able. The organizing principle: state intent explicitly on every response class, because CDN defaults are where Cloudflare, CloudFront, and Fastly differ most; explicitness is what makes behavior portable across them.
+Header-level work throughout — no new processes, no deps, all `Plug.Test`-able. The organizing principle: state intent explicitly on every response class, rather than inherit a default nobody chose.
+
+The default in question is `Plug.Conn`'s, not a CDN's: every response this app has ever sent already carried `cache-control: max-age=0, private, must-revalidate` unless it said otherwise (`deps/plug/lib/plug/conn.ex`). That is worth stating plainly because it inverts the obvious framing — the edge was never guessing, it was being told "cache nothing, and never share it". Every TTL below is therefore a relaxation with a justification, and `private` is being dropped deliberately: error bodies here are pure functions of the URL with no per-user content, which is what makes shared caching sound.
 
 ## Goals / Non-Goals
 
@@ -24,6 +26,6 @@ Header-level work throughout — no new processes, no deps, all `Plug.Test`-able
 
 ## Risks / Trade-offs
 
-- [60 s cached 401s can mask a just-fixed signature during key rotation] → bounded and rare; rotation is a deploy-scale event, and 60 s is far below CDN default negative TTLs it replaces.
+- [60 s cached 401s can mask a just-fixed signature during key rotation] → bounded and rare; rotation is a deploy-scale event. Note this is a genuine new exposure rather than a shortened TTL: it replaces `private, max-age=0`, so a 401 becomes shareable at the edge where before it was not cacheable at all. Accepted because the blast radius is one URL — a rotated key changes the signature, so the *new* URL is a different cache entry and is unaffected; only clients replaying the pre-rotation URL see the stale 401, and they would have got one anyway.
 - [HEAD runs a stat per request — cheap but nonzero] → identical cost profile to GET's check chain; no new amplification surface (signature still gates).
 - [304 depends on ETag stability across releases] → ETag = cache key, whose stability is already load-bearing for the entire variant store; nothing new rests on it.

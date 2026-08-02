@@ -34,9 +34,16 @@ defmodule AudioProxy.ErrorJSON do
 
   ## Every error declares its cacheability
 
-  `halt_with/2` also sets a `Cache-Control` derived from the status, so no
-  CDN negative-caching default — where Cloudflare, CloudFront, and Fastly
-  differ most — ever decides how long an error sticks:
+  `halt_with/2` also sets a `Cache-Control` derived from the status, replacing
+  a framework default with a stated policy.
+
+  The default it replaces is `Plug.Conn`'s: a response that sets no
+  `cache-control` still sends `max-age=0, private, must-revalidate`. So this
+  is not filling a silence — it is a deliberate *relaxation*, dropping
+  `private` so the edge may share an error and trading `max-age=0` for a short
+  per-class TTL so a repeated failure costs the origin once rather than every
+  time. Sound here because an error body is a pure function of the URL: no
+  cookies, no auth headers, nothing per-user to leak into a shared cache.
 
       404, 413, 415   max-age=10   verdicts about the current source bytes;
                                    a re-upload changes them, and 10 s is the

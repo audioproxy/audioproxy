@@ -259,7 +259,7 @@ For what happens behind that (the subprocess, coalescing, buffering, the timeout
 
 ## Caching and CDNs
 
-The proxy is built to sit behind a CDN without special configuration on either side: the URL names the variant completely, the `ETag` is the cache key, there are no cookies and no `Vary`, and changing `cb` busts every tier at once. Every response states how long it may be held, so no CDN negative-caching default — where Cloudflare, CloudFront, and Fastly differ most — ever decides retention:
+The proxy is built to sit behind a CDN without special configuration on either side: the URL names the variant completely, the `ETag` is the cache key, there are no cookies and no `Vary`, and changing `cb` busts every tier at once. Every response states how long it may be held rather than inheriting a framework default:
 
 | Response | `Cache-Control` | Why |
 |---|---|---|
@@ -269,6 +269,8 @@ The proxy is built to sit behind a CDN without special configuration on either s
 | `401`, `422` | `max-age=60` | Pure functions of the URL: a bad signature never becomes good, invalid options never become valid — only a deploy changes that |
 | `429`, `500`, `504` | `no-store` | Transient — caching a transient failure amplifies it (`429` carries `Retry-After`) |
 | `/health` | `no-store` | Liveness is only worth anything fresh |
+
+The error rows are a deliberate relaxation, worth knowing if you operate a shared cache: without them every response would carry Plug's `max-age=0, private, must-revalidate`, so errors were previously not cacheable at all and never shareable. Dropping `private` is safe here because an error body is a pure function of the URL — no cookies, no auth headers, nothing per-user in it. The practical effect is that a hot 404 or a bad-signature storm is absorbed at the edge instead of reaching the origin every time. If you need the old behavior for a specific deployment, an edge rule overriding `Cache-Control` on 4xx is the place to do it; the proxy has no knob for it by design.
 
 Three behaviors round out the CDN-facing surface:
 
