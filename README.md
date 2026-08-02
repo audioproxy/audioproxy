@@ -117,6 +117,10 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 - A Prometheus `/metrics` endpoint reporting queue depth, render durations and hit ratio
 - arm64 images, so Graviton/Ampere and Apple Silicon run natively
 
+**Under consideration**
+
+- **Seeking on a first play.** The cache makes every request after the first one seekable; the first still streams, so its scrubber stays dead. A client could instead ask to wait for the whole render and get something range-capable, trading time-to-first-byte for a working scrubber. Whether that earns its place depends on whether first-play seeking matters to a real player, since warming the cache with one throwaway request costs nothing to build. Proposed, not promised.
+
 **Deliberately not planned**
 
 - **Video.** This is an audio proxy and will refuse video input rather than become a general ffmpeg gateway; video transcoding is far more expensive and carries most of ffmpeg's CVE history.
