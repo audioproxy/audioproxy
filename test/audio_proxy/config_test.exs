@@ -21,6 +21,7 @@ defmodule AudioProxy.ConfigTest do
                max_src_bytes: 2_000_000_000,
                render_timeout: 300,
                serve_mode: :redirect,
+               presign_ttl: 300,
                log_level: :info
              }
     end
@@ -41,13 +42,15 @@ defmodule AudioProxy.ConfigTest do
           "AP_QUEUE_SIZE" => "32",
           "AP_MAX_CONCURRENCY" => "4",
           "AP_MAX_SRC_BYTES" => "1048576",
-          "AP_RENDER_TIMEOUT" => "90"
+          "AP_RENDER_TIMEOUT" => "90",
+          "AP_PRESIGN_TTL" => "60"
         })
 
       assert config.queue_size == 32
       assert config.max_concurrency == 4
       assert config.max_src_bytes == 1_048_576
       assert config.render_timeout == 90
+      assert config.presign_ttl == 60
     end
 
     test "AP_QUEUE_SIZE accepts zero (no waiting, straight to 429)" do
@@ -305,7 +308,8 @@ defmodule AudioProxy.ConfigTest do
       assert error.message =~ "AP_ALLOW_INSECURE"
     end
 
-    for var <- ~w(AP_MAX_CONCURRENCY AP_MAX_SRC_BYTES AP_RENDER_TIMEOUT AP_PORT PORT) do
+    for var <-
+          ~w(AP_MAX_CONCURRENCY AP_MAX_SRC_BYTES AP_RENDER_TIMEOUT AP_PRESIGN_TTL AP_PORT PORT) do
       test "#{var} must be a positive integer" do
         for value <- ~w(0 -1 abc 1.5 12kb) do
           error = assert_raise Error, fn -> Config.build!(%{unquote(var) => value}) end
