@@ -24,6 +24,13 @@ defmodule AudioProxy.Application do
     Logger.configure(level: config.log_level)
     AudioProxy.LogHandler.attach()
 
+    # Staging left behind by a write that was killed outright would otherwise
+    # accumulate forever. Before the tree starts, nothing can be staging.
+    case config.variant_store do
+      {:file, root} -> AudioProxy.VariantStore.Local.sweep_staging(root)
+      nil -> :ok
+    end
+
     if config.allow_insecure do
       Logger.warning(
         "AP_ALLOW_INSECURE is enabled — /insecure/ URLs bypass signature verification; never enable in production"
@@ -34,13 +41,19 @@ defmodule AudioProxy.Application do
     # connection must find somewhere to start a subprocess. The coalescing
     # registry and its supervisor sit between them, because a coordinator
     # spawns a render in `init/1` and must therefore stop before the thing it
-    # spawns into — which reverse-order shutdown gives for free.
+    # spawns into — which reverse-order shutdown gives for free. The tee
+    # supervisor sits first for the same reason: coordinators spawn tees too,
+    # and a coordinator stopping is what tells its tee to abort.
     #
-    # The semaphore is first for the same reason read the other way: a
-    # coordinator releases its slot from `terminate/2`, so the thing it releases
-    # into has to outlive it.
+    # The semaphore is ahead of both, for that reason read the other way round:
+    # a coordinator releases its slot from `terminate/2`, so the thing it
+    # releases into has to still be there when the last coordinator stops.
     children =
-      [AudioProxy.Semaphore, AudioProxy.Ffmpeg.RenderSupervisor] ++
+      [
+        AudioProxy.Semaphore,
+        AudioProxy.VariantStore.Tee.supervisor(),
+        AudioProxy.Ffmpeg.RenderSupervisor
+      ] ++
         AudioProxy.RenderCoordinator.children() ++ listener(config)
 
     Logger.info("audio_proxy #{vsn()} starting (serve_mode: #{config.serve_mode})")

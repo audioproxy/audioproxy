@@ -106,7 +106,7 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 
 **Next: what makes it production-shaped**
 
-- **A variant cache.** Requests that overlap already share a render, but nothing survives it, so the next one encodes the variant again. Rendered variants will be written back to a store and served from there on later requests, with `Range` support and byte-serving. Where they are stored is a separate choice from where sources come from: a local directory for a single node, object storage when you have more than one.
+- **A variant cache.** The write-back half exists: completed renders persist to a configurable store (a local directory today, object storage when the S3 backend lands), atomically and with the headers they were served with. What remains is serving from it — cache hits answered from the store, with `Range` support and byte-serving, instead of rendering again.
 - **S3 sources**, so the audio itself can live in object storage.
 
 **After that**
@@ -242,7 +242,7 @@ curl -D - -o preview.mp3 "localhost:4000/$SIG$REST"
 HTTP/1.1 200 OK
 transfer-encoding: chunked
 content-type: audio/mpeg
-cache-control: public, max-age=31536000, immutable
+cache-control: public, max-age=31536000, immutable, no-transform
 etag: "6f1c…"
 x-audio-proxy: MISS
 ```
@@ -353,7 +353,24 @@ Unset `AP_LOCAL_ROOT` and local sources are refused outright: the root is the wh
 
 [docs/sources.md](docs/sources.md#local-sources) has the confinement rules, the path limits, and why the root never appears in a cache key.
 
-**`s3://` and `https://` sources are not built yet**. Each is its own slice, with its own rule for what it will serve, and until they land those schemes are refused as unknown. See [docs/sources.md](docs/sources.md) for the contract they plug into and `openspec/changes/` for which slice adds which.
+### `s3://` and `https://`: remote sources
+
+`s3://{bucket}/{key}` names an object in a bucket; `https://{host}/{path}` names a URL at an origin. Both need `AP_SOURCE_ALLOWLIST` to say which namespaces you serve:
+
+| Entry | Matches |
+|---|---|
+| `masters` | Exactly that bucket (case-sensitive) or host (case-folded) |
+| `previews-*` | Buckets beginning `previews-` |
+| `*.media.example` | `media.example` and any subdomain of it |
+| `*` | Everything |
+
+The wildcards are asymmetric on purpose. A bucket namespace is yours, so a prefix glob gives nothing away; a host namespace is anyone's, so hosts take the mirror image, anchored to a label boundary — `*.media.example` accepts `cdn.media.example` and refuses `media.example.evil.com`. There is deliberately no host *prefix* glob: `cdn.*` reads as "our CDN" but would mean any host starting `cdn.`, `cdn.evil.com` included, so it matches nothing at all.
+
+**Leave `AP_SOURCE_ALLOWLIST` unset and HTTPS sources are refused outright**, while S3 sources are accepted — your bucket credentials are already the gate there, and a URL has no such backstop. An allowlisted host is trusted by definition: the proxy will fetch what it is pointed at, so point it at origins you control.
+
+`http://` and URLs carrying credentials (`https://user:pass@…`) are refused whatever the allowlist says.
+
+**Neither form can be rendered yet.** Both parse, canonicalize and authorize, but their storage backends are separate slices (`add-s3-client`, `add-https-source-backend`); until those land a remote source answers `404`. See [docs/sources.md](docs/sources.md#remote-sources) for the URL normalization rules, the limits, and the full allowlist grammar.
 
 ## Errors
 
@@ -383,9 +400,9 @@ Note that the variables below are the full configuration surface for the design,
 | `AP_KEY` | hex, ≥ 32 bytes decoded | unset | HMAC key for URL signatures |
 | `AP_SALT` | hex | unset | HMAC salt |
 | `AP_ALLOW_INSECURE` | boolean | `false` | Accept unsigned URLs (dev only) |
-| `AP_SOURCE_ALLOWLIST` | comma-separated | empty | Permitted source buckets/hosts (used once remote source types land) |
+| `AP_SOURCE_ALLOWLIST` | comma-separated | empty | Permitted buckets and hosts for `s3://` and `https://` sources. Empty accepts every bucket and refuses every host — see [Sources](#s3-and-https-remote-sources) |
 | `AP_LOCAL_ROOT` | existing directory | unset | Root for `local://` sources; unset disables them. Must exist at boot, and may not be `/` |
-| `AP_VARIANT_BUCKET` | string | unset | Write-back target; unset = always render |
+| `AP_VARIANT_STORE` | URL (`file:///path`) | unset | Where rendered variants are written back; unset = no cache, always render. See [Variant store](#variant-store) |
 | `AP_MAX_CONCURRENCY` | positive integer | schedulers online | Max simultaneous ffmpeg processes. Requests that share a render share its slot, so this counts encodes, not connections |
 | `AP_QUEUE_SIZE` | non-negative integer | `32` | Requests that may wait for a slot before the next one is answered `429` with `Retry-After`. `0` means no waiting at all |
 | `AP_MAX_SRC_BYTES` | positive integer | `2000000000` | Reject larger sources with `413`; also caps the bytes a render may hold in memory |
@@ -396,6 +413,48 @@ Note that the variables below are the full configuration surface for the design,
 Booleans accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`, case-insensitively. An empty value counts as unset.
 
 The listener port is read from `AP_PORT`, then `PORT`, then `4000`.
+
+### Variant store
+
+Point `AP_VARIANT_STORE` at where completed renders should be kept:
+
+```bash
+AP_VARIANT_STORE=file:///var/cache/audio_proxy AP_SERVE_MODE=proxy …
+```
+
+The scheme picks the backend. `file://` stores variants in a local directory, which must exist and be writable at boot; `s3://` arrives with the S3 backend. Unset means no cache: every request renders.
+
+With a store configured, every successful render is written back under its cache key, together with the headers it was served with — atomically, so a failed or cancelled render leaves nothing behind. It also changes what a disconnect means: the render of a variant nobody is waiting for anymore is completed into the store rather than cancelled. Serving cache hits *from* the store is the next slice; until it lands, the store fills but requests still render.
+
+Two things about a `file://` store are yours to own:
+
+- **It is unbounded.** Nothing evicts, expires, or size-caps it; it grows until the disk is full. Manage it like any cache directory you operate — a dedicated volume, disk alerts, a sweep of your choosing.
+- **It should live on a volume.** A store on the container's writable layer disappears with the container, taking every cached variant with it.
+
+A `file://` store is also per-node: two nodes with separate directories each render a variant once. That is the intended trade — shared caches are what `s3://` is for.
+
+`AP_SERVE_MODE=redirect` (the default) serves cache hits as a redirect to a presigned URL, which is a capability of the store's backend — a `file://` store has no URLs to sign, so `redirect` against it is refused at boot, naming both variables. Use `AP_SERVE_MODE=proxy` with a `file://` store.
+
+## Caching and CDNs
+
+The proxy is built to sit behind a CDN without special configuration on either side: the URL names the variant completely, the `ETag` is the cache key, there are no cookies and no `Vary`, and changing `cb` busts every tier at once. Every response states how long it may be held rather than inheriting a framework default:
+
+| Response | `Cache-Control` | Why |
+|---|---|---|
+| `200` media / peaks | `public, max-age=31536000, immutable, no-transform` | The URL encodes the variant, so it *is* immutable; `no-transform` keeps edge features from recompressing or mangling the bytes |
+| `404` | `max-age=10` | Sources appear — a file uploaded moments after the miss is served within seconds |
+| `413`, `415` | `max-age=10` | Verdicts about the current source bytes, which a re-upload changes |
+| `401`, `422` | `max-age=60` | Pure functions of the URL: a bad signature never becomes good, invalid options never become valid — only a deploy changes that |
+| `429`, `500`, `504` | `no-store` | Transient — caching a transient failure amplifies it (`429` carries `Retry-After`) |
+| `/health` | `no-store` | Liveness is only worth anything fresh |
+
+The error rows are a deliberate relaxation, worth knowing if you operate a shared cache: without them every response would carry Plug's `max-age=0, private, must-revalidate`, so errors were previously not cacheable at all and never shareable. Dropping `private` is safe here because an error body is a pure function of the URL — no cookies, no auth headers, nothing per-user in it. The practical effect is that a hot 404 or a bad-signature storm is absorbed at the edge instead of reaching the origin every time. If you need the old behavior for a specific deployment, an edge rule overriding `Cache-Control` on 4xx is the place to do it; the proxy has no knob for it by design.
+
+Three behaviors round out the CDN-facing surface:
+
+- **Revalidation costs no render.** A request whose `If-None-Match` matches the variant's `ETag` answers `304` before the proxy touches storage or spawns anything — the ETag derives from the URL alone. The signature still gates: an unsigned request is `401`, matching validator or not.
+- **HEAD works.** `HEAD` on a signed URL runs every check a `GET` runs — signature, options, source authorization and stat — with an empty body and no render. Errors answer as `GET` does, bodiless. `HEAD /health` works too. One caveat if you use it to validate URLs: because it does not decode, it cannot report a source ffmpeg would reject, so a `HEAD` can answer `200` where the `GET` answers `415`. Everything decidable without decoding (`401`, `404`, `413`, `422`) matches the `GET` exactly.
+- **`Range` on an uncached variant is ignored.** A `Range` header on a variant that has to be rendered gets the full `200` chunked stream (RFC 9110 permits this), with no `Accept-Ranges` and no `206`. Range serving belongs to cached variants: once the variant cache lands, a `HIT` redirects to storage, which serves `206` natively — that discipline arrives with that slice.
 
 ## Logs
 

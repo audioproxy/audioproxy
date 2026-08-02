@@ -19,6 +19,31 @@ defmodule AudioProxy.Plugs.RenderAction do
   ffmpeg blocks forever on a read that never completes, holding a render slot
   until the timeout.
 
+  ## Two requests that never render
+
+  An `If-None-Match` matching the URL-derived `ETag` answers `304` before the
+  stat — the ETag is the cache key, a pure function of the URL, so
+  revalidation is pure computation. And a HEAD runs the full check chain
+  including the stat but ends bodiless after it, with no subprocess. Both sit
+  after the signature plug by pipeline order, so neither is an existence
+  oracle for unsigned probes.
+
+  Two consequences worth stating, because both look like bugs and are not:
+
+  A HEAD answers the status the *check chain* can determine, which is not
+  always the status a GET answers. 415 is diagnosed by ffmpeg while decoding,
+  so a HEAD on an undecodable source answers 200 where the GET answers 415 —
+  and it cannot do better without rendering, which is the entire point of
+  HEAD. The same holds for 500 and 504. Everything the chain *can* know —
+  401, 404, 413, 422 — is identical to the GET.
+
+  And the 304 outranks the stat, so a revalidation for a variant whose source
+  has since been deleted answers 304, not 404. That is deliberate: the ETag
+  names immutable variant bytes, and a cache still holding them is not wrong
+  to keep them. Moving the check after the stat would buy a more "honest" 404
+  at the cost of a stat on every revalidation — the cost this path exists to
+  avoid.
+
   ## Coalescing, from this side
 
   Subscribing hands back a status and a backlog. `:miss` means this request
@@ -108,7 +133,9 @@ defmodule AudioProxy.Plugs.RenderAction do
   alias AudioProxy.Ffmpeg.Command
 
   # §5: the URL encodes the variant, so a rendered variant is immutable.
-  @cache_control "public, max-age=31536000, immutable"
+  # `no-transform` because the bytes are the product — audio bodies and binary
+  # peaks must survive edge features that recompress or otherwise mangle them.
+  @cache_control "public, max-age=31536000, immutable, no-transform"
 
   # Added to the configured render timeout for the mailbox deadline. See the
   # moduledoc: the pipeline's timer should always fire first, and this margin
@@ -144,6 +171,33 @@ defmodule AudioProxy.Plugs.RenderAction do
     conn =
       assign(conn, :cache_key, CacheKey.derive!(conn.assigns.options, Source.canonical(source)))
 
+    # The ETag is a pure function of the URL, so a matching If-None-Match can
+    # be answered before any storage access: a CDN revalidating an evicted
+    # object costs microseconds, not an ffmpeg spawn. Deliberately *after* the
+    # signature plug — a 304/200 oracle for unsigned probes would leak which
+    # variants exist — which the pipeline's ordering already guarantees.
+    if revalidated?(conn) do
+      not_modified(conn)
+    else
+      respond(conn, source, opts)
+    end
+  end
+
+  # HEAD runs every check the chain can run, including stat — a HEAD that lies
+  # about 404s is worse than none — and skips only the spawn, along with the
+  # statuses only a render can discover (see the moduledoc: 415, 500, 504). No
+  # `X-Audio-Proxy`: that header reports what *this response's* render did, and
+  # none ran.
+  defp respond(%Plug.Conn{method: "HEAD"} = conn, source, _opts) do
+    with {:ok, stat} <- Source.stat(source),
+         :ok <- within_limit(stat.size) do
+      conn |> describe() |> send_resp(200, "") |> halt()
+    else
+      {:error, reason} -> ErrorJSON.halt_with(conn, reason)
+    end
+  end
+
+  defp respond(conn, source, opts) do
     with {:ok, stat} <- Source.stat(source),
          :ok <- within_limit(stat.size),
          {:ok, input} <- Source.ffmpeg_input(source),
@@ -197,7 +251,18 @@ defmodule AudioProxy.Plugs.RenderAction do
   end
 
   defp subscribe(conn, input, opts) do
-    spec = [args: Command.build(conn.assigns.options, input)] ++ Keyword.take(opts, [:executable])
+    # What the write-back stores alongside the bytes: the headers `begin/1`
+    # sends, so a store-direct fetch serves the variant the way this response
+    # would have. Built here because only this module knows them.
+    metadata = %{
+      content_type: Command.content_type(conn.assigns.options),
+      cache_control: @cache_control,
+      etag: ~s("#{conn.assigns.cache_key}")
+    }
+
+    spec =
+      [args: Command.build(conn.assigns.options, input), metadata: metadata] ++
+        Keyword.take(opts, [:executable])
 
     case RenderCoordinator.subscribe(conn.assigns.cache_key, spec) do
       {:ok, status, render, backlog} ->
@@ -387,9 +452,47 @@ defmodule AudioProxy.Plugs.RenderAction do
     end
   end
 
+  ## Conditional requests
+
+  # RFC 9110 §13.1.2's weak comparison: the header may carry a list, and a
+  # `W/` prefix marks weakness without changing the opaque tag it marks. `*`
+  # is deliberately not matched — answering it needs to know the variant
+  # exists, which is exactly the storage access this path exists to skip.
+  defp revalidated?(conn) do
+    etag = etag(conn)
+
+    conn
+    |> get_req_header("if-none-match")
+    |> Enum.flat_map(&String.split(&1, ","))
+    |> Enum.map(&String.trim/1)
+    |> Enum.any?(fn candidate -> strip_weak(candidate) == etag end)
+  end
+
+  defp strip_weak("W/" <> tag), do: tag
+  defp strip_weak(tag), do: tag
+
+  # ETag and Cache-Control travel with the 304 so the revalidating cache can
+  # refresh its own metadata; a body would be a protocol error.
+  defp not_modified(conn) do
+    conn
+    |> put_resp_header("cache-control", @cache_control)
+    |> put_resp_header("etag", etag(conn))
+    |> send_resp(304, "")
+    |> halt()
+  end
+
   ## Response head
 
   defp begin(conn) do
+    conn
+    |> describe()
+    |> put_resp_header("x-audio-proxy", cache_status(conn))
+    |> send_chunked(200)
+  end
+
+  # The headers that describe the variant itself — everything a GET and a
+  # HEAD answer identically.
+  defp describe(conn) do
     options = conn.assigns.options
 
     conn
@@ -397,11 +500,11 @@ defmodule AudioProxy.Plugs.RenderAction do
     # `put_resp_content_type/2` would add one.
     |> put_resp_content_type(Command.content_type(options), nil)
     |> put_resp_header("cache-control", @cache_control)
-    |> put_resp_header("etag", ~s("#{conn.assigns.cache_key}"))
-    |> put_resp_header("x-audio-proxy", cache_status(conn))
+    |> put_resp_header("etag", etag(conn))
     |> download_header(options)
-    |> send_chunked(200)
   end
+
+  defp etag(conn), do: ~s("#{conn.assigns.cache_key}")
 
   # §5's two render statuses. `HIT` is not one of them: it is a 302 to storage
   # and never reaches this module, which is why the variant cache owns it.

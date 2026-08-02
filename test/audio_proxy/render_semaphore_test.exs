@@ -24,7 +24,7 @@ defmodule AudioProxy.RenderSemaphoreTest do
   import Plug.Conn
   import Plug.Test
 
-  alias AudioProxy.{RenderCoordinator, RenderHarness, Semaphore, Signature}
+  alias AudioProxy.{RenderCoordinator, RenderHarness, Semaphore, Signature, VariantStore}
   alias AudioProxy.Ffmpeg.RenderSupervisor
 
   @moduletag tmp_dir: "render_semaphore"
@@ -132,6 +132,62 @@ defmodule AudioProxy.RenderSemaphoreTest do
       assert joiner.status == :coalesced
       assert starter.bytes == @paced_bytes
       assert joiner.bytes == @paced_bytes
+    end
+  end
+
+  describe "the write-back tee and the queue" do
+    @metadata %{
+      content_type: "audio/mpeg",
+      cache_control: "public, max-age=31536000, immutable",
+      etag: ~s("deadbeef")
+    }
+
+    test "a render that queued still writes back once it gets its slot" do
+      put_config(%{max_concurrency: 1, queue_size: 4, variant_store: {:file, store_root()}})
+
+      blocker = start_subscriber(unique_key(), @forever)
+      wait_until(fn -> phase(blocker) == :rendering end)
+
+      key = store_key()
+      collector = Task.async(fn -> subscribe_and_collect(key, @paced, metadata: @metadata) end)
+
+      wait_until(fn -> registered(key) != nil end)
+      assert phase(registered(key)) == :queued
+
+      stop_subscriber(blocker)
+
+      assert Task.await(collector, @deadline).bytes == @paced_bytes
+
+      # The tee starts with the render rather than with the coordinator, so the
+      # thing to prove is that starting it late loses nothing: the store holds
+      # the whole stream, not the tail after the grant.
+      wait_until(fn -> stored(key) == @paced_bytes end)
+    end
+
+    test "a queued render every client abandoned stops instead of rendering for the cache" do
+      put_config(%{max_concurrency: 1, queue_size: 4, variant_store: {:file, store_root()}})
+
+      blocker = start_subscriber(unique_key(), @forever)
+      wait_until(fn -> phase(blocker) == :rendering end)
+
+      key = store_key()
+      client = start_subscriber(key, @paced, metadata: @metadata)
+      assert phase(client) == :queued
+
+      # With a store configured the tee is a subscriber, and it is what keeps a
+      # render alive after the last client leaves. While queued there is no tee
+      # yet, on purpose: a render nobody is waiting for must not hold its place
+      # in the queue and then spend a slot encoding for the cache alone — under
+      # exactly the contention that made it queue.
+      monitor = Process.monitor(client)
+      stop_subscriber(client)
+      assert_receive {:DOWN, ^monitor, :process, ^client, _reason}, @deadline
+
+      stop_subscriber(blocker)
+
+      # Nothing rendered, so nothing was stored, and the slot went nowhere.
+      refute stored?(key)
+      wait_until(fn -> match?(%{held: 0, queued: 0}, Semaphore.stats()) end)
     end
   end
 
@@ -257,18 +313,47 @@ defmodule AudioProxy.RenderSemaphoreTest do
 
   defp unique_key, do: "slot-#{System.unique_integer([:positive, :monotonic])}"
 
-  defp spec(directives), do: [args: directives, executable: RenderHarness.fake_cmd()]
+  defp spec(directives, opts) do
+    [args: directives, executable: RenderHarness.fake_cmd()] ++ Keyword.take(opts, [:metadata])
+  end
 
-  defp subscribe(key, directives), do: RenderCoordinator.subscribe(key, spec(directives))
+  defp subscribe(key, directives, opts \\ []) do
+    RenderCoordinator.subscribe(key, spec(directives, opts))
+  end
+
+  # The store keys on the cache key, and `VariantStore.Local` expects the hex
+  # shape `CacheKey.derive!/2` produces rather than this file's readable ones.
+  defp store_key do
+    :sha256
+    |> :crypto.hash("slot-#{System.unique_integer([:positive, :monotonic])}")
+    |> Base.encode16(case: :lower)
+  end
+
+  defp store_root do
+    root = Path.join(System.tmp_dir!(), "slot-store-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(root)
+    on_exit(fn -> File.rm_rf(root) end)
+
+    root
+  end
+
+  defp stored(key) do
+    case VariantStore.get_stream(key, nil) do
+      {:ok, stream} -> stream |> Enum.to_list() |> IO.iodata_to_binary()
+      _other -> nil
+    end
+  end
+
+  defp stored?(key), do: stored(key) != nil
 
   # A subscriber that exists and does nothing else, so the render it started
   # stays up until this test says otherwise. Returns the coordinator.
-  defp start_subscriber(key, directives) do
+  defp start_subscriber(key, directives, opts \\ []) do
     test = self()
 
     pid =
       spawn(fn ->
-        {:ok, _status, render, _backlog} = subscribe(key, directives)
+        {:ok, _status, render, _backlog} = subscribe(key, directives, opts)
         send(test, {:subscribed, self(), render})
         Process.sleep(:infinity)
       end)
@@ -312,8 +397,8 @@ defmodule AudioProxy.RenderSemaphoreTest do
     pid
   end
 
-  defp subscribe_and_collect(key, directives) do
-    {:ok, status, render, backlog} = subscribe(key, directives)
+  defp subscribe_and_collect(key, directives, opts \\ []) do
+    {:ok, status, render, backlog} = subscribe(key, directives, opts)
 
     collect(render, %{status: status, chunks: Enum.reverse(backlog), outcome: nil, bytes: nil})
   end

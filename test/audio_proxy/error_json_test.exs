@@ -109,4 +109,44 @@ defmodule AudioProxy.ErrorJSONTest do
       assert get_resp_header(conn, "retry-after") == ["3"]
     end
   end
+
+  describe "every error declares its cacheability" do
+    # One end-to-end pass over every row `render/1` has: the sent response
+    # carries exactly the Cache-Control the moduledoc table documents, so no
+    # CDN negative-caching default ever decides retention.
+    @rows [
+      {:invalid_signature, "max-age=60"},
+      {OptionError.new("f:bogus", :invalid_value), "max-age=60"},
+      {:source_too_large, "max-age=10"},
+      {:undecodable_source, "max-age=10"},
+      {{:queue_full, 3}, "no-store"},
+      {:render_failed, "no-store"},
+      {:render_timeout, "no-store"}
+    ]
+
+    test "each row's response carries its documented Cache-Control" do
+      for {error, expected} <- @rows do
+        conn = conn(:get, "/") |> ErrorJSON.halt_with(error)
+
+        assert get_resp_header(conn, "cache-control") == [expected],
+               "expected #{inspect(error)} (#{conn.status}) to carry #{inspect(expected)}"
+      end
+    end
+
+    test "every source failure carries the 404 row's max-age=10" do
+      for reason <- @source_not_found do
+        conn = conn(:get, "/") |> ErrorJSON.halt_with(reason)
+
+        assert conn.status == 404
+        assert get_resp_header(conn, "cache-control") == ["max-age=10"]
+      end
+    end
+
+    test "cache_control/1 has no default row" do
+      # An unlisted status is a programmer error, same philosophy as
+      # `render/1`: crash the slice that introduced it, never answer a
+      # plausible retention policy in production.
+      assert_raise FunctionClauseError, fn -> ErrorJSON.cache_control(418) end
+    end
+  end
 end

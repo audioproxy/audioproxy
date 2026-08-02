@@ -14,13 +14,21 @@ defmodule AudioProxy.SourceTest do
   defp parse(segment), do: Source.parse(segment, @types)
 
   describe "registered types" do
-    test "local is the one that ships so far" do
-      assert Source.types() == [AudioProxy.Source.Local]
+    test "the three that ship so far" do
+      assert Source.types() == [
+               AudioProxy.Source.Local,
+               AudioProxy.Source.S3,
+               AudioProxy.Source.Https
+             ]
     end
 
     test "so a scheme no registered type claims is an unknown scheme" do
       assert Source.parse("plain/fake://body") == {:error, :unknown_scheme}
-      assert Source.parse(enc("s3://masters/a.wav")) == {:error, :unknown_scheme}
+      assert Source.parse(enc("ftp://media.example/a.wav")) == {:error, :unknown_scheme}
+
+      # `http://` is in that set deliberately: cleartext is refused at the
+      # grammar rather than left to an allowlist. See `AudioProxy.Source.Https`.
+      assert Source.parse("plain/http://media.example/a.wav") == {:error, :unknown_scheme}
     end
   end
 

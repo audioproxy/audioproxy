@@ -14,6 +14,11 @@
 - [ ] 3.1 MinIO service in the devcontainer; `@tag :integration` suite: presigned GET fetchable, expiry rejected, HEAD, multipart round-trip byte-equality
 - [ ] 3.2 Wire `:integration` tag exclusion into default `mix test`, inclusion in CI job with MinIO
 
-## 4. Docs
+## 4. Variant-store backend (moved from add-variant-cache)
 
-- [ ] 4.1 Update README + CLAUDE.md open questions: decision recorded (hand-rolled SigV4), AWS env vars, `AP_S3_ENDPOINT`, IAM-role limitation
+- [ ] 4.1 `VariantStore.S3`: `head/1`, multipart `put_stream/3` (metadata as object headers/metadata, abort on error), `get_stream/2`, `presign/2`, `capabilities/0` advertising redirect
+- [ ] 4.2 Backend parity suite: the variant-cache behaviour tests run against both backends — identical `Content-Type`, `ETag`, `Cache-Control` and range capability either way (the contract is the cache state, not the store)
+
+## 5. Docs
+
+- [ ] 5.1 Update README + CLAUDE.md open questions: decision recorded (hand-rolled SigV4), AWS env vars, `AP_S3_ENDPOINT`, IAM-role limitation

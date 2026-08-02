@@ -97,12 +97,35 @@ defmodule AudioProxy.RenderCoordinator do
 
   One subscriber dying never affects the others: it is removed and the render
   continues.
+
+  ## The write-back tee is a subscriber
+
+  When a variant store is configured and the spec carries `:metadata`, the
+  coordinator starts an `AudioProxy.VariantStore.Tee` and registers it like
+  any other subscriber — before the first chunk can exist, so the store
+  receives the whole stream. That one fact is the disconnect policy: with a
+  store, the last *client* leaving still leaves the tee counted, so the render
+  completes into the store and the next request is a HIT; without one, the
+  subscriber count reaches zero and the render is cancelled as before. A tee
+  that dies is forgotten like any subscriber — and if no client remains
+  either, the render is cancelled, because nothing is left that could profit
+  from it.
+
+  It starts with the *render*, not with the coordinator, which is only
+  visible while a slot is being waited for. A queued coordinator has no tee,
+  so a queued render every client has abandoned stops rather than holding its
+  place to encode for the cache alone — which would spend a slot, under
+  exactly the contention that made it queue, on a render no client wants.
   """
 
   use GenServer
 
+  require Logger
+
   alias AudioProxy.{Config, Semaphore}
   alias AudioProxy.Ffmpeg.{Render, RenderSupervisor}
+  alias AudioProxy.VariantStore
+  alias AudioProxy.VariantStore.Tee
 
   @registry __MODULE__.Registry
   @supervisor __MODULE__.Supervisor
@@ -143,7 +166,10 @@ defmodule AudioProxy.RenderCoordinator do
   How to render, when this subscriber turns out to be the one starting it.
 
   The options of `AudioProxy.Ffmpeg.Render.start_link/1` less `:consumer`,
-  which is the coordinator itself.
+  which is the coordinator itself — plus `:metadata`
+  (`t:AudioProxy.VariantStore.metadata/0`), which never reaches the pipeline:
+  it is what the write-back tee stores alongside the bytes, and without it no
+  tee is started.
   """
   @type render_spec :: keyword()
 
@@ -165,6 +191,7 @@ defmodule AudioProxy.RenderCoordinator do
   defstruct [
     :key,
     :spec,
+    :metadata,
     :render,
     :render_monitor,
     :info,
@@ -297,14 +324,16 @@ defmodule AudioProxy.RenderCoordinator do
     Process.flag(:trap_exit, true)
 
     key = Keyword.fetch!(opts, :key)
-    spec = Keyword.fetch!(opts, :spec)
+    {metadata, spec} = Keyword.pop(Keyword.fetch!(opts, :spec), :metadata)
     subscriber = Keyword.fetch!(opts, :subscriber)
 
     state = %__MODULE__{
       key: key,
       spec: spec,
+      metadata: metadata,
       # Registered before the first chunk can exist, so the subscriber that
-      # started this render needs no backlog.
+      # started this render needs no backlog. The tee is registered the same
+      # way, but not here — see `spawn_render/1`.
       subscribers: %{subscriber => Process.monitor(subscriber)}
     }
 
@@ -313,6 +342,10 @@ defmodule AudioProxy.RenderCoordinator do
     # before a coordinator exists, rather than a coordinator whose only act is
     # to broadcast a failure. `request/1` answers immediately whichever way it
     # goes; only the *waiting* would block, and that is what `:queued` is.
+    #
+    # Before the tee, too: a coordinator that cannot get a slot stops without
+    # ever running `terminate/2`, and it should not have opened a staging file
+    # for a render that will not happen.
     case Semaphore.request() do
       :granted ->
         start_render(state)
@@ -360,7 +393,19 @@ defmodule AudioProxy.RenderCoordinator do
   # this is the moment it becomes possible, and it has to be reported the same
   # way whether the queue was empty or not — a consumer that only heard about
   # the slow case would have to guess about the fast one.
+  #
+  # The tee is started here rather than in `init/1`, which is where the slot and
+  # the write-back meet. Registering it before the render is spawned keeps the
+  # guarantee it was given — no chunk can exist yet, so it needs no backlog —
+  # while keeping its lifetime the render's rather than this process'. Starting
+  # it while queued would open a staging file for a render that has not begun,
+  # against a deadline of its own that assumes one has; worse, it would count as
+  # a subscriber, so a queued render every client had abandoned would hold its
+  # place, take a slot, and encode for the cache alone. Nothing designed that,
+  # and under contention it is a slot taken from a request that has a client.
   defp spawn_render(state) do
+    state = %{state | subscribers: maybe_tee(state.subscribers, state.key, state.metadata)}
+
     case RenderSupervisor.start_render(Keyword.put(state.spec, :consumer, self())) do
       {:ok, render} ->
         state = %{
@@ -376,6 +421,24 @@ defmodule AudioProxy.RenderCoordinator do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  # The tee exists exactly when there is somewhere to write and something to
+  # write it with. Failing to start one is logged, not fatal: the render and
+  # its clients owe nothing to the cache.
+  defp maybe_tee(subscribers, key, metadata) do
+    if metadata != nil and VariantStore.configured?() do
+      case Tee.start(self(), key, metadata) do
+        {:ok, tee} ->
+          Map.put(subscribers, tee, Process.monitor(tee))
+
+        {:error, reason} ->
+          Logger.warning("could not start variant store tee: #{inspect(reason)}")
+          subscribers
+      end
+    else
+      subscribers
     end
   end
 

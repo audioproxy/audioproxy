@@ -13,10 +13,13 @@ fetch. The work splits in two, and the split is the design:
 
 For the URL grammar see [`audio-proxy-api-v1.md`](audio-proxy-api-v1.md) §1.
 
-> **Status.** The shared layer exists and one type is registered: `local://`
-> (`AudioProxy.Source.Local`, see the README's *Sources* section for its
-> policy). `s3://` and `https://` arrive with `add-remote-files-source`;
-> until then they resolve to `{:error, :unknown_scheme}`.
+> **Status.** Three types are registered: `local://`
+> (`AudioProxy.Source.Local`), `s3://` (`AudioProxy.Source.S3`) and `https://`
+> (`AudioProxy.Source.Https`). The two remote forms parse, canonicalize and
+> authorize, but have no storage backend yet — `stat/1` and `ffmpeg_input/1`
+> answer `{:error, :no_backend}` → **404**, until `add-https-source-backend`
+> and `add-s3-client` land. Any other scheme, `http://` included, is
+> `{:error, :unknown_scheme}`.
 ## Two encodings, one source
 
 | Form | Example |
@@ -91,6 +94,10 @@ layer maps to a status. A source type adds its own on top.
 | `:control_character` | A control, format or separator code point |
 | `:unknown_scheme` | No registered source type claims the scheme |
 
+Every one of them, and every reason a source type adds, renders the same
+byte-identical **404**. That is the no-oracle rule, and it is why the table
+above is about diagnosis rather than about what a client sees.
+
 ## Local sources
 
 `local://{path}` names a path relative to `AP_LOCAL_ROOT`. The root is
@@ -161,6 +168,146 @@ to the root:
 
 **Mount the root read-only**, and treat write access to it as equivalent to
 choosing what the proxy will serve.
+
+## Remote sources
+
+Two forms, one policy. `s3://{bucket}/{key}` names an object in a bucket;
+`https://{host}/{path}` names a URL at an origin. Both are gated by
+`AP_SOURCE_ALLOWLIST` (`AudioProxy.Source.Allowlist`), and neither can be
+rendered yet — see the status note at the top.
+
+### `s3://`: an object in a bucket
+
+Split at the first `/`, and both halves are required: `s3://masters` and
+`s3:///a.wav` are refused rather than guessed at. The key is kept as its **raw
+decoded bytes**, because that is what S3 stores — `a b.wav` and `a+b.wav` are
+different objects, and `a//b` is not collapsed the way `local://` collapses it.
+An empty segment is an ordinary character in a key.
+
+A bucket may be 63 bytes and a key 1024, S3's own maxima, and the body as a
+whole is bounded at 1088 before it is split. Past those the object cannot exist.
+
+The bound comes *before* the split, which is worth stating because the first
+version of this got it backwards. Finding the first `/` is a memchr-style scan:
+cheap when a separator turns up early, and linear in the whole body when none
+ever does (0.016 ms for 1 MB, 0.177 ms for 10 MB of separator-free input). That
+is four orders of magnitude short of what makes `local://`'s cap a
+denial-of-service control, so this is a protocol bound rather than a scheduler
+defence — but an input that cannot name an object should not be scanned at all.
+
+### `https://`: a URL at an allowlisted origin
+
+`http://` never reaches this type: the resolver dispatches on scheme, no type
+claims `http`, and the source is `:unknown_scheme`. Userinfo
+(`https://user:pass@h/a`) is refused by the type. Neither is merely left
+unallowlisted, because both are wrong independent of the host they name — a
+cleartext fetch has no business being a source, and credentials in a URL end up
+in logs, in argv and in a cache key. Keeping them out also keeps the allowlist a
+single-axis policy: host, and nothing else.
+
+#### The host is validated after it is normalized
+
+Not before, and the order is the whole point. A host is refused
+(`:invalid_url`) when, once lowercased and stripped of a single trailing root
+dot, it is empty, carries an **empty label** (`.media.example`,
+`cdn..media.example`), or contains a **percent-escape** (`%6D%65dia.example` —
+`URI` does not decode those, so they would ride into the canonical string). IP
+literals are exempt from the label rules; their own parser has vouched for them.
+
+Validating the raw host instead let three things through, all found by review:
+`https://./a` rendered a canonical URL with *no host at all*, `https://.../a`
+was admitted by a bare `*`, and `*.media.example` admitted every
+`cdn..media.example` spelling — so one origin resource could wear unboundedly
+many allowlisted cache keys, one per inserted dot.
+
+Underneath all three sat the defect that actually matters: **`parse/1` and
+`authorize/1` could disagree about which host a URL names.** The gate re-parses
+the canonical URL, so `https://../a` parsed to the host `.` and re-parsed to
+`""`. It failed closed, by luck rather than design. Both now run the same
+normalization and the same validation, and a property pins it: anything that
+parses must authorize under a bare `*`, and its canonical string must parse back
+to an identical source.
+
+A URL may be 2048 bytes and a host 253 — the de-facto interoperable URL maximum
+and DNS's own name limit. Unlike `local://`'s caps these are protocol bounds
+rather than denial-of-service controls: `URI.new/1` is linear here (measured at
+0.026 ms for a 4 KB URL and 0.51 ms for 80 KB, ~6 ns/byte), so there is no cost
+curve to flatten.
+
+#### What normalizes
+
+Every spelling of one resource folds onto one canonical string, because each
+surviving spelling would buy one object a second cache key:
+
+| Spelling | Canonical |
+|---|---|
+| `https://Media.Example/a.wav` | `https://media.example/a.wav` |
+| `https://media.example./a.wav` | `https://media.example/a.wav` |
+| `https://media.example:443/a.wav` | `https://media.example/a.wav` |
+| `https://media.example` | `https://media.example/` |
+| `https://media.example/a.wav?` | `https://media.example/a.wav` |
+| `https://media.example/a.wav#part` | `https://media.example/a.wav` |
+| `https://[0:0:0:0:0:0:0:1]/a.wav` | `https://[::1]/a.wav` |
+
+IP literals normalize through `:inet.parse_strict_address/1`, and that choice is
+a security boundary rather than a detail. The lenient parser accepts inet_aton
+shorthand, where `1.2` means 1.0.0.2 and `01.2.3.4` means 1.2.3.4; folding those
+would let an allowlist entry for `1.2.3.4` silently admit `01.2.3.4`. Left as
+text they stay distinct subjects, and are refused unless an operator names them
+in that exact spelling.
+
+#### What deliberately does not
+
+- **The URL's own percent-encoding.** `https://h/a%2Fb` and `https://h/a/b` are
+  different objects on many origins, so collapsing that layer would hand two
+  objects one cache key. The cost is that an already-escaped URL needs escaping
+  *again* in the `plain/` form (`%2520`) — which is what `enc/` exists for.
+- **Dot segments.** `https://h/a/../b` is left as written: only the origin knows
+  whether it resolves them.
+
+A raw space, or anything else that is not legal in a URL, is not repaired
+either: it is `{:error, :invalid_url}`. A space has to be `%20` in the URL, and
+therefore `%2520` in the `plain/` form.
+
+### The allowlist
+
+`AP_SOURCE_ALLOWLIST` is a comma-separated list, and one list answers for both
+forms because the question is the same one — *is this namespace ours?*
+
+| Entry | Matches |
+|---|---|
+| `masters` | Exactly that bucket (case-sensitive) or host (case-folded) |
+| `previews-*` | Buckets beginning `previews-` |
+| `*.media.example` | `media.example` and any subdomain of it |
+| `*` | Everything |
+
+**Unset accepts S3 sources and refuses HTTPS ones.** An S3 bucket the proxy has
+no credentials for is unreadable whatever the list says, so credentials are
+already a gate; an HTTPS URL has no such backstop, and an ungated one is a
+server-side request forgery primitive pointed at whatever the container can
+reach. Deny-by-default is the only safe posture for a fetch.
+
+**The wildcards are asymmetric, and the asymmetry is the security property.** A
+bucket namespace belongs to the operator — nobody else can create `previews-eu`
+in their account — so a prefix glob hands out nothing. A host namespace belongs
+to anyone with a registrar, so hosts get the mirror image, anchored to a label
+boundary: `*.media.example` admits `cdn.media.example` and refuses
+`media.example.evil.com`. `cdn.*` is the footgun this forecloses; it reads as
+"our CDN" and would mean "any host starting `cdn.`", `cdn.evil.com` included. A
+`*` anywhere but its type's documented position matches **nothing** rather than
+matching loosely.
+
+Two more rules worth knowing:
+
+- **An IP-literal host is matched bracketless.** The entry for
+  `https://[::1]/…` is `::1`, since that is the form `URI` parses out. The
+  canonical URL shows the brackets, so the mismatch would otherwise fail closed
+  and silently.
+- **No IDN conversion.** Hosts are matched as written; an operator allowlisting
+  an internationalized domain writes its punycode form.
+
+A source that fails the allowlist is `{:error, :not_allowed}` → the same **404**
+as a missing object. Nothing distinguishes "not allowed" from "not there".
 
 ## The source-type contract
 
