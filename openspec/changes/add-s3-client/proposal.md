@@ -1,6 +1,8 @@
 ## Why
 
-Three S3 interactions power the production deployment: presigned GET URLs (ffmpeg input + HIT redirects), object existence checks (cache HIT detection), and streaming PUT (variant write-back). CLAUDE.md leaves the client choice open (`ex_aws_s3` vs minimal); this slice decides it and builds the layer. Positioned post-MVP: the MVP renders from local files (`add-local-files-source`), so S3 lands together with its main consumer, the variant cache.
+Three S3 interactions power an object-storage deployment: presigned GET URLs (ffmpeg input and HIT redirects), object existence checks (cache HIT detection), and streaming PUT (variant write-back). CLAUDE.md leaves the client choice open (`ex_aws_s3` vs minimal); this slice decides it and builds the layer.
+
+Positioned post-MVP: the MVP renders from local files (`add-local-files-source`). It was once positioned *immediately before* `add-variant-cache`, on the assumption that variants are necessarily cached to a bucket — but caching and sourcing are independent, and the cache now has a local backend that needs nothing from here. What this slice actually unlocks is `s3://` **sources** and the redirect serve mode, neither of which is on the critical path to caching.
 
 ## What Changes
 
@@ -25,4 +27,4 @@ Three S3 interactions power the production deployment: presigned GET URLs (ffmpe
 - New: `lib/audio_proxy/s3/{sigv4,client}.ex`, S3 backend in the source store.
 - New config: standard `AWS_*` vars, `AP_S3_ENDPOINT` (test/dev override), presign TTL.
 - Depends on: `add-source-resolver` (the seam it implements a backend for), `add-remote-files-source` (the `s3://` source form it renders).
-- Blocks: `add-variant-cache` (HEAD/PUT/redirect). Position: first post-MVP slice, immediately before `add-variant-cache`.
+- Blocks: nothing on the caching path. `add-variant-cache` gains an S3 backend once this lands, but ships before it with the local backend.
