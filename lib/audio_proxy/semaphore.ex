@@ -38,6 +38,8 @@ defmodule AudioProxy.Semaphore do
 
   `release/1` is therefore a promptness optimisation rather than the guarantee,
   and it is idempotent: releasing twice, or releasing without holding, is `:ok`.
+  The one thing the monitor cannot cover is a long-lived caller whose release
+  did not reach a wedged semaphore — see `release/1`.
   Acquiring twice from one process is `{:error, :already_held}` — a slot is a
   process' budget, and a second one would be an accounting error rather than a
   deadlock worth waiting on.
@@ -101,6 +103,11 @@ defmodule AudioProxy.Semaphore do
   # Slot-hold durations kept for the `Retry-After` average. Enough to smooth a
   # single outlier, short enough to track a change in what is being rendered.
   @samples 20
+
+  # How long `release/1` waits for the server before leaving the slot to the
+  # monitor. Every callback here is O(1) or O(queue), so reaching this at all
+  # means something is badly wrong; it is a bound, not a budget.
+  @release_timeout 5_000
 
   # Stands in for the average until a render has actually completed. Nothing
   # measured is available at that point, and a wrong-but-small hint is better
@@ -177,8 +184,9 @@ defmodule AudioProxy.Semaphore do
       shorter wait here would only turn a queued request into a failed one.
     * `:server` — which semaphore, for tests running their own.
 
-  A timeout releases whatever the race may have granted, so it never leaks a
-  slot; see *The caller-timeout race* in the moduledoc.
+  A timeout releases whatever the race may have granted, so it does not leak a
+  slot; see *The caller-timeout race* in the moduledoc, and `release/1` for the
+  one case that release cannot cover.
   """
   @spec acquire(keyword()) :: :ok | {:error, term()}
   def acquire(opts \\ []) do
@@ -212,17 +220,56 @@ defmodule AudioProxy.Semaphore do
   end
 
   @doc """
+  How long `release/1` may block before it gives up and leaves the slot to the
+  monitor.
+
+  Public for the same reason `AudioProxy.Ffmpeg.Render.cancel_timeout/0` is: a
+  caller that releases from its own `terminate/2` has to size its shutdown
+  budget against this, and a hardcoded number there would drift the moment this
+  one changes.
+  """
+  @spec release_timeout() :: pos_integer()
+  def release_timeout, do: @release_timeout
+
+  @doc """
   Gives back the calling process' slot, or removes it from the wait queue.
 
   Idempotent, and `:ok` even if the semaphore is not running — a caller
   releasing from its own `terminate/2` during shutdown must not crash because
   the semaphore stopped first.
+
+  `:ok` here means "this caller is done with the slot", not "the semaphore has
+  processed that". A dead semaphore has nothing to release into, and a wedged
+  one that does not answer within `release_timeout/0` is caught the same way,
+  which is deliberate: crashing the caller would achieve nothing the monitor is
+  not already going to do. What recovers the slot in that second case is the
+  holder exiting, so a *long-lived* caller that releases into a wedged
+  semaphore does hold its slot until it dies. Every caller in this codebase
+  releases on its way out.
   """
   @spec release(GenServer.server()) :: :ok
   def release(server \\ @name) do
-    GenServer.call(server, {:release, self()})
+    GenServer.call(server, {:release, self()}, @release_timeout)
   catch
     :exit, _reason -> :ok
+  end
+
+  @doc """
+  The `Retry-After` this semaphore would put on a rejection right now.
+
+  `request/1` already carries one on the rejection it returns. This is for the
+  caller that got as far as *queueing* and then gave up waiting: the same "come
+  back later", with the same estimate behind it, but no rejection to read it
+  off.
+  """
+  @spec retry_after(GenServer.server()) :: retry_after()
+  def retry_after(server \\ @name) do
+    GenServer.call(server, :retry_after)
+  catch
+    # A request answering a client must not fail because the semaphore is
+    # momentarily unreachable. The header is a hint, and one second is the
+    # floor the estimate is clamped to anyway.
+    :exit, _reason -> 1
   end
 
   @doc """
@@ -273,6 +320,10 @@ defmodule AudioProxy.Semaphore do
     {:reply, :ok, forget(state, pid)}
   end
 
+  def handle_call(:retry_after, _from, state) do
+    {:reply, estimate(state), state}
+  end
+
   def handle_call(:stats, _from, state) do
     {:reply,
      %{
@@ -314,7 +365,7 @@ defmodule AudioProxy.Semaphore do
   end
 
   defp reject(state) do
-    retry_after = retry_after(state)
+    retry_after = estimate(state)
 
     {retry_after, emit(state, :rejected, %{retry_after: retry_after})}
   end
@@ -337,9 +388,18 @@ defmodule AudioProxy.Semaphore do
       waiter = Map.get(state.waiters, pid) ->
         Process.demonitor(waiter.monitor, [:flush])
 
-        # Left in `order` as a tombstone; `grant_next/1` skips pids that are no
-        # longer waiting, which is cheaper than rebuilding the queue here.
-        %{state | waiters: Map.delete(state.waiters, pid)}
+        # Deleted from `order` too, not left as a tombstone to be skipped on the
+        # next grant. Tombstones are only consumed by a grant, so a saturated
+        # semaphore whose waiters all give up accumulates them without bound —
+        # measured at 200 dead entries for 200 abandoned waiters — and
+        # `AP_QUEUE_SIZE` stops bounding what the queue costs. `:queue.delete/2`
+        # is O(length), but length is now exactly `map_size(waiters)` and so at
+        # most `AP_QUEUE_SIZE`, on a path that runs once per abandonment.
+        %{
+          state
+          | waiters: Map.delete(state.waiters, pid),
+            order: :queue.delete(pid, state.order)
+        }
         |> emit(:abandoned, %{})
 
       true ->
@@ -369,18 +429,19 @@ defmodule AudioProxy.Semaphore do
     end
   end
 
-  # Pops the oldest pid still actually waiting, discarding the tombstones
-  # `forget/2` left behind.
+  # Pops the oldest waiter. `order` and `waiters` hold exactly the same pids —
+  # `enqueue/2` adds to both and `forget/2` removes from both — so a pid in the
+  # queue is always still waiting, and `Map.pop!/2` asserts that rather than
+  # papering over a drift between the two.
   defp next_waiter(state) do
     case :queue.out(state.order) do
       {:empty, order} ->
         {nil, %{state | order: order}}
 
       {{:value, pid}, order} ->
-        case Map.pop(state.waiters, pid) do
-          {nil, _waiters} -> next_waiter(%{state | order: order})
-          {waiter, waiters} -> {{pid, waiter}, %{state | order: order, waiters: waiters}}
-        end
+        {waiter, waiters} = Map.pop!(state.waiters, pid)
+
+        {{pid, waiter}, %{state | order: order, waiters: waiters}}
     end
   end
 
@@ -388,7 +449,7 @@ defmodule AudioProxy.Semaphore do
 
   defp sample(samples, duration), do: Enum.take([duration | samples], @samples)
 
-  defp retry_after(state) do
+  defp estimate(state) do
     depth = map_size(state.waiters)
     capacity = capacity(state)
 

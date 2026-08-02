@@ -169,6 +169,25 @@ defmodule AudioProxy.SemaphoreTest do
       refute Process.alive?(doomed)
     end
 
+    test "waiters that abandon leave nothing behind in the queue" do
+      semaphore = start_semaphore(capacity: 1, queue_size: 4)
+      {_holder, :granted} = start_holder(semaphore)
+
+      # No grant ever happens here — the one slot is never released — so
+      # nothing sweeps the queue on the way past. An implementation that
+      # deletes a departing waiter's *bookkeeping* but leaves its place in the
+      # ordering behind grows by one entry per abandonment, and `AP_QUEUE_SIZE`
+      # stops bounding what the queue costs. Measured at 200/200 before the fix.
+      for _ <- 1..50 do
+        {waiter, :queued} = start_holder(semaphore)
+        Process.exit(waiter, :kill)
+        wait_until(fn -> Semaphore.stats(semaphore).queued == 0 end)
+      end
+
+      assert %{held: 1, queued: 0} = Semaphore.stats(semaphore)
+      assert queue_length(semaphore) == 0
+    end
+
     test "releasing twice, or without holding, is :ok" do
       semaphore = start_semaphore(capacity: 1, queue_size: 1)
 
@@ -327,6 +346,13 @@ defmodule AudioProxy.SemaphoreTest do
     )
 
     on_exit(fn -> :telemetry.detach(handler) end)
+  end
+
+  # White-box: `stats/1` reports live waiters, which is exactly the number that
+  # stays right when the ordering queue is leaking underneath it. The leak is
+  # only visible in the queue itself.
+  defp queue_length(semaphore) do
+    semaphore |> :sys.get_state() |> Map.fetch!(:order) |> :queue.len()
   end
 
   defp receive_after_zero do
