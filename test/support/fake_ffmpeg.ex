@@ -54,6 +54,12 @@ defmodule AudioProxy.FakeFfmpeg.Router do
     |> Pipeline.call(@pipeline)
   end
 
+  head "/:sig/*rest" do
+    conn
+    |> assign(:endpoint_class, :render)
+    |> Pipeline.call(@pipeline)
+  end
+
   match _ do
     send_resp(conn, 404, "")
   end
