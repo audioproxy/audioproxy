@@ -48,7 +48,7 @@ defmodule AudioProxy.Plugs.RenderAction do
 
   These are two different worlds, and the split is the whole shape of this
   module. Before the first byte nothing has been sent, so any failure is still
-  an ordinary JSON error response — 404, 415, 500, 504. After the first byte
+  an ordinary JSON error response — 404, 415, 429, 500, 504. After the first byte
   the status line is spent: a failure can then only be signalled by tearing the
   connection down without the terminating chunk (§5: nothing better exists over
   plain HTTP), which is what `abort/3` does by exiting.
@@ -184,6 +184,16 @@ defmodule AudioProxy.Plugs.RenderAction do
     case RenderCoordinator.subscribe(conn.assigns.cache_key, spec) do
       {:ok, status, render, backlog} ->
         {:ok, status, render, backlog}
+
+      # The one start failure that is neither this proxy's fault nor the
+      # client's: every slot is busy and the wait queue is full. Passed through
+      # untouched, because the estimate travelling with it is what
+      # `AudioProxy.ErrorJSON` puts in `Retry-After` — this module is not
+      # entitled to invent one. Not logged as an error, either: a saturated
+      # box shedding load is the semaphore working, and its own telemetry
+      # already counts it.
+      {:error, {:queue_full, _retry_after} = reason} ->
+        {:error, reason}
 
       # Not a client error at all: no ffmpeg on `PATH`, or a supervisor that
       # would not start the child. 500 in the same JSON shape as every other

@@ -27,6 +27,26 @@ defmodule AudioProxy.RenderCoordinator do
   subscriber leaving must not cancel a render other subscribers are still
   reading.
 
+  ## The slot comes first
+
+  A coordinator does not spawn its render until `AudioProxy.Semaphore` grants it
+  a slot, and releases that slot from `terminate/2` — so the cap counts renders
+  rather than requests, and a variant twenty clients are waiting on costs one.
+
+  It asks with `Semaphore.request/1` rather than the blocking `acquire/1`,
+  because this process must keep answering joins while it waits: the requests
+  coalescing onto a queued render are exactly the ones that should not each take
+  a slot of their own. So a coordinator has one phase more than the render does
+  — `:queued`, before `:rendering` — and a subscriber cannot tell them apart,
+  which is the point. It is waiting for bytes either way.
+
+  The slot is asked for in `init/1`, which is what makes a full queue a *start*
+  failure rather than a render failure: `subscribe/2` answers
+  `{:error, {:queue_full, retry_after}}` and no coordinator is left registered
+  under that key, so the next request asks the semaphore again instead of
+  joining something that is never going to render. `AudioProxy.ErrorJSON`
+  already renders that tuple as §5's 429, `Retry-After` and all.
+
   ## The start race
 
   Starting and joining are the same call. `DynamicSupervisor.start_child/2`
@@ -81,7 +101,7 @@ defmodule AudioProxy.RenderCoordinator do
 
   use GenServer
 
-  alias AudioProxy.Config
+  alias AudioProxy.{Config, Semaphore}
   alias AudioProxy.Ffmpeg.{Render, RenderSupervisor}
 
   @registry __MODULE__.Registry
@@ -135,6 +155,7 @@ defmodule AudioProxy.RenderCoordinator do
 
   defstruct [
     :key,
+    :spec,
     :render,
     :render_monitor,
     :info,
@@ -168,8 +189,10 @@ defmodule AudioProxy.RenderCoordinator do
   a consumer must deliver it before the chunks that follow.
 
   Errors are the pipeline's own — `{:error, :ffmpeg_not_found}` and friends —
-  plus `{:error, :coordinator_unavailable}` if the start-or-join loop could not
-  settle, which means something is repeatedly killing coordinators.
+  plus `{:error, {:queue_full, retry_after}}` when `AudioProxy.Semaphore` had
+  neither a slot nor room to wait, and `{:error, :coordinator_unavailable}` if
+  the start-or-join loop could not settle, which means something is repeatedly
+  killing coordinators.
   """
   @spec subscribe(String.t(), render_spec()) ::
           {:ok, status(), t(), [binary()]} | {:error, term()}
@@ -265,25 +288,75 @@ defmodule AudioProxy.RenderCoordinator do
     spec = Keyword.fetch!(opts, :spec)
     subscriber = Keyword.fetch!(opts, :subscriber)
 
-    case RenderSupervisor.start_render(Keyword.put(spec, :consumer, self())) do
-      {:ok, render} ->
-        {:ok,
-         %__MODULE__{
-           key: key,
-           render: render,
-           render_monitor: Process.monitor(render),
-           # Registered before the first chunk can exist, so the subscriber
-           # that started this render needs no backlog.
-           subscribers: %{subscriber => Process.monitor(subscriber)}
-         }}
+    state = %__MODULE__{
+      key: key,
+      spec: spec,
+      # Registered before the first chunk can exist, so the subscriber that
+      # started this render needs no backlog.
+      subscribers: %{subscriber => Process.monitor(subscriber)}
+    }
+
+    # Asked for here rather than after `init/1` returns, so that a full queue is
+    # a `start_child` error the requesting process gets back directly — a 429
+    # before a coordinator exists, rather than a coordinator whose only act is
+    # to broadcast a failure. `request/1` answers immediately whichever way it
+    # goes; only the *waiting* would block, and that is what `:queued` is.
+    case Semaphore.request() do
+      :granted ->
+        start_render(state)
+
+      :queued ->
+        {:ok, %{state | phase: :queued}}
 
       {:error, reason} ->
         {:stop, {:shutdown, reason}}
     end
   end
 
+  # Started from `init/1`, so a start failure can still be a `{:stop,
+  # {:shutdown, _}}` that `start_or_join/3` unwraps into the caller's own
+  # `{:error, reason}`: no ffmpeg on `PATH` is a 500 with the reason in the log
+  # and no crash report per request, exactly as it was before slots existed.
+  defp start_render(state) do
+    case spawn_render(state) do
+      {:ok, state} -> {:ok, state}
+      {:error, reason} -> {:stop, {:shutdown, reason}}
+    end
+  end
+
+  # Started from a grant that arrived after `init/1` returned. The caller has
+  # long since been handed a coordinator, so the only way left to report a
+  # start failure is the failure broadcast every other failure uses.
+  defp start_granted_render(state) do
+    case spawn_render(state) do
+      {:ok, state} ->
+        {:noreply, state}
+
+      {:error, reason} ->
+        fail(state, %{
+          class: :render_failed,
+          exit_status: nil,
+          detail: "could not start render: #{inspect(reason)}"
+        })
+    end
+  end
+
+  defp spawn_render(state) do
+    case RenderSupervisor.start_render(Keyword.put(state.spec, :consumer, self())) do
+      {:ok, render} ->
+        {:ok,
+         %{state | phase: :rendering, render: render, render_monitor: Process.monitor(render)}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # `:queued` and `:rendering` are one thing from a subscriber's side: bytes are
+  # coming, and none have arrived that this joiner is missing.
   @impl true
-  def handle_call({:join, pid}, _from, %__MODULE__{phase: :rendering} = state) do
+  def handle_call({:join, pid}, _from, %__MODULE__{phase: phase} = state)
+      when phase in [:queued, :rendering] do
     {:reply, {:ok, backlog(state)}, monitor_subscriber(state, pid)}
   end
 
@@ -300,8 +373,8 @@ defmodule AudioProxy.RenderCoordinator do
 
   def handle_call(:unsubscribe, {pid, _tag}, state) do
     case forget_subscriber(state, pid) do
-      %__MODULE__{phase: :rendering, subscribers: subscribers} = state
-      when map_size(subscribers) == 0 ->
+      %__MODULE__{phase: phase, subscribers: subscribers} = state
+      when phase in [:queued, :rendering] and map_size(subscribers) == 0 ->
         # Nobody is reading. Replying from `terminate/2`'s far side is what
         # makes this a barrier: the subprocess is gone before the caller runs.
         {:stop, :normal, :ok, state}
@@ -362,13 +435,19 @@ defmodule AudioProxy.RenderCoordinator do
 
   def handle_info({:DOWN, _monitor, :process, pid, _reason}, state) do
     case forget_subscriber(state, pid) do
-      %__MODULE__{phase: :rendering, subscribers: subscribers} = state
-      when map_size(subscribers) == 0 ->
+      %__MODULE__{phase: phase, subscribers: subscribers} = state
+      when phase in [:queued, :rendering] and map_size(subscribers) == 0 ->
         {:stop, :normal, state}
 
       state ->
         {:noreply, state}
     end
+  end
+
+  # The slot came free. Nothing about this is visible to a subscriber: it has
+  # been waiting for bytes, and still is.
+  def handle_info({Semaphore, :granted}, %__MODULE__{phase: :queued} = state) do
+    start_granted_render(state)
   end
 
   def handle_info(:linger_expired, state), do: {:stop, :normal, state}
@@ -380,12 +459,19 @@ defmodule AudioProxy.RenderCoordinator do
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
-  def terminate(_reason, %__MODULE__{render: nil}), do: :ok
+  def terminate(_reason, %__MODULE__{} = state) do
+    # `cancel/1` returns once the subprocess is gone and tolerates a render that
+    # already finished, so this is safe on every stop path.
+    if state.render, do: Render.cancel(state.render)
 
-  def terminate(_reason, %__MODULE__{render: render}) do
-    # `cancel/1` returns once the subprocess is gone and tolerates a render
-    # that already finished, so this is safe on every stop path.
-    Render.cancel(render)
+    # After the cancel, not before: releasing first would hand the slot to a
+    # waiter while this render's ffmpeg was still being killed, which is the
+    # cap being exceeded by exactly the margin the kill discipline takes.
+    #
+    # Idempotent, and it covers a `:queued` coordinator that never held a slot
+    # as well as one that did. The semaphore's own monitor is the backstop for
+    # the stop paths that never reach here.
+    Semaphore.release()
     :ok
   end
 
