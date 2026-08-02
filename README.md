@@ -100,13 +100,13 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 - Signed URLs, the full processing-options grammar, and the cache-key rules
 - Transcoding to MP3, AAC/M4A, Opus, Vorbis, FLAC and WAV, with trimming, fades, loudness normalisation, channel and sample-rate control
 - Renders stream while they encode, from files in a mounted directory
+- Concurrent requests for the same variant share one render, with mid-render joiners catching up from the start
 - A single container, published per release
 
 **Next: what makes it production-shaped**
 
 - **A variant cache.** Today every request re-renders. Rendered variants will be written back to a store and served from there on later requests, with `Range` support and byte-serving. Where they are stored is a separate choice from where sources come from: a local directory for a single node, object storage when you have more than one.
 - **Bounded concurrency.** A cap on simultaneous renders with a wait queue, so a burst of traffic queues instead of thrashing the machine.
-- **Deduplication.** Concurrent requests for the same variant will share one render rather than starting several.
 - **S3 sources**, so the audio itself can live in object storage.
 
 **After that**
@@ -249,11 +249,13 @@ x-audio-proxy: MISS
 
 The first bytes leave before ffmpeg has finished, so a long transcode starts playing immediately rather than after it completes. There is no `Content-Length` and no `Accept-Ranges` on this response: the length is not known when the head goes out, and ranges arrive with the variant cache, whose `HIT` redirects to storage that serves them natively.
 
-`x-audio-proxy: MISS` is currently on every response, because there is no cache to hit yet, so each request renders. `etag` is the variant's cache key, which is a pure function of the normalized options and the source, so the same variant requested with its options in a different order carries the same one.
+`x-audio-proxy` says where the bytes came from. `MISS` is this request's own render. `COALESCED` means another request was already rendering exactly this variant and this one attached to it: the same bytes, no second ffmpeg. `HIT` arrives with the variant cache, which does not exist yet, so today every response is one of the first two. `etag` is the variant's cache key, which is a pure function of the normalized options and the source, so the same variant requested with its options in a different order carries the same one.
 
-If the client goes away mid-stream, the render goes with it: closing the connection kills the ffmpeg process rather than leaving it encoding into a socket nobody is reading. A render that fails *before* any bytes are sent is one of the JSON errors below; one that fails after them can only be signalled by cutting the connection short, so treat a chunked response that ends without its terminating chunk as a failed download.
+Requests for the same variant share a render, so a burst — a page that loads the same preview for fifty visitors at once — costs one encode rather than fifty. A request arriving mid-render is sent everything encoded so far, then the rest as it comes, so it gets the whole file and not the tail. A shared render is held in memory for as long as it runs, and output past `AP_MAX_SRC_BYTES` fails rather than growing without limit — so that variable bounds variant size as well as source size.
 
-For what happens behind that (the subprocess, buffering, the timeout and the kill discipline) see [docs/rendering.md](docs/rendering.md).
+If the client goes away mid-stream, the render goes with it, unless someone else is still listening to the same one: closing the last connection kills the ffmpeg process rather than leaving it encoding into a socket nobody is reading. A render that fails *before* any bytes are sent is one of the JSON errors below; one that fails after them can only be signalled by cutting the connection short, so treat a chunked response that ends without its terminating chunk as a failed download.
+
+For what happens behind that (the subprocess, coalescing, buffering, the timeout and the kill discipline) see [docs/rendering.md](docs/rendering.md).
 
 ## Processing options
 
@@ -384,7 +386,7 @@ Note that the variables below are the full configuration surface for the design,
 | `AP_VARIANT_BUCKET` | string | unset | Write-back target; unset = always render |
 | `AP_MAX_CONCURRENCY` | positive integer | schedulers online | Max simultaneous ffmpeg processes |
 | `AP_QUEUE_SIZE` | non-negative integer | `32` | Waiting renders before `429` |
-| `AP_MAX_SRC_BYTES` | positive integer | `2000000000` | Reject larger sources with `413` |
+| `AP_MAX_SRC_BYTES` | positive integer | `2000000000` | Reject larger sources with `413`; also caps the bytes a render may hold in memory |
 | `AP_RENDER_TIMEOUT` | positive integer | `300` | Seconds a render may take before ffmpeg is killed and the request answered `504`. Raise it for full-length transcodes of long masters; the default suits previews. See [docs/rendering.md](docs/rendering.md) |
 | `AP_SERVE_MODE` | `redirect` \| `proxy` | `redirect` | Serve cache hits by redirect or proxied |
 | `AP_LOG_LEVEL` | `debug` \| `info` \| `warning` \| `error` | `info` | Lowest level written to stdout. See [Logs](#logs) |
@@ -436,5 +438,5 @@ Elixir with Plug and [Bandit](https://github.com/mtrudel/bandit), and no Phoenix
 | [examples/](examples) | A one-file browser player for trying variants, and why it has to be served rather than opened |
 | [VERSIONS.md](VERSIONS.md) | What the image is built from: Debian, Elixir/OTP and ffmpeg pins, why not Alpine, and how to bump one |
 | [docs/ffmpeg-arguments.md](docs/ffmpeg-arguments.md) | How options become ffmpeg arguments: filter order, per-format flags, known gaps |
-| [docs/rendering.md](docs/rendering.md) | How a render runs: the subprocess, the chunk stream, buffering and lifecycle guarantees |
+| [docs/rendering.md](docs/rendering.md) | How a render runs: the subprocess, the chunk stream, coalescing, buffering and lifecycle guarantees |
 | `openspec/specs/` | Capability specs for what is built; `openspec/changes/` holds what is planned |
