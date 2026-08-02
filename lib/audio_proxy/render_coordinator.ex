@@ -103,6 +103,10 @@ defmodule AudioProxy.RenderCoordinator do
   # than at something request-shaped.
   @unsubscribe_timeout 15_000
 
+  # Added to `Render.cancel_timeout/0` for this process' shutdown budget, so
+  # `terminate/2` can always finish the cancel it started. See `child_spec/1`.
+  @shutdown_margin 2_000
+
   # Retries of the whole start-or-join loop. Each one either starts a render or
   # joins a live coordinator; only a coordinator stopping in the window between
   # the two costs an attempt, so exhausting five means something is wrong that
@@ -198,7 +202,13 @@ defmodule AudioProxy.RenderCoordinator do
       # Never restarted, for the same reason a render is not: the byte stream
       # is gone and every subscriber has already been told.
       restart: :temporary,
-      shutdown: 5_000
+      # Derived, not chosen. `terminate/2` blocks on `Render.cancel/1`, so a
+      # budget below that call's own timeout means the supervisor brutal-kills
+      # this process mid-cancel on exactly the renders that need cancelling
+      # most — the ones whose subprocess is ignoring SIGTERM. The subprocess
+      # still dies (the pipeline monitors its consumer), but the kill would be
+      # racing the guarantee instead of implementing it.
+      shutdown: Render.cancel_timeout() + @shutdown_margin
     }
   end
 

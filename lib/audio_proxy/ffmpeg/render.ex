@@ -195,16 +195,25 @@ defmodule AudioProxy.Ffmpeg.Render do
   """
   @spec cancel(t()) :: :ok
   def cancel(render) do
-    # Room for the whole worst case — the full grace, the reap wait, and the
-    # `kill` calls in between — plus margin. A call timeout here would be
-    # indistinguishable from the render having already finished, and would hand
-    # back `:ok` for a subprocess still being killed.
-    GenServer.call(render, :cancel, @grace + @reap_grace + 3_000)
+    GenServer.call(render, :cancel, cancel_timeout())
   catch
     # Already finished on its own. Cancelling something that has stopped is
     # exactly the outcome asked for.
     :exit, _reason -> :ok
   end
+
+  @doc """
+  How long `cancel/1` may block: the whole worst case — the full grace, the
+  reap wait, and the `kill` calls in between — plus margin.
+
+  A call timeout below this would be indistinguishable from the render having
+  already finished, and would hand back `:ok` for a subprocess still being
+  killed. Public because a caller that cancels from its own `terminate/2` has
+  to give itself a shutdown budget larger than this, and a hardcoded number
+  there would drift the moment the grace changes.
+  """
+  @spec cancel_timeout() :: pos_integer()
+  def cancel_timeout, do: @grace + @reap_grace + 3_000
 
   @doc """
   The subprocess' OS pid, or `nil` if it was reaped before it could be read.
