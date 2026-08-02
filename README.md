@@ -9,6 +9,56 @@ An imgproxy-style on-the-fly audio transcoding proxy.
 > builder, source resolution and the chunked render endpoint are done. The
 > variant cache (so every request still renders), S3 and HTTPS sources, peaks
 > and `/info` are not. Slices tracked under `openspec/changes/`.
+
+## Quick start
+
+Point it at a directory of audio you already have. No signing key, no bucket,
+no config file.
+
+```bash
+docker run --rm -p 4000:4000 \
+  -e AP_ALLOW_INSECURE=true \
+  -e AP_LOCAL_ROOT=/audio \
+  -v /path/to/your/audio:/audio:ro \
+  ghcr.io/audioproxy/audioproxy:0.1.0
+```
+
+> On Apple Silicon, add `--platform linux/amd64`. The image is x86-64 only for
+> now and runs under emulation; arm64 is [its own
+> slice](openspec/changes/add-multi-arch-images).
+
+Then, in another shell — `SRC` names a file *relative to the directory you
+mounted*, so `track.wav` means `/path/to/your/audio/track.wav`:
+
+```bash
+BASE=localhost:4000
+SRC='plain/local://track.wav'
+
+curl -s "$BASE/health"
+# {"status":"ok","version":"0.1.0"}
+
+# A 30-second preview: Opus at 96 kbps, fading in and out.
+curl -o preview.opus "$BASE/insecure/f:opus/br:96/t:0:30/fade:1:1/$SRC"
+
+# The same source as a small mono MP3, the shape speech wants.
+curl -o speech.mp3 "$BASE/insecure/f:mp3/br:64/ch:1/sr:22050/$SRC"
+```
+
+Both start arriving while ffmpeg is still encoding — the response is chunked,
+not buffered to disk first. Change any option and you have a different variant,
+with no server-side configuration to add: the URL is the whole request.
+
+Two things that matter beyond a first try:
+
+- **`AP_ALLOW_INSECURE` is development only.** It is what lets the literal
+  `insecure` stand in for a signature, so while it is on, anyone who can reach
+  the port can render anything under `AP_LOCAL_ROOT`. [Signing
+  URLs](#signing-urls) is the real thing.
+- **Mount the directory read-only** (`:ro`, above). Write access to
+  `AP_LOCAL_ROOT` is write access to what the proxy will serve.
+
+[Running it](#running-it) has the shape you would actually deploy.
+
 ## What you can do with it
 
 Point it at a lossless master — a file in a directory you mounted, or later an
@@ -84,9 +134,9 @@ The container is the way to run this. It carries the release with its own
 Erlang runtime and the ffmpeg the renders are tested against, so there is
 nothing to install and nothing to keep in step.
 
-> **x86-64 only.** The image is `linux/amd64`; arm64 arrives in its own slice.
-> On Apple Silicon a plain `docker pull` fails with *no matching manifest for
-> linux/arm64/v8* — add `--platform linux/amd64` and it runs under emulation.
+The [Quick start](#quick-start) above runs it unsigned, for a first look. The
+difference in a real deployment is that `AP_ALLOW_INSECURE` is gone and a key
+and salt take its place:
 
 ```bash
 docker run --rm -p 4000:4000 \
@@ -94,14 +144,10 @@ docker run --rm -p 4000:4000 \
   -e AP_LOCAL_ROOT=/audio \
   -v /path/to/your/audio:/audio:ro \
   ghcr.io/audioproxy/audioproxy:0.1.0
-
-curl -s localhost:4000/health
-# {"status":"ok","version":"0.1.0"}
 ```
 
 That is the whole configuration for serving files off a mounted directory — no
-credentials, no bucket, no database. Point `AP_LOCAL_ROOT` at the mount,
-**mount it read-only**, and sign your URLs with the key and salt.
+credentials, no bucket, no database.
 
 **Pin a version.** `:0.1.0` and `:sha-<commit>` name an exact image; `:0.1`
 follows patch releases; `:latest` and `:edge` move under you, and `:edge` is
