@@ -81,6 +81,10 @@ defmodule AudioProxy.VariantCache do
 
   # Only digits: `Integer.parse/1` would accept `+5` and a leading `-`, and a
   # range spec is `1*DIGIT` (RFC 9110 §14.1) or it is not one.
+  #
+  # Both this match and the `String.to_integer/1` behind it are linear in the
+  # header's length, and the header is bounded by Bandit's own maximum field
+  # size — so a range spec cannot be made expensive by making it long.
   @digits ~r/^\d+$/
 
   @doc """

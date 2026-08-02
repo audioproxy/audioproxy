@@ -450,6 +450,12 @@ defmodule AudioProxy.Plugs.RenderAction do
 
   # ETag and Cache-Control travel with the 304 so the revalidating cache can
   # refresh its own metadata; a body would be a protocol error.
+  #
+  # The Cache-Control here is this module's constant, while a cache HIT sends
+  # the one the write-back stored. They are the same value in production —
+  # the stored one *is* this constant, saved at render time — so this is a
+  # latent divergence rather than a live one, and worth knowing about before
+  # anything makes the stored policy vary per variant.
   defp not_modified(conn) do
     conn
     |> put_resp_header("cache-control", @cache_control)
