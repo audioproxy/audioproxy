@@ -15,7 +15,6 @@ quietly depends on ffmpeg fails loudly instead of passing by accident.
 One workflow file is deliberate. Later slices (the release image build, MinIO
 as a service container) add jobs to it rather than parallel workflows, so there
 stays exactly one set of checks to require on `main`.
-
 ## Requirements
 ### Requirement: Every push and pull request is verified
 The repository SHALL run a CI workflow on every push to main and every pull request that fails when formatting, compilation (warnings as errors), or any test fails.
@@ -56,4 +55,15 @@ The repository SHALL receive automated update PRs for Hex dependencies and GitHu
 #### Scenario: Outdated dependency
 - **WHEN** a dependency releases a new version
 - **THEN** a Dependabot PR appears within the weekly cycle and is itself verified by CI
+
+### Requirement: CI verifies the container image
+The CI workflow SHALL build the Docker image on every change and run the smoke suite against the built container — health check, one end-to-end insecure-mode render — plus the `:ffmpeg`-tagged integration tests against the runtime image's ffmpeg, as jobs gated behind the test jobs.
+
+#### Scenario: Smoke test gate
+- **WHEN** CI runs on a branch
+- **THEN** image build + container smoke render must pass for the pipeline to be green
+
+#### Scenario: Shipped ffmpeg is the tested ffmpeg
+- **WHEN** the integration job runs
+- **THEN** the `:ffmpeg`-tagged suite executes against the ffmpeg binary from the runtime image, and the pinned major version is asserted
 
