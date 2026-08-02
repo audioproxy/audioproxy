@@ -351,7 +351,24 @@ Unset `AP_LOCAL_ROOT` and local sources are refused outright: the root is the wh
 
 [docs/sources.md](docs/sources.md#local-sources) has the confinement rules, the path limits, and why the root never appears in a cache key.
 
-**`s3://` and `https://` sources are not built yet**. Each is its own slice, with its own rule for what it will serve, and until they land those schemes are refused as unknown. See [docs/sources.md](docs/sources.md) for the contract they plug into and `openspec/changes/` for which slice adds which.
+### `s3://` and `https://`: remote sources
+
+`s3://{bucket}/{key}` names an object in a bucket; `https://{host}/{path}` names a URL at an origin. Both need `AP_SOURCE_ALLOWLIST` to say which namespaces you serve:
+
+| Entry | Matches |
+|---|---|
+| `masters` | Exactly that bucket (case-sensitive) or host (case-folded) |
+| `previews-*` | Buckets beginning `previews-` |
+| `*.media.example` | `media.example` and any subdomain of it |
+| `*` | Everything |
+
+The wildcards are asymmetric on purpose. A bucket namespace is yours, so a prefix glob gives nothing away; a host namespace is anyone's, so hosts take the mirror image, anchored to a label boundary — `*.media.example` accepts `cdn.media.example` and refuses `media.example.evil.com`. There is deliberately no host *prefix* glob: `cdn.*` reads as "our CDN" but would mean any host starting `cdn.`, `cdn.evil.com` included, so it matches nothing at all.
+
+**Leave `AP_SOURCE_ALLOWLIST` unset and HTTPS sources are refused outright**, while S3 sources are accepted — your bucket credentials are already the gate there, and a URL has no such backstop. An allowlisted host is trusted by definition: the proxy will fetch what it is pointed at, so point it at origins you control.
+
+`http://` and URLs carrying credentials (`https://user:pass@…`) are refused whatever the allowlist says.
+
+**Neither form can be rendered yet.** Both parse, canonicalize and authorize, but their storage backends are separate slices (`add-s3-client`, `add-https-source-backend`); until those land a remote source answers `404`. See [docs/sources.md](docs/sources.md#remote-sources) for the URL normalization rules, the limits, and the full allowlist grammar.
 
 ## Errors
 
@@ -381,7 +398,7 @@ Note that the variables below are the full configuration surface for the design,
 | `AP_KEY` | hex, ≥ 32 bytes decoded | unset | HMAC key for URL signatures |
 | `AP_SALT` | hex | unset | HMAC salt |
 | `AP_ALLOW_INSECURE` | boolean | `false` | Accept unsigned URLs (dev only) |
-| `AP_SOURCE_ALLOWLIST` | comma-separated | empty | Permitted source buckets/hosts (used once remote source types land) |
+| `AP_SOURCE_ALLOWLIST` | comma-separated | empty | Permitted buckets and hosts for `s3://` and `https://` sources. Empty accepts every bucket and refuses every host — see [Sources](#s3-and-https-remote-sources) |
 | `AP_LOCAL_ROOT` | existing directory | unset | Root for `local://` sources; unset disables them. Must exist at boot, and may not be `/` |
 | `AP_VARIANT_BUCKET` | string | unset | Write-back target; unset = always render |
 | `AP_MAX_CONCURRENCY` | positive integer | schedulers online | Max simultaneous ffmpeg processes |
