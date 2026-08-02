@@ -12,24 +12,37 @@ defmodule AudioProxy.Plugs.RenderAction do
 
   Then the render: `AudioProxy.Source.ffmpeg_input/1` says what ffmpeg should
   read, `AudioProxy.Ffmpeg.Command.build/2` says how, and
-  `AudioProxy.Ffmpeg.RenderSupervisor.start_render/1` runs it with *this*
-  process as consumer. The filesystem is never reached around that seam:
-  `ffmpeg_input/1` is what re-checks that the target is still a regular file,
-  and a FIFO handed to ffmpeg blocks forever on a read that never completes,
-  holding a render slot until the timeout.
+  `AudioProxy.RenderCoordinator.subscribe/2` runs it — or attaches to the one
+  already running for this cache key — with *this* process as subscriber. The
+  filesystem is never reached around that seam: `ffmpeg_input/1` is what
+  re-checks that the target is still a regular file, and a FIFO handed to
+  ffmpeg blocks forever on a read that never completes, holding a render slot
+  until the timeout.
+
+  ## Coalescing, from this side
+
+  Subscribing hands back a status and a backlog. `:miss` means this request
+  started the render and the backlog is empty; `:coalesced` means another
+  request is already rendering this exact variant, and the backlog is
+  everything it has produced so far — written as the first chunk, before the
+  live ones. Those are the two `X-Audio-Proxy` values §5 defines for a render;
+  `HIT` arrives with the variant cache.
+
+  Nothing else in this module knows about it. The coordinator broadcasts the
+  pipeline's own message contract with itself as the handle, so the loop below
+  is the loop that was written against the pipeline directly.
 
   ## The streaming loop
 
   A plain `receive` loop, not a GenServer: the conn belongs to this process and
-  stays here. Each `{:chunk, _, data}` is written with `Plug.Conn.chunk/2` and
-  acknowledged, which is what releases the pipeline's bounded buffer; `{:done,
-  _, _}` ends the response; `{:error, _, failure}` is mapped by *class* through
-  `AudioProxy.ErrorJSON` (classifying is the pipeline's job, choosing a status
-  is this module's).
+  stays here. Each `{:chunk, _, data}` is written with `Plug.Conn.chunk/2`;
+  `{:done, _, _}` ends the response; `{:error, _, failure}` is mapped by
+  *class* through `AudioProxy.ErrorJSON` (classifying is the pipeline's job,
+  choosing a status is this module's).
 
-  The spawn is deliberately one call site. `add-render-coalescing` replaces
-  exactly that call with a subscription to a shared render, and because the
-  message contract is the same, nothing in the loop below changes.
+  There is no acknowledgement to send. The pipeline's bounded buffer is
+  released by the coordinator, which retains every byte anyway; what bounds
+  memory on this path is the coordinator's retention cap.
 
   ## Before and after the first byte
 
@@ -41,12 +54,13 @@ defmodule AudioProxy.Plugs.RenderAction do
   plain HTTP), which is what `abort/3` does by exiting.
 
   Client disconnect is detected the way any writer detects it — the next write
-  fails. `chunk/2` answering `{:error, _}` means the socket is gone, so the
-  render is cancelled on the spot. That is not the only guarantee: the pipeline
-  monitors its consumer and kills the subprocess when it dies, so a crash on
-  this path costs an ffmpeg process no more than a clean exit does. Detection
-  is bounded by chunk cadence rather than by wall clock, which is what an
-  encoder producing output continuously makes acceptable.
+  fails. `chunk/2` answering `{:error, _}` means the socket is gone, so this
+  request unsubscribes on the spot; the render stops only if it was the last
+  one listening. That is not the only guarantee: the coordinator monitors its
+  subscribers and the pipeline monitors its consumer, so a crash on this path
+  costs an ffmpeg process no more than a clean exit does. Detection is bounded
+  by chunk cadence rather than by wall clock, which is what an encoder
+  producing output continuously makes acceptable.
 
   ## The receive deadline is a backstop, not the timeout
 
@@ -80,8 +94,8 @@ defmodule AudioProxy.Plugs.RenderAction do
 
   require Logger
 
-  alias AudioProxy.{CacheKey, Config, ErrorJSON, Source, Telemetry}
-  alias AudioProxy.Ffmpeg.{Command, Render, RenderSupervisor}
+  alias AudioProxy.{CacheKey, Config, ErrorJSON, RenderCoordinator, Source, Telemetry}
+  alias AudioProxy.Ffmpeg.Command
 
   # §5: the URL encodes the variant, so a rendered variant is immutable.
   @cache_control "public, max-age=31536000, immutable"
@@ -112,23 +126,46 @@ defmodule AudioProxy.Plugs.RenderAction do
   def call(conn, opts) do
     source = conn.assigns.source
 
+    # §5: the cache key identifies the variant, and is both what the ETag
+    # carries and what renders coalesce on. Derived once, here.
+    conn =
+      assign(conn, :cache_key, CacheKey.derive!(conn.assigns.options, Source.canonical(source)))
+
     with {:ok, stat} <- Source.stat(source),
          :ok <- within_limit(stat.size),
          {:ok, input} <- Source.ffmpeg_input(source),
-         {:ok, render} <- start_render(conn.assigns.options, input, opts) do
+         {:ok, status, render, backlog} <- subscribe(conn, input, opts) do
       # `input` is what ffmpeg reads and can be a presigned URL; the span
       # carries the canonical identity instead, so nothing downstream of here
       # can log a credential. See `AudioProxy.Telemetry`.
+      #
+      # One span per *request*, not per render: a coalesced request delivered
+      # its own bytes over its own connection, and an operator reading the log
+      # is reading requests.
       span =
         Telemetry.render_start(%{
           format: conn.assigns.options.format,
           source: Source.canonical(source)
         })
 
-      await_first_chunk(conn, render, Process.monitor(render), span)
+      conn
+      |> assign(:render_status, status)
+      |> deliver(render, Process.monitor(render), span, backlog)
     else
       {:error, reason} -> ErrorJSON.halt_with(conn, reason)
     end
+  end
+
+  # A `:miss` has nothing to catch up on and waits for its first live chunk. A
+  # `:coalesced` one already holds bytes, so the response head goes out now and
+  # the catch-up is its first written chunk — one chunk rather than the several
+  # it arrived as, which nothing in §5 distinguishes.
+  defp deliver(conn, render, monitor, span, []) do
+    await_first_chunk(conn, render, monitor, span)
+  end
+
+  defp deliver(conn, render, monitor, span, backlog) do
+    conn |> begin() |> write(render, monitor, span, IO.iodata_to_binary(backlog))
   end
 
   # `nil` size means the backing store does not know it; refusing outright
@@ -140,14 +177,12 @@ defmodule AudioProxy.Plugs.RenderAction do
     if size > Config.get(:max_src_bytes), do: {:error, :source_too_large}, else: :ok
   end
 
-  defp start_render(options, input, opts) do
-    start_opts =
-      [args: Command.build(options, input), consumer: self()] ++
-        Keyword.take(opts, [:executable])
+  defp subscribe(conn, input, opts) do
+    spec = [args: Command.build(conn.assigns.options, input)] ++ Keyword.take(opts, [:executable])
 
-    case RenderSupervisor.start_render(start_opts) do
-      {:ok, render} ->
-        {:ok, render}
+    case RenderCoordinator.subscribe(conn.assigns.cache_key, spec) do
+      {:ok, status, render, backlog} ->
+        {:ok, status, render, backlog}
 
       # Not a client error at all: no ffmpeg on `PATH`, or a supervisor that
       # would not start the child. 500 in the same JSON shape as every other
@@ -187,7 +222,7 @@ defmodule AudioProxy.Plugs.RenderAction do
     after
       deadline() ->
         demonitor(monitor)
-        cancel_and_drain(render)
+        leave_and_drain(render)
         Telemetry.render_exception(span, %{class: :timeout, detail: @deadline_detail})
         ErrorJSON.halt_with(conn, :render_timeout)
     end
@@ -218,7 +253,7 @@ defmodule AudioProxy.Plugs.RenderAction do
         abort(nil, :render_failed)
     after
       deadline() ->
-        Render.cancel(render)
+        RenderCoordinator.unsubscribe(render)
         Telemetry.render_exception(span, %{class: :timeout, detail: @deadline_detail})
         abort(monitor, :timeout)
     end
@@ -227,19 +262,17 @@ defmodule AudioProxy.Plugs.RenderAction do
   defp write(conn, render, monitor, span, data) do
     case chunk(conn, data) do
       {:ok, conn} ->
-        # Acknowledging is not bookkeeping: the pipeline stops forwarding above
-        # its high-water mark, so a loop that never acked would receive one
-        # buffer's worth of audio and then nothing, `{:done, _, _}` included.
-        Render.ack(render, byte_size(data))
         stream(conn, render, monitor, Telemetry.count(span, byte_size(data)))
 
       {:error, reason} ->
-        # The client is gone. Cancelling here is what makes teardown prompt;
-        # the pipeline's consumer monitor would get there anyway, and does when
-        # this process dies instead of returning.
+        # The client is gone. Leaving here is what makes teardown prompt; the
+        # coordinator's subscriber monitor would get there anyway, and does
+        # when this process dies instead of returning. Whether the render
+        # survives is the coordinator's call, not this request's — another
+        # client may still be reading the same variant.
         Logger.debug("client disconnected mid-stream: #{inspect(reason)}")
         demonitor(monitor)
-        cancel_and_drain(render)
+        leave_and_drain(render)
         Telemetry.render_stop(span, :cancelled)
         halt(conn)
     end
@@ -263,18 +296,18 @@ defmodule AudioProxy.Plugs.RenderAction do
     exit({:shutdown, {:render_aborted, class}})
   end
 
-  # `cancel/1` returns only once the render has stopped, and everything the
-  # render ever sent us — queued chunks, the final `%{class: :cancelled}` — was
-  # sent before that reply, so it is already in the mailbox and `after 0` is a
-  # drain rather than a race.
+  # `unsubscribe/1` returns only once this process has been removed from the
+  # coordinator's subscriber list, and everything the coordinator ever sent us
+  # was sent before that reply, so it is already in the mailbox and `after 0`
+  # is a drain rather than a race.
   #
   # Draining matters because this process is Bandit's *connection* process and
   # is reused for the next request on a keep-alive connection. Those messages
-  # would never match again — the next request pins a different render pid — so
-  # they would accumulate for the life of the connection, and every selective
-  # receive in the loop above would scan past all of them.
-  defp cancel_and_drain(render) do
-    Render.cancel(render)
+  # would never match again — the next request pins a different coordinator
+  # pid — so they would accumulate for the life of the connection, and every
+  # selective receive in the loop above would scan past all of them.
+  defp leave_and_drain(render) do
+    RenderCoordinator.unsubscribe(render)
     drain(render)
   end
 
@@ -298,20 +331,16 @@ defmodule AudioProxy.Plugs.RenderAction do
     # `put_resp_content_type/2` would add one.
     |> put_resp_content_type(Command.content_type(options), nil)
     |> put_resp_header("cache-control", @cache_control)
-    |> put_resp_header("etag", etag(conn))
-    |> put_resp_header("x-audio-proxy", "MISS")
+    |> put_resp_header("etag", ~s("#{conn.assigns.cache_key}"))
+    |> put_resp_header("x-audio-proxy", cache_status(conn))
     |> download_header(options)
     |> send_chunked(200)
   end
 
-  # §5: the ETag *is* the cache key. Quoted because RFC 9110 defines an
-  # entity-tag as a quoted-string — a bare token is not one, and a validator a
-  # cache cannot compare is worse than none.
-  defp etag(conn) do
-    key = CacheKey.derive!(conn.assigns.options, Source.canonical(conn.assigns.source))
-
-    ~s("#{key}")
-  end
+  # §5's two render statuses. `HIT` is not one of them: it is a 302 to storage
+  # and never reaches this module, which is why the variant cache owns it.
+  defp cache_status(%{assigns: %{render_status: :coalesced}}), do: "COALESCED"
+  defp cache_status(_conn), do: "MISS"
 
   defp download_header(conn, %{download: nil}), do: conn
 
