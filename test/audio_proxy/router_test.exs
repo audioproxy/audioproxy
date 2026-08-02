@@ -26,6 +26,21 @@ defmodule AudioProxy.RouterTest do
       # (API doc §2).
       assert request(:get, "/health").status == 200
     end
+
+    test "is never cached — a stored 'ok' would answer for a dead proxy" do
+      assert get_resp_header(request(:get, "/health"), "cache-control") == ["no-store"]
+    end
+  end
+
+  describe "HEAD /health" do
+    test "answers the GET's status and headers, bodiless" do
+      conn = request(:head, "/health")
+
+      assert conn.status == 200
+      assert conn.resp_body == ""
+      assert get_resp_header(conn, "content-type") == ["application/json; charset=utf-8"]
+      assert get_resp_header(conn, "cache-control") == ["no-store"]
+    end
   end
 
   describe "the signed URL space" do
@@ -72,6 +87,10 @@ defmodule AudioProxy.RouterTest do
                "error" => "not_found",
                "message" => "No such resource"
              }
+
+      # The unmatched-route 404 follows the same negative-caching row as a
+      # missing source: explicit, brief, no CDN default deciding.
+      assert get_resp_header(conn, "cache-control") == ["max-age=10"]
     end
 
     test "non-GET methods fall through to the 404" do

@@ -63,12 +63,29 @@ defmodule AudioProxy.RenderEndpointTest do
   # The same route, rendered by the stand-in encoder. Everything before the
   # action is the identical plug chain, so an error asserted through `get/1`
   # is asserted against the production mounting.
-  defp render(path) do
-    conn(:get, path) |> AudioProxy.FakeFfmpeg.Router.call(@fake_opts)
+  defp render(path, headers \\ []) do
+    request(:get, path, headers)
+  end
+
+  defp request(method, path, headers \\ []) do
+    headers
+    |> Enum.reduce(conn(method, path), fn {k, v}, c -> put_req_header(c, k, v) end)
+    |> AudioProxy.FakeFfmpeg.Router.call(@fake_opts)
   end
 
   defp signed(rest) do
     "/#{Signature.sign(rest, @key, @salt)}#{rest}"
+  end
+
+  defp quoted_etag(options, source) do
+    ~s("#{AudioProxy.CacheKey.derive!(options, source)}")
+  end
+
+  # The process-table probe behind every "no render was spawned" assertion:
+  # each render runs under its own coordinator, and `reset_coordinators/0` in
+  # setup guarantees the table starts empty.
+  defp no_render_spawned? do
+    DynamicSupervisor.which_children(AudioProxy.RenderCoordinator.Supervisor) == []
   end
 
   describe "signature gate (see also RouterTest)" do
@@ -196,7 +213,10 @@ defmodule AudioProxy.RenderEndpointTest do
       key = AudioProxy.CacheKey.derive!("f:opus/br:96", "local://piece.wav")
 
       assert get_resp_header(conn, "content-type") == ["audio/ogg"]
-      assert get_resp_header(conn, "cache-control") == ["public, max-age=31536000, immutable"]
+
+      assert get_resp_header(conn, "cache-control") ==
+               ["public, max-age=31536000, immutable, no-transform"]
+
       assert get_resp_header(conn, "etag") == [~s("#{key}")]
       assert get_resp_header(conn, "x-audio-proxy") == ["MISS"]
       assert get_resp_header(conn, "content-disposition") == []
@@ -263,6 +283,154 @@ defmodule AudioProxy.RenderEndpointTest do
 
       assert conn.status == 415
       assert JSON.decode!(conn.resp_body)["error"] == "undecodable_source"
+    end
+  end
+
+  describe "errors declare their cacheability end to end" do
+    test "a 404 is briefly negative-cached, a 422 for a minute, a 401 too" do
+      assert get_resp_header(get(signed("/f:mp3/plain/local://missing.wav")), "cache-control") ==
+               ["max-age=10"]
+
+      assert get_resp_header(get(signed("/nope:1/plain/local://piece.wav")), "cache-control") ==
+               ["max-age=60"]
+
+      assert get_resp_header(get("/f:mp3/plain/local://piece.wav"), "cache-control") ==
+               ["max-age=60"]
+    end
+  end
+
+  describe "conditional requests are answered from the URL" do
+    @variant "/f:opus/br:96/plain/local://piece.wav"
+
+    test "a matching If-None-Match is a 304 with no render spawned" do
+      etag = quoted_etag("f:opus/br:96", "local://piece.wav")
+
+      conn = render(signed(@variant), [{"if-none-match", etag}])
+
+      assert conn.status == 304
+      assert conn.resp_body == ""
+      assert get_resp_header(conn, "etag") == [etag]
+
+      assert get_resp_header(conn, "cache-control") ==
+               ["public, max-age=31536000, immutable, no-transform"]
+
+      assert no_render_spawned?()
+    end
+
+    test "a weak validator matches too — CDNs may weaken stored ETags" do
+      etag = quoted_etag("f:opus/br:96", "local://piece.wav")
+
+      conn = render(signed(@variant), [{"if-none-match", "W/" <> etag}])
+
+      assert conn.status == 304
+      assert no_render_spawned?()
+    end
+
+    test "a stale validator proceeds exactly as without the header" do
+      conn = render(signed(@variant), [{"if-none-match", ~s("someone-elses-etag")}])
+
+      assert conn.status == 200
+      assert conn.state == :chunked
+      assert conn.resp_body == @payload
+    end
+
+    test "a matching validator outranks a missing source: 304, not 404" do
+      # Deliberate, and pinned so it is not "fixed" into a stat per
+      # revalidation: the ETag names immutable variant bytes, so a cache still
+      # holding them is not wrong to keep them even though the source is gone.
+      etag = quoted_etag("f:mp3", "local://gone.wav")
+      path = signed("/f:mp3/plain/local://gone.wav")
+
+      assert render(path).status == 404
+      assert render(path, [{"if-none-match", etag}]).status == 304
+      assert no_render_spawned?()
+    end
+
+    test "the signature still gates: unsigned plus a matching validator is 401" do
+      etag = quoted_etag("f:opus/br:96", "local://piece.wav")
+
+      conn =
+        conn(:get, "/insecure#{@variant}")
+        |> put_req_header("if-none-match", etag)
+        |> AudioProxy.Router.call(@opts)
+
+      assert conn.status == 401
+      assert no_render_spawned?()
+    end
+  end
+
+  describe "HEAD is supported on the signed endpoint" do
+    test "a valid URL answers the GET's headers, an empty body, and no spawn" do
+      conn = request(:head, signed("/f:opus/br:96/plain/local://piece.wav"))
+
+      assert conn.status == 200
+      assert conn.resp_body == ""
+      assert get_resp_header(conn, "content-type") == ["audio/ogg"]
+
+      assert get_resp_header(conn, "cache-control") ==
+               ["public, max-age=31536000, immutable, no-transform"]
+
+      assert get_resp_header(conn, "etag") == [quoted_etag("f:opus/br:96", "local://piece.wav")]
+
+      # No render ran, so the header that names a render's outcome is absent.
+      assert get_resp_header(conn, "x-audio-proxy") == []
+      assert no_render_spawned?()
+    end
+
+    test "a bad signature is 401, a missing source 404 — errors as GET" do
+      rest = "/f:opus/br:96/plain/local://piece.wav"
+
+      bad_sig =
+        conn(:head, "/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA#{rest}")
+        |> AudioProxy.Router.call(@opts)
+
+      assert bad_sig.status == 401
+      assert get_resp_header(bad_sig, "cache-control") == ["max-age=60"]
+
+      missing = request(:head, signed("/f:mp3/plain/local://missing.wav"))
+
+      assert missing.status == 404
+      assert get_resp_header(missing, "cache-control") == ["max-age=10"]
+      assert no_render_spawned?()
+    end
+
+    test "HEAD answers 200 where GET answers 415, and cannot do better" do
+      # Not a lie the chain could avoid: 415 is ffmpeg's verdict while
+      # decoding, and HEAD exists precisely to skip the decode. Pinned so the
+      # divergence stays a documented property rather than a surprise — and so
+      # anyone tempted to "fix" it has to notice they would be rendering.
+      path = signed("/f:mp3/plain/local://notaudio.txt")
+
+      assert render(path).status == 415
+      assert request(:head, path).status == 200
+    end
+
+    test "HEAD runs the stat: an oversized source is 413, exactly like GET" do
+      put_config(%{max_src_bytes: byte_size(@piece_content) - 1})
+
+      assert request(:head, signed("/f:mp3/plain/local://piece.wav")).status == 413
+    end
+
+    test "dl still describes the variant: Content-Disposition on the HEAD" do
+      conn = request(:head, signed("/f:mp3/dl:preview.mp3/plain/local://piece.wav"))
+
+      assert get_resp_header(conn, "content-disposition") ==
+               [~s(attachment; filename="preview.mp3")]
+    end
+  end
+
+  describe "Range on a MISS is ignored" do
+    test "a Range header still gets the full 200 chunked stream" do
+      # Pinning intent, not an accident (RFC 9110 §14.2 permits ignoring
+      # Range): 206 semantics belong to cached variants, which storage will
+      # serve. A future "helpful" 416 or partial implementation fails here.
+      conn = render(signed("/f:opus/br:96/plain/local://piece.wav"), [{"range", "bytes=1000-"}])
+
+      assert conn.status == 200
+      assert conn.state == :chunked
+      assert conn.resp_body == @payload
+      assert get_resp_header(conn, "accept-ranges") == []
+      assert get_resp_header(conn, "content-range") == []
     end
   end
 

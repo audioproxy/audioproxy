@@ -1,11 +1,15 @@
 ## ADDED Requirements
 
 ### Requirement: Every response declares its cacheability
-The system SHALL set an explicit `Cache-Control` on every response: the immutable media policy on 200s, `max-age=10` on 404, `max-age=60` on 401 and 422 (deterministic per URL), and `no-store` on 429 and 5xx-class responses including 504 — so no CDN negative-caching default ever decides retention.
+The system SHALL set an explicit `Cache-Control` on every response: the immutable media policy on 200s, `max-age=10` on 404, 413, and 415 (verdicts about the current source bytes, which a re-upload changes), `max-age=60` on 401 and 422 (deterministic per URL), and `no-store` on 429 and 5xx-class responses including 504 — so no CDN negative-caching default ever decides retention.
 
 #### Scenario: Missing source is briefly negative-cached
 - **WHEN** a request 404s
 - **THEN** the response carries `Cache-Control: max-age=10`, so a source uploaded moments later is served promptly
+
+#### Scenario: Source-verdict errors follow the 404 row
+- **WHEN** a request answers 413 or 415
+- **THEN** the response carries `Cache-Control: max-age=10`, because the verdict is about source bytes a re-upload changes
 
 #### Scenario: Deterministic client errors cache briefly
 - **WHEN** a request answers 401 or 422

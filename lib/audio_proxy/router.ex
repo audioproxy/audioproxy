@@ -35,13 +35,34 @@ defmodule AudioProxy.Router do
   plug :match
   plug :dispatch
 
+  # `no-store`: liveness is only worth anything fresh, and a cached "ok"
+  # would answer for a proxy that is down.
   get "/health" do
     conn
     |> assign(:endpoint_class, :health)
+    |> put_resp_header("cache-control", "no-store")
     |> send_json(200, %{status: "ok", version: version()})
   end
 
+  # Bodiless by construction rather than by adapter stripping, so what a test
+  # sees is what the wire carries.
+  head "/health" do
+    conn
+    |> assign(:endpoint_class, :health)
+    |> put_resp_content_type("application/json")
+    |> put_resp_header("cache-control", "no-store")
+    |> send_resp(200, "")
+  end
+
   get "/:sig/*rest" do
+    conn
+    |> assign(:endpoint_class, :render)
+    |> RenderPipeline.call(@render_pipeline)
+  end
+
+  # Same pipeline as GET: every check runs, the action ends bodiless after
+  # the stat instead of spawning a render.
+  head "/:sig/*rest" do
     conn
     |> assign(:endpoint_class, :render)
     |> RenderPipeline.call(@render_pipeline)
@@ -51,6 +72,7 @@ defmodule AudioProxy.Router do
     conn
     |> assign(:endpoint_class, :unknown)
     |> assign(:error_class, :not_found)
+    |> put_resp_header("cache-control", AudioProxy.ErrorJSON.cache_control(404))
     |> send_json(404, %{error: "not_found", message: "No such resource"})
   end
 
