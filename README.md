@@ -4,11 +4,11 @@
 
 An imgproxy-style on-the-fly audio transcoding proxy.
 
-> **Status: early.** A signed URL for a `local://` source now renders and
-> streams: URL signing, the processing-options grammar, the ffmpeg argument
-> builder, source resolution and the chunked render endpoint are done. The
-> variant cache (so every request still renders), S3 and HTTPS sources, peaks
-> and `/info` are not. Slices tracked under `openspec/changes/`.
+> **Status: early — `v0.1.0`.** Transcoding works end to end from a mounted
+> directory, and you can try it in a minute. It is not yet something to put in
+> front of production traffic: there is no variant cache, so every request
+> re-renders, and no limit on concurrent renders. See the
+> [Roadmap](#roadmap).
 
 ## Quick start
 
@@ -100,12 +100,55 @@ Each URL describes its output completely, so the same URL always means the
 same bytes. The first request for a variant renders it and streams it while it
 encodes; later requests are served from the variant bucket with `Range` support.
 
-> **Mostly real now.** Transcodes render and stream: point `AP_LOCAL_ROOT` at a
-> directory and the first six examples above return audio. Not yet: `f:peaks`
-> and `info` (their own slices), `s3://` and `https://` sources, and the
-> variant bucket — every request renders, because there is no cache to hit
-> yet. Each option string above is checked against the parser in the test
-> suite.
+> **Which of these work today?** The first six return audio. `f:peaks` and
+> `info` do not yet — see the [Roadmap](#roadmap). Every option string above is
+> checked against the parser by the test suite, so none of them are aspirational
+> spellings.
+
+## Roadmap
+
+No dates. This is built in slices, each one shippable, in roughly this order.
+
+**Working now — `v0.1.0`**
+
+- Signed URLs, the full processing-options grammar, and the cache-key rules
+- Transcoding to MP3, AAC/M4A, Opus, Vorbis, FLAC and WAV, with trimming,
+  fades, loudness normalisation, channel and sample-rate control
+- Renders stream while they encode, from files in a mounted directory
+- A single container, published per release
+
+**Next — what makes it production-shaped**
+
+- **A variant cache.** Today every request re-renders. Rendered variants will
+  be written back to object storage and served from there on later requests,
+  with `Range` support and byte-serving.
+- **Bounded concurrency.** A cap on simultaneous renders with a wait queue, so
+  a burst of traffic queues instead of thrashing the machine.
+- **Deduplication.** Concurrent requests for the same variant will share one
+  render rather than starting several.
+- **S3 sources**, which is what the cache is built on.
+
+**After that**
+
+- `GET /info` — duration, sample rate and channels, so clients can build
+  sensible variant URLs
+- `f:peaks` — waveform min/max data for drawing player UIs without decoding
+  audio in the browser
+- HTTPS sources, for stores that are not S3
+- A Prometheus `/metrics` endpoint — queue depth, render durations, hit ratio
+- arm64 images, so Graviton/Ampere and Apple Silicon run natively
+
+**Deliberately not planned**
+
+- **Video.** This is an audio proxy and will refuse video input rather than
+  become a general ffmpeg gateway; video transcoding is far more expensive and
+  carries most of ffmpeg's CVE history.
+- **HLS and segmented streaming.** The URL space is reserved, nothing more.
+
+`0.x` means the URL contract can still change. It will settle at `1.0`, after
+which a change to what an existing URL means — or to how cache keys are
+derived — is a major version. The per-slice detail, including rationale and
+trade-offs, lives in [`openspec/changes/`](openspec/changes).
 
 ## Design
 
