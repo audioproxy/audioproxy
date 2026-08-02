@@ -147,11 +147,13 @@ Straight mapping of `ffprobe -show_format -show_streams`, filtered. Cached aggre
 | `413` | Source exceeds `AP_MAX_SRC_BYTES` |
 | `415` | Source format not decodable |
 | `422` | Invalid or conflicting options |
-| `429` | Render queue full (`Retry-After` set) |
+| `429` | No render slot: the wait queue was full, or this request waited in it longer than `AP_RENDER_TIMEOUT` without reaching the front (`Retry-After` set) |
 | `500` | The render failed for a reason that is not the client's: no encoder, no space, a diagnostic the classifier does not recognise |
-| `504` | Render exceeded `AP_RENDER_TIMEOUT` |
+| `504` | A render started and then exceeded `AP_RENDER_TIMEOUT` |
 
 Every other row is something the *client* got wrong, which is why `500` is worth stating rather than leaving to the adapter: a render can fail with none of them true, and answering a plausible `4xx` would tell a client to stop retrying something that might well work next time.
+
+`429` and `504` divide on whether a render ever ran, not on how long the client waited — both can take the full `AP_RENDER_TIMEOUT`. A request that spent that budget queued for a slot has nothing to report about a render, so it is told to come back, with the same `Retry-After` a full queue would have given it up front. `504` means a render held a slot and then went silent. Answering `504` for a wait would name a timeout that never happened, and would tell a client its variant is too expensive to encode when the truth is that the box is busy.
 
 Mid-stream render failure after `200` is signaled by abnormal termination of the chunked stream (nothing better exists over plain HTTP; one more argument for HLS in v2).
 
@@ -166,8 +168,8 @@ Mid-stream render failure after `200` is signaled by abnormal termination of the
 | `AP_SOURCE_ALLOWLIST` | Comma-separated bucket/host patterns |
 | `AP_LOCAL_ROOT` | Root directory for `local://` sources; unset = local sources disabled. Must exist at boot |
 | `AP_VARIANT_BUCKET` | Write-back target; unset = no cache, always render |
-| `AP_MAX_CONCURRENCY` | Max simultaneous ffmpeg processes (default: CPU count) |
-| `AP_QUEUE_SIZE` | Waiting renders before `429` |
+| `AP_MAX_CONCURRENCY` | Max simultaneous ffmpeg processes (default: CPU count). Coalesced requests share one, so this counts renders and not requests |
+| `AP_QUEUE_SIZE` | Requests that may wait for a slot before the next is answered `429` |
 | `AP_MAX_SRC_BYTES`, `AP_RENDER_TIMEOUT` | Abuse limits |
 | `AP_SERVE_MODE` | `redirect` \| `proxy` |
 
