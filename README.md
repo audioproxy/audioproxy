@@ -6,7 +6,7 @@ Transcode audio on demand, from a URL.
 
 Point it at your audio and ask for a variant by URL: a 30-second preview, a mono file for speech-to-text, a normalised podcast MP3, a 24-bit FLAC excerpt. The options are in the path, so one master can serve all of them and you generate none of them in advance. If you know [imgproxy](https://imgproxy.net), this is that, for audio.
 
-> **Status: early, `v0.1.0`.** Transcoding works end to end from a mounted directory and you can try it in about a minute. Do not put it in front of production traffic yet: every request re-renders, because there is no variant cache, and nothing bounds how many renders run at once. See the [Roadmap](#roadmap).
+> **Status: early, `v0.1.0`.** Transcoding works end to end from a mounted directory and you can try it in about a minute. Do not put it in front of production traffic yet: nothing is kept once a render finishes, so a variant is encoded again for every request that does not overlap another, and nothing bounds how many renders run at once. See the [Roadmap](#roadmap).
 
 ## Quick start
 
@@ -105,7 +105,7 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 
 **Next: what makes it production-shaped**
 
-- **A variant cache.** Today every request re-renders. Rendered variants will be written back to a store and served from there on later requests, with `Range` support and byte-serving. Where they are stored is a separate choice from where sources come from: a local directory for a single node, object storage when you have more than one.
+- **A variant cache.** Requests that overlap already share a render, but nothing survives it, so the next one encodes the variant again. Rendered variants will be written back to a store and served from there on later requests, with `Range` support and byte-serving. Where they are stored is a separate choice from where sources come from: a local directory for a single node, object storage when you have more than one.
 - **Bounded concurrency.** A cap on simultaneous renders with a wait queue, so a burst of traffic queues instead of thrashing the machine.
 - **S3 sources**, so the audio itself can live in object storage.
 
