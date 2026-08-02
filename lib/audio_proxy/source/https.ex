@@ -89,6 +89,9 @@ defmodule AudioProxy.Source.Https do
   # The scheme's default, which is therefore never rendered.
   @default_port 443
 
+  # See `reasons/0`. `:not_allowed` comes from the allowlist, the rest from here.
+  @reasons [:invalid_url, :userinfo_not_allowed, :source_too_long, :no_backend, :not_allowed]
+
   # A body that carries a scheme of its own. It cannot arrive through the
   # resolver, which strips exactly one, so this only catches a hand-built call —
   # but `URI.new/1` would read `http://media.example/x` as the host `http`, and
@@ -120,8 +123,16 @@ defmodule AudioProxy.Source.Https do
     # caller that built one by hand must get a verdict, not a `URI.Error` out
     # of a security check. The host is matched bracketless, which is both what
     # `URI` yields and what the allowlist documents.
-    case parse_url(url) do
-      {:ok, %URI{host: host}} when is_binary(host) -> Allowlist.authorize(:host, normalize(host))
+    #
+    # It runs the *same* `normalize/1` and `validated/1` the parser does, so the
+    # gate and the parser cannot reach different answers about which host this
+    # URL names. Userinfo is refused here too: `parse/1` already refuses it, but
+    # a hand-built tuple would otherwise carry credentials past the one function
+    # whose job is to say no.
+    with {:ok, %URI{host: host, userinfo: nil}} when is_binary(host) <- parse_url(url),
+         {:ok, normalized} <- validated(normalize(host)) do
+      Allowlist.authorize(:host, normalized)
+    else
       _undetermined -> {:error, :not_allowed}
     end
   end
@@ -135,6 +146,15 @@ defmodule AudioProxy.Source.Https do
   def ffmpeg_input(_source), do: {:error, :no_backend}
 
   @doc """
+  Every rejection reason this type can produce.
+
+  Declared rather than inferred, so a test can hold the two ends together — see
+  `AudioProxy.Source.S3.reasons/0` for why.
+  """
+  @spec reasons() :: [atom()]
+  def reasons, do: @reasons
+
+  @doc """
   A short human-readable sentence for one of this type's own reasons.
   """
   @spec message(atom()) :: String.t()
@@ -142,6 +162,7 @@ defmodule AudioProxy.Source.Https do
   def message(:userinfo_not_allowed), do: "https source carries embedded credentials"
   def message(:source_too_long), do: "https source is longer than a URL may usefully be"
   def message(:no_backend), do: "https sources have no storage backend yet"
+  def message(:not_allowed), do: "https host is not on AP_SOURCE_ALLOWLIST"
 
   ## Parsing
 
@@ -177,13 +198,46 @@ defmodule AudioProxy.Source.Https do
     if byte_size(host) > @max_host_bytes do
       {:error, :source_too_long}
     else
-      {:ok, normalize(host)}
+      host |> normalize() |> validated()
     end
   end
 
   # `https:///a.wav` parses with an empty host, and a URL with no origin names
   # nothing this proxy could fetch.
   defp host(%URI{}), do: {:error, :invalid_url}
+
+  # Validated *after* normalizing, which is the order that matters. Checking the
+  # raw host alone let three things through, all of them found by review:
+  #
+  #   * `https://./a` normalized to the empty string and rendered a canonical
+  #     URL with no host at all — a cache key for a string that is not a URL;
+  #   * `https://.../a` kept a dot-only host, which a bare `*` then admitted;
+  #   * `https://cdn..media.example/a` kept an empty label, and
+  #     `*.media.example` admitted it — so one origin resource could wear
+  #     unboundedly many allowlisted canonical strings, one per inserted dot.
+  #
+  # Worse than any of them: `parse/1` and `authorize/1` could disagree about the
+  # host, since `authorize/1` re-parses the canonical URL and would normalize
+  # `https://../a`'s `.` down to `""`. That disagreement failed closed here, but
+  # a security gate that reaches a different answer than the parser is the one
+  # thing this design cannot have. An IP literal is exempt: `::1` is not a
+  # dotted name, and its own parser has already vouched for it.
+  defp validated(host) do
+    cond do
+      host == "" -> {:error, :invalid_url}
+      String.contains?(host, ":") -> {:ok, host}
+      # A DNS name has no empty label; `a..b`, `.a` and `a.` (past the single
+      # root dot already stripped) are not names anything can resolve.
+      "" in String.split(host, ".") -> {:error, :invalid_url}
+      # A percent-escape in a host is not decoded by `URI`, so it would ride
+      # into the canonical string — and `String.downcase/1` even rewrites its
+      # hex case. It fails the allowlist closed today, but once
+      # `add-https-source-backend` opens a socket, a client that unescapes
+      # would fetch a host the allowlist never matched.
+      String.contains?(host, "%") -> {:error, :invalid_url}
+      true -> {:ok, host}
+    end
+  end
 
   ## Normalization
 

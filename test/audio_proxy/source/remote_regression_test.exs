@@ -1,7 +1,8 @@
 defmodule AudioProxy.Source.RemoteRegressionTest do
   @moduledoc """
-  The five defects an adversarial review found in the first implementation of
-  these two source forms, each pinned by the case that exposed it.
+  The defects adversarial review found in these two source forms, each pinned
+  by the case that exposed it — five from the first implementation, and the
+  host-validation family from the review of this slice.
 
   This file earns its overlap with the per-type suites. Those tests state what
   the spec requires; these state what was once *wrong*, so a refactor that
@@ -11,11 +12,77 @@ defmodule AudioProxy.Source.RemoteRegressionTest do
 
   # The allowlist lives in `:persistent_term`, which is global.
   use ExUnit.Case, async: false
+  use ExUnitProperties
 
   import AudioProxy.ConfigHelper
 
   alias AudioProxy.Source
   alias AudioProxy.Source.{Allowlist, Https}
+
+  # Hostile host spellings: the dots and empty labels that broke this once, plus
+  # ordinary labels and an IP literal so the property is not all rejections.
+  @host_parts ["a", "media", "example", ".", "..", "", "-", "1", "2001:db8::1", "%2E"]
+
+  property "a source that parses is a source the gate agrees with" do
+    # The invariant behind the whole host-validation family: `parse/1` and
+    # `authorize/1` must never disagree about which host a URL names. Under a
+    # bare `*` every host is allowlisted, so anything that parses must
+    # authorize — and anything the gate refuses under `*` is a host the parser
+    # should not have accepted. `https://../a` broke exactly this: it parsed to
+    # the host `.` and its canonical URL re-parsed to the empty string.
+    put_config(%{source_allowlist: ["*"]})
+
+    check all(
+            parts <- list_of(member_of(@host_parts), min_length: 1, max_length: 4),
+            separator <- member_of([".", ""])
+          ) do
+      host = Enum.join(parts, separator)
+
+      case Source.parse("plain/https://" <> host <> "/a.wav") do
+        {:ok, source} ->
+          assert Https.authorize(source) == :ok,
+                 "parse accepted #{inspect(host)} but the gate refused it"
+
+          # And the canonical string it produced is one the parser accepts back,
+          # unchanged — canonicalization has to be a fixed point.
+          assert Source.parse("plain/" <> Source.canonical(source)) == {:ok, source}
+
+        {:error, _refused} ->
+          :ok
+      end
+    end
+  end
+
+  test "an empty label is refused rather than admitted by a *. entry" do
+    # `*.media.example` admitted every one of these, each with its own canonical
+    # string: one origin resource, unboundedly many allowlisted cache keys.
+    put_config(%{source_allowlist: ["*.media.example"]})
+
+    for host <- [".media.example", "cdn..media.example", "..media.example"] do
+      assert Source.parse("plain/https://" <> host <> "/a.wav") == {:error, :invalid_url},
+             "expected #{host} to be refused"
+    end
+
+    assert {:ok, source} = Source.parse("plain/https://cdn.media.example/a.wav")
+    assert Https.authorize(source) == :ok
+  end
+
+  test "a dot-only host never becomes a hostless canonical URL" do
+    # `https://./a` normalized to "" and rendered `https:///a` — a cache key for
+    # a string that is not a URL.
+    for host <- [".", "..", "..."] do
+      assert Source.parse("plain/https://" <> host <> "/a.wav") == {:error, :invalid_url},
+             "expected #{inspect(host)} to be refused"
+    end
+  end
+
+  test "the s3 body is bounded before it is split, not after" do
+    # `String.split/3` scans a separator-free body in full; the bound has to
+    # come first. Cheap here (0.177 ms for 10 MB), but the ordering is the
+    # invariant, and `tasks.md` 1.2a asked for it explicitly.
+    assert Source.parse("plain/s3://" <> String.duplicate("a", 100_000)) ==
+             {:error, :source_too_long}
+  end
 
   test "a Unicode control in a URL is refused, not carried into the canonical string" do
     # `\x00-\x1f` alone lets all of these through, and each one reaches ffmpeg

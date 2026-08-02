@@ -32,6 +32,41 @@ defmodule AudioProxy.Source.HttpsTest do
       assert Https.parse("") == {:error, :invalid_url}
     end
 
+    test "refuses a host that is empty or dot-only once normalized" do
+      # `.` normalized to "" and rendered `https:///a` — a canonical cache key
+      # for a string that is not a URL.
+      for host <- [".", "..", "...", "...."] do
+        assert Https.parse(host <> "/a.wav") == {:error, :invalid_url},
+               "expected #{inspect(host)} to be refused"
+      end
+    end
+
+    test "refuses a host carrying an empty label" do
+      # `*.media.example` admitted every one of these, each with its own
+      # canonical string — one resource, unboundedly many allowlisted keys.
+      for host <- [".media.example", "cdn..media.example", "..media.example", "media.example.."] do
+        assert Https.parse(host <> "/a.wav") == {:error, :invalid_url},
+               "expected #{inspect(host)} to be refused"
+      end
+
+      # The single root dot is still a second spelling, not an empty label.
+      assert Https.parse("media.example./a.wav") ==
+               {:ok, {:http, "https://media.example/a.wav"}}
+    end
+
+    test "refuses a percent-escape in the host" do
+      # `URI` does not decode it, so it would ride into the canonical string —
+      # and once a backend opens a socket, a client that unescapes would fetch
+      # a host the allowlist never matched.
+      assert Https.parse("%6D%65dia.example/a.wav") == {:error, :invalid_url}
+      assert Https.parse("media%2Eexample/a.wav") == {:error, :invalid_url}
+    end
+
+    test "an IP literal is exempt from the label rules" do
+      assert Https.parse("[::1]/a.wav") == {:ok, {:http, "https://[::1]/a.wav"}}
+      assert Https.parse("1.2.3.4/a.wav") == {:ok, {:http, "https://1.2.3.4/a.wav"}}
+    end
+
     test "refuses a body carrying a scheme of its own" do
       # Unreachable through the resolver, which strips exactly one scheme —
       # but `URI.new/1` would read this as the host `http`, and a hand-built
@@ -231,6 +266,32 @@ defmodule AudioProxy.Source.HttpsTest do
       assert Https.authorize({:http, nil}) == {:error, :not_allowed}
       assert Https.authorize({:http}) == {:error, :not_allowed}
       assert Https.authorize({:http, "https:///a.wav"}) == {:error, :not_allowed}
+    end
+
+    test "refuses a hand-built source whose host the parser would have rejected" do
+      # The gate runs the same normalization and validation the parser does, so
+      # the two cannot reach different answers about which host a URL names.
+      put_config(%{source_allowlist: ["*"]})
+
+      for url <- [
+            "https:///a.wav",
+            "https://./a.wav",
+            "https://.../a.wav",
+            "https://cdn..media.example/a.wav",
+            "https://%6D%65dia.example/a.wav"
+          ] do
+        assert Https.authorize({:http, url}) == {:error, :not_allowed},
+               "expected #{url} to be refused even under a bare *"
+      end
+    end
+
+    test "refuses a hand-built source carrying credentials" do
+      # `parse/1` refuses userinfo, but a tuple built by hand would otherwise
+      # walk credentials past the one function whose job is to say no.
+      put_config(%{source_allowlist: ["media.example"]})
+
+      assert Https.authorize({:http, "https://user:pass@media.example/a.wav"}) ==
+               {:error, :not_allowed}
     end
 
     test "a trailing root dot in a hand-built URL still matches its entry" do
