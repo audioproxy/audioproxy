@@ -288,6 +288,16 @@ def check_image_properties
     !sh("docker", "run", "--rm", "--entrypoint", "sh", IMAGE, "-c", "command -v erl").last
   end
 
+  # The render lifecycle signals ffmpeg via System.find_executable("kill"),
+  # which wants a real binary — `command -v` would find the shell builtin and
+  # tell us nothing, so this tests for the file. Alpine's busybox provided one
+  # for free and Debian slim does not; without it a disconnect or timeout cannot
+  # terminate a render and the no-orphan guarantee quietly stops holding.
+  check "image provides the kill binary the render lifecycle needs" do
+    sh("docker", "run", "--rm", "--entrypoint", "sh", IMAGE,
+       "-c", "test -x /bin/kill || test -x /usr/bin/kill").last
+  end
+
   inspect_out = JSON.parse(sh!("docker", "inspect", IMAGE)).first
   labels = inspect_out.dig("Config", "Labels") || {}
 

@@ -79,8 +79,10 @@ ENV MIX_ENV=test \
     LANG=C.UTF-8 \
     DEBIAN_FRONTEND=noninteractive
 
+# procps for the same reason as the runtime stage: the :ffmpeg suite exercises
+# the kill discipline, so the stage that runs it needs the same /bin/kill.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential git ffmpeg \
+    && apt-get install -y --no-install-recommends build-essential git ffmpeg procps \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -109,10 +111,20 @@ ENV DEBIAN_FRONTEND=noninteractive
 # what is genuinely missing is installed here. `ca-certificates` is for the
 # HTTPS source fetches ffmpeg makes on its own; `wget` backs the HEALTHCHECK
 # (debian slim ships neither wget nor curl); tini is PID 1 (see ENTRYPOINT).
+#
+# `procps` is not optional padding: it provides /bin/kill, and the render
+# lifecycle signals ffmpeg through `System.find_executable("kill")`. The shell
+# builtin does not satisfy that — it needs a real binary. Alpine's busybox
+# supplied one, Debian slim does not, and without it a client disconnect or an
+# AP_RENDER_TIMEOUT cannot terminate the subprocess: the no-orphan guarantee
+# degrades to "ffmpeg exits when it feels like it", holding a CPU slot the whole
+# time. AudioProxy.Ffmpeg.Render logs and treats the process as alive rather
+# than pretending, so the symptom is a log line and a leak, not a crash.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         ffmpeg \
+        procps \
         tini \
         wget \
     && rm -rf /var/lib/apt/lists/*
