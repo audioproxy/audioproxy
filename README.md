@@ -119,7 +119,9 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 
 **Under consideration**
 
-- **Seeking on a first play.** The cache makes every request after the first one seekable; the first still streams, so its scrubber stays dead. Asking the server to render fully and hand back something range-capable was investigated and probably will not happen: a browser cannot signal that intent. It sends `Range: bytes=0-` on *every* first media request, so a server keying off `Range` would make all playback wait for a full render, and a non-seekable response stops the browser from ever sending a real seek. What does work is warming the cache: fetch the URL once, discard it, then set `src`, and the second request seeks normally.
+- **Seeking on a first play.** The cache makes every request after the first one range-capable; the first still streams, so it can only be scrubbed within what has already arrived. A `/sync/{signature}/{options}/{source}` URL would render fully before responding and hand back something seekable — trading time-to-first-byte for a working scrubber, and chosen by whoever writes the `src` rather than by the browser. That last point is what makes it possible at all: a browser cannot signal the intent itself, since it sends `Range: bytes=0-` on *every* first media request, so keying off `Range` would make all playback wait for a full render.
+
+  Whether it gets built is still open, because warming the cache does the same job for nothing: fetch the URL once, discard it, then set `src`, and the second request seeks normally.
 
 **Deliberately not planned**
 
