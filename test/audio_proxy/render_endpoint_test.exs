@@ -433,4 +433,45 @@ defmodule AudioProxy.RenderEndpointTest do
       assert get_resp_header(conn, "content-range") == []
     end
   end
+
+  describe "write-back" do
+    # The full-path version of the store's own round-trip tests: the metadata
+    # the store hands back is the head this response actually sent, so a
+    # store-direct fetch serves the variant identically.
+    test "the stored variant is the response — bytes and headers alike", %{tmp_dir: tmp_dir} do
+      store = Path.join(tmp_dir, "store")
+      File.mkdir_p!(store)
+      put_config(%{variant_store: {:file, store}})
+
+      conn = render(signed("/f:mp3/plain/local://piece.wav"))
+
+      assert conn.status == 200
+      assert conn.resp_body == @payload
+
+      [etag] = get_resp_header(conn, "etag")
+      key = String.trim(etag, ~s("))
+
+      wait_until(fn -> match?({:ok, _entry}, AudioProxy.VariantStore.head(key)) end)
+
+      assert {:ok, %{metadata: metadata}} = AudioProxy.VariantStore.head(key)
+      assert [metadata.content_type] == get_resp_header(conn, "content-type")
+      assert [metadata.cache_control] == get_resp_header(conn, "cache-control")
+      assert metadata.etag == etag
+
+      {:ok, stream} = AudioProxy.VariantStore.get_stream(key, nil)
+      assert stream |> Enum.to_list() |> IO.iodata_to_binary() == conn.resp_body
+    end
+  end
+
+  @deadline 5_000
+
+  defp wait_until(condition, remaining \\ @deadline)
+  defp wait_until(_condition, remaining) when remaining <= 0, do: flunk("condition never held")
+
+  defp wait_until(condition, remaining) do
+    unless condition.() do
+      Process.sleep(10)
+      wait_until(condition, remaining - 10)
+    end
+  end
 end

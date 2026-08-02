@@ -77,12 +77,29 @@ defmodule AudioProxy.RenderCoordinator do
 
   One subscriber dying never affects the others: it is removed and the render
   continues.
+
+  ## The write-back tee is a subscriber
+
+  When a variant store is configured and the spec carries `:metadata`, the
+  coordinator starts an `AudioProxy.VariantStore.Tee` in `init/1` and
+  registers it like any other subscriber — before the first chunk can exist,
+  so the store receives the whole stream. That one fact is the disconnect
+  policy: with a store, the last *client* leaving still leaves the tee
+  counted, so the render completes into the store and the next request is a
+  HIT; without one, the subscriber count reaches zero and the render is
+  cancelled as before. A tee that dies is forgotten like any subscriber —
+  and if no client remains either, the render is cancelled, because nothing
+  is left that could profit from it.
   """
 
   use GenServer
 
+  require Logger
+
   alias AudioProxy.Config
   alias AudioProxy.Ffmpeg.{Render, RenderSupervisor}
+  alias AudioProxy.VariantStore
+  alias AudioProxy.VariantStore.Tee
 
   @registry __MODULE__.Registry
   @supervisor __MODULE__.Supervisor
@@ -123,7 +140,10 @@ defmodule AudioProxy.RenderCoordinator do
   How to render, when this subscriber turns out to be the one starting it.
 
   The options of `AudioProxy.Ffmpeg.Render.start_link/1` less `:consumer`,
-  which is the coordinator itself.
+  which is the coordinator itself — plus `:metadata`
+  (`t:AudioProxy.VariantStore.metadata/0`), which never reaches the pipeline:
+  it is what the write-back tee stores alongside the bytes, and without it no
+  tee is started.
   """
   @type render_spec :: keyword()
 
@@ -262,7 +282,7 @@ defmodule AudioProxy.RenderCoordinator do
     Process.flag(:trap_exit, true)
 
     key = Keyword.fetch!(opts, :key)
-    spec = Keyword.fetch!(opts, :spec)
+    {metadata, spec} = Keyword.pop(Keyword.fetch!(opts, :spec), :metadata)
     subscriber = Keyword.fetch!(opts, :subscriber)
 
     case RenderSupervisor.start_render(Keyword.put(spec, :consumer, self())) do
@@ -272,13 +292,33 @@ defmodule AudioProxy.RenderCoordinator do
            key: key,
            render: render,
            render_monitor: Process.monitor(render),
-           # Registered before the first chunk can exist, so the subscriber
-           # that started this render needs no backlog.
-           subscribers: %{subscriber => Process.monitor(subscriber)}
+           # Registered before the first chunk can exist — the starting
+           # subscriber and the tee alike — so neither needs a backlog.
+           subscribers:
+             %{subscriber => Process.monitor(subscriber)}
+             |> maybe_tee(key, metadata)
          }}
 
       {:error, reason} ->
         {:stop, {:shutdown, reason}}
+    end
+  end
+
+  # The tee exists exactly when there is somewhere to write and something to
+  # write it with. Failing to start one is logged, not fatal: the render and
+  # its clients owe nothing to the cache.
+  defp maybe_tee(subscribers, key, metadata) do
+    if metadata != nil and VariantStore.configured?() do
+      case Tee.start(self(), key, metadata) do
+        {:ok, tee} ->
+          Map.put(subscribers, tee, Process.monitor(tee))
+
+        {:error, reason} ->
+          Logger.warning("could not start variant store tee: #{inspect(reason)}")
+          subscribers
+      end
+    else
+      subscribers
     end
   end
 

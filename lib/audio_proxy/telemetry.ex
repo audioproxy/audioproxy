@@ -18,6 +18,17 @@ defmodule AudioProxy.Telemetry do
   | `[:audio_proxy, :render, :stop]` | `duration` (native), `bytes` | `format`, `source`, `cache_status`, `outcome` |
   | `[:audio_proxy, :render, :exception]` | `duration` (native), `bytes` | `format`, `source`, `cache_status`, `class`, `exit_status`, `detail` |
 
+  One event stands apart from the render lifecycle:
+
+  | Event | Measurements | Metadata |
+  |---|---|---|
+  | `[:audio_proxy, :variant_store, :write_failure]` | `system_time` | `key`, `reason` |
+
+  Emitted by the write-back tee when storing a completed render fails — a
+  failure no client sees (their bytes come from the coordinator, not the
+  store), which is exactly why it must be instrumented: nothing else says
+  the cache has silently stopped filling.
+
   `outcome` is `:ok` for a render the client received whole and `:cancelled`
   for one abandoned because the client went away. `class` is the failure
   classification (`:timeout`, `:not_found`, `:undecodable`, `:render_failed`,
@@ -55,6 +66,7 @@ defmodule AudioProxy.Telemetry do
   """
 
   @render [:audio_proxy, :render]
+  @store_write_failure [:audio_proxy, :variant_store, :write_failure]
 
   @typedoc """
   What every render event describes: the variant, its source, and whether this
@@ -135,6 +147,21 @@ defmodule AudioProxy.Telemetry do
       %{duration: duration(span), bytes: span.bytes},
       metadata
     )
+  end
+
+  @doc "The write-back failure event's name, for consumers attaching to it."
+  @spec store_write_failure_event() :: :telemetry.event_name()
+  def store_write_failure_event, do: @store_write_failure
+
+  @doc """
+  Emits `[:audio_proxy, :variant_store, :write_failure]`.
+
+  `reason` is whatever `AudioProxy.VariantStore.put_stream/3` reported — a
+  posix atom, an exception — and is inspected, never raised, by consumers.
+  """
+  @spec store_write_failure(%{key: String.t(), reason: term()}) :: :ok
+  def store_write_failure(meta) do
+    :telemetry.execute(@store_write_failure, %{system_time: System.system_time()}, meta)
   end
 
   defp duration(span), do: System.monotonic_time() - span.started_at
