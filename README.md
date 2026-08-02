@@ -48,7 +48,7 @@ To hear it rather than download it, save this as `player.html` and open it in a 
 
 Playback starts before the render finishes, which is the point. `f:mp3` because every browser plays it; Safari will not play Ogg or Opus. For something to poke at rather than a single tag, [`examples/player.html`](examples/player.html) has presets for every format and shows what the browser makes of the response.
 
-**The duration will read as unknown and the scrubber will not work, both by design.** A render in progress has no length and nothing to seek into, so it is delivered chunked with no `Content-Length` and no `Accept-Ranges`. Seeking belongs to a *cached* variant, which has a known size and can be range-requested. Until the variant cache lands every request is a fresh render, so the seekable path is not reachable yet. See the [Roadmap](#roadmap).
+**While it renders, the duration reads as unknown and you cannot seek**, because a render in progress has no length and nothing to seek into: it is delivered chunked, with no `Content-Length` and no `Accept-Ranges`. Once the whole thing has arrived the browser can scrub within what it holds, so on a short file this is barely visible. What you cannot do, at any point, is jump to a position that has not been received — without `Accept-Ranges` the browser has to fetch everything up to that point first, which on a long file is the difference between seeking and waiting. Range requests need a *cached* variant with a known size; see the [Roadmap](#roadmap).
 
 Two things that matter beyond a first try:
 
