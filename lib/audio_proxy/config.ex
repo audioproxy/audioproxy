@@ -209,6 +209,13 @@ defmodule AudioProxy.Config do
   defp store(env, var) do
     with value when is_binary(value) <- fetch(env, var) do
       case URI.new(value) do
+        # A query or fragment has no meaning here; dropping one silently
+        # would leave the operator believing it did something.
+        {:ok, %URI{scheme: "file", query: query, fragment: fragment}}
+        when is_binary(query) or is_binary(fragment) ->
+          raise Error,
+                "#{var} must be a bare directory URL with no query or fragment, got: #{inspect(value)}"
+
         {:ok, %URI{scheme: "file", host: host, path: path}}
         when host in [nil, ""] and is_binary(path) and path != "" ->
           store_directory!(var, value, path)
@@ -238,6 +245,15 @@ defmodule AudioProxy.Config do
   # by mode bits, which say nothing about read-only mounts.
   defp store_directory!(var, value, path) do
     expanded = Path.expand(path)
+
+    # Same refusal, and the same accident, as AP_LOCAL_ROOT's: nobody types
+    # `file:///` deliberately, but `file://${DIR}/` with `DIR` unset produces
+    # exactly it — and a store rooted at `/` would fan its variants out into
+    # the filesystem root.
+    if expanded == "/" do
+      raise Error,
+            "#{var} must not be the filesystem root — point it at the directory you mean, e.g. file:///var/cache/audio_proxy"
+    end
 
     unless File.dir?(expanded) do
       raise Error, "#{var} must name an existing directory, got: #{inspect(value)}"

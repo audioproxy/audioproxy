@@ -196,6 +196,26 @@ defmodule AudioProxy.ConfigTest do
       assert error.message =~ "existing directory"
     end
 
+    test "the filesystem root aborts, since variants would fan out into /" do
+      # `file://${DIR}/` with DIR unset spells exactly this.
+      error = assert_raise Error, fn -> Config.build!(%{"AP_VARIANT_STORE" => "file:///"}) end
+
+      assert error.message =~ "AP_VARIANT_STORE"
+      assert error.message =~ "filesystem root"
+    end
+
+    test "a query or fragment aborts rather than being silently dropped", %{tmp_dir: tmp_dir} do
+      for suffix <- ["?x=1", "#frag"] do
+        error =
+          assert_raise Error, fn ->
+            Config.build!(%{"AP_VARIANT_STORE" => "file://#{tmp_dir}#{suffix}"})
+          end
+
+        assert error.message =~ "AP_VARIANT_STORE"
+        assert error.message =~ "query or fragment"
+      end
+    end
+
     test "a directory that refuses writes aborts, naming the variable", %{tmp_dir: tmp_dir} do
       File.chmod!(tmp_dir, 0o555)
       on_exit(fn -> File.chmod!(tmp_dir, 0o755) end)
