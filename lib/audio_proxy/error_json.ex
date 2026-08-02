@@ -32,6 +32,26 @@ defmodule AudioProxy.ErrorJSON do
   `render/1` is the pure mapping — that is what the per-row unit tests pin —
   and `halt_with/2` sends it and halts, which is all a plug ever calls.
 
+  ## Every error declares its cacheability
+
+  `halt_with/2` also sets a `Cache-Control` derived from the status, so no
+  CDN negative-caching default — where Cloudflare, CloudFront, and Fastly
+  differ most — ever decides how long an error sticks:
+
+      404, 413, 415   max-age=10   verdicts about the current source bytes;
+                                   a re-upload changes them, and 10 s is the
+                                   window a just-uploaded source waits
+      401, 422        max-age=60   pure functions of the URL — a bad
+                                   signature never becomes good, invalid
+                                   options never become valid; only a deploy
+                                   changes that, and 60 s bounds the window
+      429, 5xx        no-store     transient; caching a transient failure
+                                   amplifies it
+
+  It lives here and not in `render/1`'s row headers so the pure mapping keeps
+  pinning what is *specific* to each row; cacheability is a property of the
+  status class, and one derivation cannot drift row by row.
+
   `class/1` reads the same table for its label rather than its response:
   `halt_with/2` assigns the result to `:error_class`, which is how the
   request log line names what went wrong (`AudioProxy.LogHandler`). Deriving
@@ -165,12 +185,24 @@ defmodule AudioProxy.ErrorJSON do
     conn
     |> assign(:error_class, class(error))
     |> put_resp_content_type("application/json")
+    |> put_resp_header("cache-control", cache_control(status))
     |> then(fn conn ->
       Enum.reduce(headers, conn, fn {k, v}, c -> put_resp_header(c, k, v) end)
     end)
     |> send_resp(status, body)
     |> halt()
   end
+
+  @doc """
+  The `Cache-Control` an error status carries — see the moduledoc table.
+
+  Public for the same reason `not_found_reasons/0` is: tests and the router's
+  own unmatched-route 404 read this derivation rather than a copy of it.
+  """
+  @spec cache_control(pos_integer()) :: String.t()
+  def cache_control(status) when status in [404, 413, 415], do: "max-age=10"
+  def cache_control(status) when status in [401, 422], do: "max-age=60"
+  def cache_control(status) when status == 429 or status >= 500, do: "no-store"
 
   defp encode(map), do: JSON.encode!(map)
 end
