@@ -117,6 +117,10 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 - A Prometheus `/metrics` endpoint reporting queue depth, render durations and hit ratio
 - arm64 images, so Graviton/Ampere and Apple Silicon run natively
 
+**Under consideration**
+
+- **Seeking on a first play.** The cache makes every request after the first one seekable; the first still streams, so its scrubber stays dead. Asking the server to render fully and hand back something range-capable was investigated and probably will not happen: a browser cannot signal that intent. It sends `Range: bytes=0-` on *every* first media request, so a server keying off `Range` would make all playback wait for a full render, and a non-seekable response stops the browser from ever sending a real seek. What does work is warming the cache: fetch the URL once, discard it, then set `src`, and the second request seeks normally.
+
 **Deliberately not planned**
 
 - **Video.** This is an audio proxy and will refuse video input rather than become a general ffmpeg gateway; video transcoding is far more expensive and carries most of ffmpeg's CVE history.
