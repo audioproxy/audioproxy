@@ -18,6 +18,11 @@
 #               input
 #   failfast.*  exit 1 before any output, with a diagnostic no classifier
 #               recognises: the unclassifiable failure before the first byte
+#   presigned.* exit 1 with a diagnostic that quotes a presigned URL, query
+#               string and all — the credential-leak case. Real ffmpeg is not
+#               known to echo its input into its diagnostics; this is the
+#               build that does, so the redaction guarantee is tested rather
+#               than assumed.
 #   anything    write the payload below and exit 0
 #
 # Matching is on the *basename*, anchored, and a substring match on the whole
@@ -63,6 +68,11 @@ case "${input##*/}" in
     ;;
   failfast.*)
     printf 'something went wrong in a way no classifier knows\n' >&2
+    exit 1
+    ;;
+  presigned.*)
+    printf 'Error opening input file %s.\n' \
+      'https://masters.s3.amazonaws.com/piece.wav?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=deadbeefcafe' >&2
     exit 1
     ;;
   *)

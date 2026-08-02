@@ -57,6 +57,21 @@ defmodule AudioProxy.Plugs.RenderAction do
   little wider on purpose: the pipeline's timer starts at spawn and this one
   restarts on every message, so the pipeline's own timeout is what a client
   normally sees, with its classification intact.
+
+  ## Outcomes are events, not log calls
+
+  Every way this module can finish a render — done, cancelled by a departing
+  client, failed, timed out, dead — closes an `AudioProxy.Telemetry` span
+  rather than calling `Logger`. `AudioProxy.LogHandler` turns those events
+  into the lines an operator reads, and the metrics slice attaches its
+  aggregator to the same ones. The span is threaded through the receive loop
+  as a plain value because there are half a dozen exit points and no single
+  function call to wrap.
+
+  The two `Logger` calls that remain are not render outcomes: a supervisor
+  that would not start a child at all (no span was ever opened), and a client
+  disconnect, which is a note about *this* loop — the render's own
+  `:cancelled` stop event is what reports the render side of it.
   """
 
   @behaviour Plug
@@ -65,7 +80,7 @@ defmodule AudioProxy.Plugs.RenderAction do
 
   require Logger
 
-  alias AudioProxy.{CacheKey, Config, ErrorJSON, Source}
+  alias AudioProxy.{CacheKey, Config, ErrorJSON, Source, Telemetry}
   alias AudioProxy.Ffmpeg.{Command, Render, RenderSupervisor}
 
   # §5: the URL encodes the variant, so a rendered variant is immutable.
@@ -75,6 +90,10 @@ defmodule AudioProxy.Plugs.RenderAction do
   # moduledoc: the pipeline's timer should always fire first, and this margin
   # is what keeps a scheduling hiccup from inverting the two.
   @deadline_margin 1_000
+
+  # The mailbox deadline has no ffmpeg diagnostic behind it — the render said
+  # nothing at all, which is the thing worth naming in the log.
+  @deadline_detail "no message from the render within the mailbox deadline"
 
   @typedoc """
   Plug options.
@@ -97,7 +116,16 @@ defmodule AudioProxy.Plugs.RenderAction do
          :ok <- within_limit(stat.size),
          {:ok, input} <- Source.ffmpeg_input(source),
          {:ok, render} <- start_render(conn.assigns.options, input, opts) do
-      await_first_chunk(conn, render, Process.monitor(render))
+      # `input` is what ffmpeg reads and can be a presigned URL; the span
+      # carries the canonical identity instead, so nothing downstream of here
+      # can log a credential. See `AudioProxy.Telemetry`.
+      span =
+        Telemetry.render_start(%{
+          format: conn.assigns.options.format,
+          source: Source.canonical(source)
+        })
+
+      await_first_chunk(conn, render, Process.monitor(render), span)
     else
       {:error, reason} -> ErrorJSON.halt_with(conn, reason)
     end
@@ -132,66 +160,78 @@ defmodule AudioProxy.Plugs.RenderAction do
 
   ## Before the first byte
 
-  defp await_first_chunk(conn, render, monitor) do
+  defp await_first_chunk(conn, render, monitor, span) do
     receive do
       {:chunk, ^render, data} ->
-        conn |> begin() |> write(render, monitor, data)
+        conn |> begin() |> write(render, monitor, span, data)
 
       # A render that produced nothing and exited cleanly is a zero-length
       # variant, not an error — the headers still describe it.
       {:done, ^render, _info} ->
         demonitor(monitor)
+        Telemetry.render_stop(span, :ok)
         conn |> begin() |> halt()
 
       {:error, ^render, failure} ->
         demonitor(monitor)
-        log_failure(failure)
+        Telemetry.render_exception(span, failure)
         ErrorJSON.halt_with(conn, reason_for(failure))
 
       {:DOWN, ^monitor, :process, ^render, reason} ->
-        Logger.error("render died before producing output: #{inspect(reason)}")
+        Telemetry.render_exception(span, %{
+          class: :render_failed,
+          detail: "render died before producing output: #{inspect(reason)}"
+        })
+
         ErrorJSON.halt_with(conn, :render_failed)
     after
       deadline() ->
         demonitor(monitor)
         cancel_and_drain(render)
+        Telemetry.render_exception(span, %{class: :timeout, detail: @deadline_detail})
         ErrorJSON.halt_with(conn, :render_timeout)
     end
   end
 
   ## After the first byte
 
-  defp stream(conn, render, monitor) do
+  defp stream(conn, render, monitor, span) do
     receive do
       {:chunk, ^render, data} ->
-        write(conn, render, monitor, data)
+        write(conn, render, monitor, span, data)
 
       {:done, ^render, _info} ->
         demonitor(monitor)
+        Telemetry.render_stop(span, :ok)
         halt(conn)
 
       {:error, ^render, failure} ->
-        log_failure(failure)
+        Telemetry.render_exception(span, failure)
         abort(monitor, failure.class)
 
       {:DOWN, ^monitor, :process, ^render, reason} ->
-        Logger.error("render died mid-stream: #{inspect(reason)}")
+        Telemetry.render_exception(span, %{
+          class: :render_failed,
+          detail: "render died mid-stream: #{inspect(reason)}"
+        })
+
         abort(nil, :render_failed)
     after
       deadline() ->
         Render.cancel(render)
+        Telemetry.render_exception(span, %{class: :timeout, detail: @deadline_detail})
         abort(monitor, :timeout)
     end
   end
 
-  defp write(conn, render, monitor, data) do
+  defp write(conn, render, monitor, span, data) do
     case chunk(conn, data) do
       {:ok, conn} ->
         # Acknowledging is not bookkeeping: the pipeline stops forwarding above
         # its high-water mark, so a loop that never acked would receive one
         # buffer's worth of audio and then nothing, `{:done, _, _}` included.
         Render.ack(render, byte_size(data))
-        stream(conn, render, monitor)
+        stream(conn, render, monitor, Telemetry.count(span, byte_size(data)))
 
       {:error, reason} ->
         # The client is gone. Cancelling here is what makes teardown prompt;
@@ -200,6 +240,7 @@ defmodule AudioProxy.Plugs.RenderAction do
         Logger.debug("client disconnected mid-stream: #{inspect(reason)}")
         demonitor(monitor)
         cancel_and_drain(render)
+        Telemetry.render_stop(span, :cancelled)
         halt(conn)
     end
   end
@@ -212,8 +253,8 @@ defmodule AudioProxy.Plugs.RenderAction do
   # The reason is `:shutdown`-tagged and carries the class, so an operator
   # reading the adapter's exit report can tell a deliberate teardown from a bug
   # in this module. Bandit logs it at error level either way — the tag does not
-  # buy silence, only legibility — which is why `log_failure/1` has already said
-  # what went wrong by the time this runs.
+  # buy silence, only legibility — which is why the exception event has already
+  # said what went wrong by the time this runs.
   #
   # No drain here, unlike the paths that return: this process is about to die,
   # and its mailbox with it.
@@ -314,10 +355,6 @@ defmodule AudioProxy.Plugs.RenderAction do
   defp reason_for(%{class: :undecodable}), do: :undecodable_source
   defp reason_for(%{class: :timeout}), do: :render_timeout
   defp reason_for(%{class: _other}), do: :render_failed
-
-  defp log_failure(%{class: class, exit_status: status, stderr: stderr}) do
-    Logger.warning("render failed (#{class}, exit #{inspect(status)}): #{String.trim(stderr)}")
-  end
 
   defp demonitor(nil), do: true
   defp demonitor(monitor), do: Process.demonitor(monitor, [:flush])

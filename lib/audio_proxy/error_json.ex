@@ -32,6 +32,12 @@ defmodule AudioProxy.ErrorJSON do
   `render/1` is the pure mapping — that is what the per-row unit tests pin —
   and `halt_with/2` sends it and halts, which is all a plug ever calls.
 
+  `class/1` reads the same table for its label rather than its response:
+  `halt_with/2` assigns the result to `:error_class`, which is how the
+  request log line names what went wrong (`AudioProxy.LogHandler`). Deriving
+  it here rather than in the handler is what keeps the log and the response
+  body saying the same word — the body's `error` field *is* the class.
+
   ## The 404 row is deliberately blind
 
   Every source failure is the same 404, byte for byte: an unauthorized source,
@@ -132,6 +138,24 @@ defmodule AudioProxy.ErrorJSON do
   end
 
   @doc """
+  Names the error class — the same word the response body's `error` field
+  carries.
+
+  One clause per row, and no catch-all, for the reason the moduledoc gives:
+  an unlisted reason should crash its own slice's tests rather than get a
+  plausible label in production.
+  """
+  @spec class(structured()) :: atom()
+  def class(%OptionError{}), do: :invalid_options
+  def class(reason) when reason in @source_not_found, do: :not_found
+  def class({:queue_full, _retry_after}), do: :queue_full
+  def class(:invalid_signature), do: :invalid_signature
+  def class(:source_too_large), do: :source_too_large
+  def class(:undecodable_source), do: :undecodable_source
+  def class(:render_failed), do: :render_failed
+  def class(:render_timeout), do: :render_timeout
+
+  @doc """
   Sends the rendered error and halts the conn — the only call a plug needs.
   """
   @spec halt_with(Plug.Conn.t(), structured()) :: Plug.Conn.t()
@@ -139,6 +163,7 @@ defmodule AudioProxy.ErrorJSON do
     {status, headers, body} = render(error)
 
     conn
+    |> assign(:error_class, class(error))
     |> put_resp_content_type("application/json")
     |> then(fn conn ->
       Enum.reduce(headers, conn, fn {k, v}, c -> put_resp_header(c, k, v) end)

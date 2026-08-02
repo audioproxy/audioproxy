@@ -5,6 +5,12 @@ defmodule AudioProxy.Application do
   Reads and validates the `AP_*` environment (see `AudioProxy.Config`) before
   starting anything, so an invalid configuration aborts the boot rather than
   surfacing as a request-time failure.
+
+  The log is set up in the same breath, and before the first line is emitted:
+  `AP_LOG_LEVEL` is applied to the primary logger, and
+  `AudioProxy.LogHandler` attaches to the telemetry the router and the render
+  path produce. Neither is a process, so neither is in the supervision tree —
+  a telemetry handler runs in whichever process emits the event.
   """
 
   use Application
@@ -14,6 +20,9 @@ defmodule AudioProxy.Application do
   @impl true
   def start(_type, _args) do
     config = AudioProxy.Config.load!()
+
+    Logger.configure(level: config.log_level)
+    AudioProxy.LogHandler.attach()
 
     if config.allow_insecure do
       Logger.warning(

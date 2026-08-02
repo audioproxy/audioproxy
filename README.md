@@ -387,10 +387,40 @@ Note that the variables below are the full configuration surface for the design,
 | `AP_MAX_SRC_BYTES` | positive integer | `2000000000` | Reject larger sources with `413` |
 | `AP_RENDER_TIMEOUT` | positive integer | `300` | Seconds a render may take before ffmpeg is killed and the request answered `504`. Raise it for full-length transcodes of long masters; the default suits previews. See [docs/rendering.md](docs/rendering.md) |
 | `AP_SERVE_MODE` | `redirect` \| `proxy` | `redirect` | Serve cache hits by redirect or proxied |
+| `AP_LOG_LEVEL` | `debug` \| `info` \| `warning` \| `error` | `info` | Lowest level written to stdout. See [Logs](#logs) |
 
 Booleans accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`, case-insensitively. An empty value counts as unset.
 
 The listener port is read from `AP_PORT`, then `PORT`, then `4000`.
+
+## Logs
+
+Everything goes to stdout, one line per completed request:
+
+```
+12:31:07.442 request_id=GMf5ECU8WG_tDMEAAAJC [info] render 200 opts=br:96/f:opus src=local://piece.wav 27141 bytes in 63.4ms
+12:31:09.118 request_id=GMf5EGolMMyBOD4AAA7B [info] render 422 invalid_options 74 bytes in 0.3ms
+12:31:11.006 request_id=GMf5ECRh8raItPUAAAOl [warning] render 504 render_timeout opts=f:mp3 src=local://long.wav 72 bytes in 300004.7ms
+```
+
+Reading one left to right: the endpoint (`render`, `health`, or `unknown` for a path that matched no route), the status, the error code from the [Errors](#errors) table when the request failed, the normalized options string and the canonical source once the proxy has got far enough to know them (a `401` knows neither and omits both), the bytes sent, and how long it took.
+
+`request_id` is on every line, and the same id comes back to the client in the `x-request-id` response header — so a report of "this URL was slow at 12:31" can be traced to the render behind it. Send your own `x-request-id` and it is used instead, which is what makes the log line up with a proxy or gateway in front.
+
+Levels:
+
+| Level | What appears |
+|---|---|
+| `error` | Nothing routine: a render the host could not start at all (no encoder on `PATH`), a subprocess that survived `SIGKILL`, and crashes |
+| `warning` | `5xx` and `504` responses, and the ffmpeg diagnostic behind a failed render |
+| `info` | **Default.** The above, plus one line per request, `4xx` included: a `401` is a normal outcome for a public endpoint, not an incident |
+| `debug` | The above, plus `/health` (silent otherwise, so a liveness probe every second does not become the log), the render lifecycle, and client disconnects |
+
+Set the floor with `AP_LOG_LEVEL`; `warning` is the setting for a busy production instance that wants failures only.
+
+Presigned URLs and credentials never appear. Sources are logged by their canonical identity (`local://piece.wav`), never by what ffmpeg was handed to read, and diagnostics quoted back from ffmpeg have their query strings stripped.
+
+Structured JSON output is not implemented yet — it arrives with its own slice.
 
 ## Stack
 
