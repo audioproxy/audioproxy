@@ -45,6 +45,9 @@ defmodule AudioProxy.RenderSemaphoreTest do
 
   setup %{tmp_dir: tmp_dir} do
     File.write!(Path.join(tmp_dir, "piece.wav"), "RIFF-fake-wav-bytes")
+    # `fake_ffmpeg.sh` keys its behaviour off the basename: this one renders
+    # nothing, ever. See its header.
+    File.write!(Path.join(tmp_dir, "hang.wav"), "RIFF-fake-wav-bytes")
 
     put_config(%{
       key: @key,
@@ -149,6 +152,55 @@ defmodule AudioProxy.RenderSemaphoreTest do
       assert registered(key) == nil
     end
 
+    test "a wait that outlasts the budget is 429, not a 504 naming the render" do
+      # The wait has to clear the consumer's whole deadline — `AP_RENDER_TIMEOUT`
+      # plus the margin, so 2 s at the one-second floor — or this passes against
+      # the bug it exists for.
+      put_config(%{max_concurrency: 1, queue_size: 4, render_timeout: 1})
+
+      holder = hold_a_slot()
+      Process.send_after(holder, :release, 2_500)
+
+      conn = render("/f:mp3/plain/local://piece.wav")
+
+      # This was a 504 `render_timeout` — "Render exceeded AP_RENDER_TIMEOUT" —
+      # for a render that had not begun, with the request log repeating the same
+      # wrong thing. It is the queue that ran out of time, which is the 429 the
+      # semaphore would have given up front had the queue been full rather than
+      # merely slow.
+      assert conn.status == 429
+      assert [retry_after] = get_resp_header(conn, "retry-after")
+      assert String.to_integer(retry_after) >= 1
+      assert conn.assigns.error_class == :queue_full
+    end
+
+    test "a wait inside the budget still renders" do
+      put_config(%{max_concurrency: 1, queue_size: 4, render_timeout: 1})
+
+      holder = hold_a_slot()
+      Process.send_after(holder, :release, 300)
+
+      conn = render("/f:mp3/plain/local://piece.wav")
+
+      assert conn.status == 200
+      assert get_resp_header(conn, "x-audio-proxy") == ["MISS"]
+    end
+
+    test "a render that hangs after taking its slot is still a 504" do
+      # The other side of the split: this request queued *and* rendered, and it
+      # is the render that went silent. Answering 429 here would be the same
+      # mistake in the opposite direction.
+      put_config(%{max_concurrency: 1, queue_size: 4, render_timeout: 1})
+
+      holder = hold_a_slot()
+      Process.send_after(holder, :release, 200)
+
+      conn = render("/f:mp3/plain/local://hang.wav")
+
+      assert conn.status == 504
+      assert conn.assigns.error_class == :render_timeout
+    end
+
     test "reaches the client as a 429 carrying Retry-After" do
       put_config(%{max_concurrency: 1, queue_size: 0})
 
@@ -239,19 +291,25 @@ defmodule AudioProxy.RenderSemaphoreTest do
     assert_receive {:DOWN, ^monitor, :process, ^coordinator, _reason}, @deadline
   end
 
-  # Takes a slot in a process of its own and keeps it until the test ends.
+  # Takes a slot in a process of its own and keeps it until the test ends, or
+  # until the returned pid is sent `:release`.
   defp hold_a_slot do
     test = self()
 
     pid =
       spawn(fn ->
         send(test, {:holding, Semaphore.request()})
-        Process.sleep(:infinity)
+
+        receive do
+          :release -> Semaphore.release()
+        end
       end)
 
     on_exit(fn -> Process.exit(pid, :kill) end)
 
     assert_receive {:holding, :granted}, @deadline
+
+    pid
   end
 
   defp subscribe_and_collect(key, directives) do

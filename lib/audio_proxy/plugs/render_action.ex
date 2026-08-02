@@ -72,6 +72,16 @@ defmodule AudioProxy.Plugs.RenderAction do
   restarts on every message, so the pipeline's own timeout is what a client
   normally sees, with its classification intact.
 
+  The same budget is spent twice, on two different things, and which one ran out
+  decides the status. A request may wait for a render *slot* before any render
+  exists; the coordinator's `{:rendering, _}` is what says that wait is over,
+  and it both restarts the clock and switches the answer. Expiring before it is
+  429 — the queue could not reach this request in time, which is the same thing
+  the semaphore says up front when the queue is full, with the same
+  `Retry-After`. Expiring after it is 504, because there is a render and it has
+  gone silent. Charging a queue wait to a timeout named after the render was
+  answering 504 for something that never ran.
+
   ## Outcomes are events, not log calls
 
   Every way this module can finish a render — done, cancelled by a departing
@@ -94,7 +104,7 @@ defmodule AudioProxy.Plugs.RenderAction do
 
   require Logger
 
-  alias AudioProxy.{CacheKey, Config, ErrorJSON, RenderCoordinator, Source, Telemetry}
+  alias AudioProxy.{CacheKey, Config, ErrorJSON, RenderCoordinator, Semaphore, Source, Telemetry}
   alias AudioProxy.Ffmpeg.Command
 
   # §5: the URL encodes the variant, so a rendered variant is immutable.
@@ -108,6 +118,9 @@ defmodule AudioProxy.Plugs.RenderAction do
   # The mailbox deadline has no ffmpeg diagnostic behind it — the render said
   # nothing at all, which is the thing worth naming in the log.
   @deadline_detail "no message from the render within the mailbox deadline"
+
+  # The same budget spent without ever reaching the front of the render queue.
+  @queue_detail "no render slot came free within the mailbox deadline"
 
   @typedoc """
   Plug options.
@@ -162,7 +175,12 @@ defmodule AudioProxy.Plugs.RenderAction do
   # the catch-up is its first written chunk — one chunk rather than the several
   # it arrived as, which nothing in §5 distinguishes.
   defp deliver(conn, render, monitor, span, []) do
-    await_first_chunk(conn, render, monitor, span)
+    # Starts waiting for a *slot*, not for a chunk: the coordinator may be
+    # queued behind `AP_MAX_CONCURRENCY` renders, and `{:rendering, _}` is what
+    # says it no longer is. A coalesced request that joined a render already
+    # under way is told the same thing by the join, so it starts in `:render`
+    # a moment later without ever having queued.
+    await_first_chunk(conn, render, monitor, span, :slot)
   end
 
   defp deliver(conn, render, monitor, span, backlog) do
@@ -206,8 +224,14 @@ defmodule AudioProxy.Plugs.RenderAction do
 
   ## Before the first byte
 
-  defp await_first_chunk(conn, render, monitor, span) do
+  defp await_first_chunk(conn, render, monitor, span, waiting_for) do
     receive do
+      # The render has a slot and has started. This both restarts the deadline
+      # and changes what expiring it means: from here on there is a render, so
+      # a silence is the render's, and 504 is the honest answer for it.
+      {:rendering, ^render} ->
+        await_first_chunk(conn, render, monitor, span, :render)
+
       {:chunk, ^render, data} ->
         conn |> begin() |> write(render, monitor, span, data)
 
@@ -234,15 +258,43 @@ defmodule AudioProxy.Plugs.RenderAction do
       deadline() ->
         demonitor(monitor)
         leave_and_drain(render)
-        Telemetry.render_exception(span, %{class: :timeout, detail: @deadline_detail})
-        ErrorJSON.halt_with(conn, :render_timeout)
+        expired(conn, span, waiting_for)
     end
+  end
+
+  # The same elapsed budget means two different things, and answering both the
+  # same way is what made a queued request look like a slow render.
+  #
+  # Still waiting for a slot: no render has run, so 504 would name a timeout
+  # that did not happen. This is the queue failing to reach the request in
+  # time, which is the 429 the semaphore would have given it up front had the
+  # queue been full rather than merely slow — same status, same `Retry-After`,
+  # and the estimate comes from the semaphore rather than being invented here.
+  # Bounding the wait is the point: an unbounded one would hold the connection,
+  # and the queue slot with it, for as long as the queue took.
+  defp expired(conn, span, :slot) do
+    Telemetry.render_exception(span, %{class: :queue_full, detail: @queue_detail})
+    ErrorJSON.halt_with(conn, {:queue_full, Semaphore.retry_after()})
+  end
+
+  # A render exists and has said nothing for its whole budget.
+  defp expired(conn, span, :render) do
+    Telemetry.render_exception(span, %{class: :timeout, detail: @deadline_detail})
+    ErrorJSON.halt_with(conn, :render_timeout)
   end
 
   ## After the first byte
 
   defp stream(conn, render, monitor, span) do
     receive do
+      # A coalesced request handed a backlog begins its response without ever
+      # passing through the wait above, so the join's announcement lands here
+      # instead. Nothing to do with it — bytes are plainly flowing — but it is
+      # read rather than left, because this is Bandit's connection process and
+      # an unread message would outlive the request on a keep-alive connection.
+      {:rendering, ^render} ->
+        stream(conn, render, monitor, span)
+
       {:chunk, ^render, data} ->
         write(conn, render, monitor, span, data)
 
@@ -324,6 +376,9 @@ defmodule AudioProxy.Plugs.RenderAction do
 
   defp drain(render) do
     receive do
+      # Reachable on the deadline path: the coordinator can broadcast its start
+      # in the window between the deadline firing and the unsubscribe landing.
+      {:rendering, ^render} -> drain(render)
       {:chunk, ^render, _data} -> drain(render)
       {:done, ^render, _info} -> drain(render)
       {:error, ^render, _failure} -> drain(render)

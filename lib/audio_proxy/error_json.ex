@@ -19,6 +19,8 @@ defmodule AudioProxy.ErrorJSON do
       :undecodable_source            415     undecodable_source
       %OptionError{}                 422     invalid_options
       {:queue_full, retry_after}     429     queue_full          Retry-After
+                                             (queue full, or a wait for a
+                                             slot that ran out of budget)
       :render_failed                 500     render_failed
       :render_timeout                504     render_timeout
 

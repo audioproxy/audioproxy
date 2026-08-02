@@ -123,8 +123,8 @@ defmodule AudioProxy.RenderCoordinator do
   # than at something request-shaped.
   @unsubscribe_timeout 15_000
 
-  # Added to `Render.cancel_timeout/0` for this process' shutdown budget, so
-  # `terminate/2` can always finish the cancel it started. See `child_spec/1`.
+  # Added to what `terminate/2` can block on for this process' shutdown budget,
+  # so it can always finish the work it started. See `child_spec/1`.
   @shutdown_margin 2_000
 
   # Retries of the whole start-or-join loop. Each one either starts a render or
@@ -147,9 +147,18 @@ defmodule AudioProxy.RenderCoordinator do
   """
   @type render_spec :: keyword()
 
-  @typedoc "What a subscriber receives. Identical in shape to the pipeline's."
+  @typedoc """
+  What a subscriber receives.
+
+  The pipeline's own three, plus `{:rendering, _}` — sent only to subscribers
+  that were attached while this coordinator was waiting for a render slot, and
+  meaning "bytes are now possible". A consumer that measures how long the
+  render has been silent needs it, because until then there was no render. One
+  that does not may ignore it.
+  """
   @type message ::
-          {:chunk, t(), binary()}
+          {:rendering, t()}
+          | {:chunk, t(), binary()}
           | {:done, t(), %{exit_status: 0}}
           | {:error, t(), Render.failure()}
 
@@ -225,13 +234,16 @@ defmodule AudioProxy.RenderCoordinator do
       # Never restarted, for the same reason a render is not: the byte stream
       # is gone and every subscriber has already been told.
       restart: :temporary,
-      # Derived, not chosen. `terminate/2` blocks on `Render.cancel/1`, so a
-      # budget below that call's own timeout means the supervisor brutal-kills
-      # this process mid-cancel on exactly the renders that need cancelling
-      # most — the ones whose subprocess is ignoring SIGTERM. The subprocess
-      # still dies (the pipeline monitors its consumer), but the kill would be
-      # racing the guarantee instead of implementing it.
-      shutdown: Render.cancel_timeout() + @shutdown_margin
+      # Derived, not chosen, and derived from *both* calls `terminate/2` makes.
+      # A budget below `Render.cancel/1`'s own timeout means the supervisor
+      # brutal-kills this process mid-cancel on exactly the renders that need
+      # cancelling most — the ones whose subprocess is ignoring SIGTERM. The
+      # subprocess still dies (the pipeline monitors its consumer), but the
+      # kill would be racing the guarantee instead of implementing it. The
+      # release that follows the cancel has a bound of its own, and leaving it
+      # out would put the sum back over the budget in the one case where both
+      # are slow.
+      shutdown: Render.cancel_timeout() + Semaphore.release_timeout() + @shutdown_margin
     }
   end
 
@@ -341,11 +353,26 @@ defmodule AudioProxy.RenderCoordinator do
     end
   end
 
+  # Announced on every transition into `:rendering`, including the one that
+  # happens inside `init/1` where there was no wait at all. A consumer's budget
+  # for "the render has said nothing" cannot start when it subscribed, because
+  # between subscribing and a byte being *possible* there may have been a queue;
+  # this is the moment it becomes possible, and it has to be reported the same
+  # way whether the queue was empty or not — a consumer that only heard about
+  # the slow case would have to guess about the fast one.
   defp spawn_render(state) do
     case RenderSupervisor.start_render(Keyword.put(state.spec, :consumer, self())) do
       {:ok, render} ->
-        {:ok,
-         %{state | phase: :rendering, render: render, render_monitor: Process.monitor(render)}}
+        state = %{
+          state
+          | phase: :rendering,
+            render: render,
+            render_monitor: Process.monitor(render)
+        }
+
+        broadcast(state, {:rendering, self()})
+
+        {:ok, state}
 
       {:error, reason} ->
         {:error, reason}
@@ -353,10 +380,19 @@ defmodule AudioProxy.RenderCoordinator do
   end
 
   # `:queued` and `:rendering` are one thing from a subscriber's side: bytes are
-  # coming, and none have arrived that this joiner is missing.
+  # coming, and none have arrived that this joiner is missing. They differ in
+  # one respect only, and it is not about the bytes — a joiner that arrives
+  # while the render is already under way never queued, so it is told so here
+  # rather than waiting for the announcement it has already missed. Sent before
+  # the reply, so it is in the joiner's mailbox by the time it starts reading.
   @impl true
-  def handle_call({:join, pid}, _from, %__MODULE__{phase: phase} = state)
-      when phase in [:queued, :rendering] do
+  def handle_call({:join, pid}, _from, %__MODULE__{phase: :rendering} = state) do
+    send(pid, {:rendering, self()})
+
+    {:reply, {:ok, backlog(state)}, monitor_subscriber(state, pid)}
+  end
+
+  def handle_call({:join, pid}, _from, %__MODULE__{phase: :queued} = state) do
     {:reply, {:ok, backlog(state)}, monitor_subscriber(state, pid)}
   end
 
