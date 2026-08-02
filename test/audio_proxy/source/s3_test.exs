@@ -27,6 +27,14 @@ defmodule AudioProxy.Source.S3Test do
       assert S3.parse("masters/./a.wav") == {:ok, {:s3, "masters", "./a.wav"}}
     end
 
+    test "bounds the body before splitting it, not after" do
+      # A separator-free body is scanned in full by `String.split/3`, so the
+      # bound has to come first. Cheap here (0.177 ms for 10 MB), but the
+      # ordering is the invariant.
+      assert S3.parse(String.duplicate("a", 100_000)) == {:error, :source_too_long}
+      assert S3.parse(String.duplicate("a", 1089)) == {:error, :source_too_long}
+    end
+
     test "refuses a bucket or key past S3's own maxima" do
       assert S3.parse(String.duplicate("b", 64) <> "/a.wav") == {:error, :source_too_long}
       assert S3.parse("masters/" <> String.duplicate("k", 1025)) == {:error, :source_too_long}

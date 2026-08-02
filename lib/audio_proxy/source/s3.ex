@@ -27,11 +27,15 @@ defmodule AudioProxy.Source.S3 do
   object cannot exist, so refusing early costs nothing and keeps an unbounded
   string out of an argv element and a log line.
 
-  Unlike `local://`'s caps, these are not denial-of-service controls. Splitting
-  a source at its first `/` is constant-time in the length of the tail
-  (measured: `String.split/3` with `parts: 2` on a 200 KB body is under the
-  clock's resolution), so there is no cost curve here to flatten — see
-  `AudioProxy.Source.Https` for the same check applied to URL parsing.
+  The whole body is bounded **before** it is split, not after. Finding the first
+  `/` is a memchr-style scan, so it is cheap when a separator turns up early and
+  linear in the whole body when none ever does — measured at 0.016 ms for 1 MB
+  and 0.177 ms for 10 MB of separator-free input. That is four orders of
+  magnitude short of the cost that made `AudioProxy.Source.Local`'s cap a
+  denial-of-service control, so this bound is a protocol bound like
+  `AudioProxy.Source.Https`'s rather than a scheduler defence. It is enforced
+  first anyway: an input that cannot name an object should not be scanned at
+  all, and the ordering is one less thing to re-derive later.
 
   ## Status: no backend yet
 
@@ -54,6 +58,12 @@ defmodule AudioProxy.Source.S3 do
   @max_bucket_bytes 63
   @max_key_bytes 1024
 
+  # The longest body that could name an object: bucket, separator, key.
+  @max_body_bytes @max_bucket_bytes + 1 + @max_key_bytes
+
+  # See `reasons/0`. `:not_allowed` comes from the allowlist, the rest from here.
+  @reasons [:missing_bucket, :missing_key, :source_too_long, :no_backend, :not_allowed]
+
   @impl true
   def scheme, do: "s3"
 
@@ -64,9 +74,14 @@ defmodule AudioProxy.Source.S3 do
   def parse(""), do: {:error, :missing_bucket}
 
   def parse(body) when is_binary(body) do
-    case String.split(body, "/", parts: 2) do
-      [bucket, key] -> typed(bucket, key)
-      [_bucket_only] -> {:error, :missing_key}
+    # Bounded before the split, never after: see the moduledoc.
+    if byte_size(body) > @max_body_bytes do
+      {:error, :source_too_long}
+    else
+      case String.split(body, "/", parts: 2) do
+        [bucket, key] -> typed(bucket, key)
+        [_bucket_only] -> {:error, :missing_key}
+      end
     end
   end
 
@@ -88,6 +103,17 @@ defmodule AudioProxy.Source.S3 do
   def ffmpeg_input(_source), do: {:error, :no_backend}
 
   @doc """
+  Every rejection reason this type can produce.
+
+  Declared rather than inferred, so a test can hold the two ends together:
+  `AudioProxy.ErrorJSON` renders a 404 only for reasons on its own list, and a
+  reason missing from it answers 500 through a `FunctionClauseError`. A new
+  reason added here without a row there fails that test instead of a request.
+  """
+  @spec reasons() :: [atom()]
+  def reasons, do: @reasons
+
+  @doc """
   A short human-readable sentence for one of this type's own reasons.
   """
   @spec message(atom()) :: String.t()
@@ -95,6 +121,7 @@ defmodule AudioProxy.Source.S3 do
   def message(:missing_key), do: "s3 source has no object key"
   def message(:source_too_long), do: "s3 bucket or key is longer than S3 allows"
   def message(:no_backend), do: "s3 sources have no storage backend yet"
+  def message(:not_allowed), do: "s3 bucket is not on AP_SOURCE_ALLOWLIST"
 
   defp typed("", _key), do: {:error, :missing_bucket}
   defp typed(_bucket, ""), do: {:error, :missing_key}

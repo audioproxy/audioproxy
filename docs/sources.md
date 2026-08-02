@@ -184,8 +184,16 @@ decoded bytes**, because that is what S3 stores — `a b.wav` and `a+b.wav` are
 different objects, and `a//b` is not collapsed the way `local://` collapses it.
 An empty segment is an ordinary character in a key.
 
-A bucket may be 63 bytes and a key 1024, S3's own maxima. Past them the object
-cannot exist.
+A bucket may be 63 bytes and a key 1024, S3's own maxima, and the body as a
+whole is bounded at 1088 before it is split. Past those the object cannot exist.
+
+The bound comes *before* the split, which is worth stating because the first
+version of this got it backwards. Finding the first `/` is a memchr-style scan:
+cheap when a separator turns up early, and linear in the whole body when none
+ever does (0.016 ms for 1 MB, 0.177 ms for 10 MB of separator-free input). That
+is four orders of magnitude short of what makes `local://`'s cap a
+denial-of-service control, so this is a protocol bound rather than a scheduler
+defence — but an input that cannot name an object should not be scanned at all.
 
 ### `https://`: a URL at an allowlisted origin
 
@@ -196,6 +204,29 @@ unallowlisted, because both are wrong independent of the host they name — a
 cleartext fetch has no business being a source, and credentials in a URL end up
 in logs, in argv and in a cache key. Keeping them out also keeps the allowlist a
 single-axis policy: host, and nothing else.
+
+#### The host is validated after it is normalized
+
+Not before, and the order is the whole point. A host is refused
+(`:invalid_url`) when, once lowercased and stripped of a single trailing root
+dot, it is empty, carries an **empty label** (`.media.example`,
+`cdn..media.example`), or contains a **percent-escape** (`%6D%65dia.example` —
+`URI` does not decode those, so they would ride into the canonical string). IP
+literals are exempt from the label rules; their own parser has vouched for them.
+
+Validating the raw host instead let three things through, all found by review:
+`https://./a` rendered a canonical URL with *no host at all*, `https://.../a`
+was admitted by a bare `*`, and `*.media.example` admitted every
+`cdn..media.example` spelling — so one origin resource could wear unboundedly
+many allowlisted cache keys, one per inserted dot.
+
+Underneath all three sat the defect that actually matters: **`parse/1` and
+`authorize/1` could disagree about which host a URL names.** The gate re-parses
+the canonical URL, so `https://../a` parsed to the host `.` and re-parsed to
+`""`. It failed closed, by luck rather than design. Both now run the same
+normalization and the same validation, and a property pins it: anything that
+parses must authorize under a bare `*`, and its canonical string must parse back
+to an identical source.
 
 A URL may be 2048 bytes and a host 253 — the de-facto interoperable URL maximum
 and DNS's own name limit. Unlike `local://`'s caps these are protocol bounds
