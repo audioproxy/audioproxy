@@ -84,10 +84,9 @@ The container is the way to run this. It carries the release with its own
 Erlang runtime and the ffmpeg the renders are tested against, so there is
 nothing to install and nothing to keep in step.
 
-> **Not published yet.** `v0.1.0` has not been tagged, so nothing is on GHCR and
-> the pull below will fail. Until it is, build the image yourself —
-> `docker build -t audio_proxy:local .` — and substitute that tag, or run from a
-> checkout as described further down.
+> **x86-64 only.** The image is `linux/amd64`; arm64 arrives in its own slice.
+> On Apple Silicon a plain `docker pull` fails with *no matching manifest for
+> linux/arm64/v8* — add `--platform linux/amd64` and it runs under emulation.
 
 ```bash
 docker run --rm -p 4000:4000 \
