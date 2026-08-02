@@ -38,6 +38,10 @@ defmodule AudioProxy.MixProject do
     [
       {:plug, "~> 1.16"},
       {:bandit, "~> 1.6"},
+      # Not a new dependency — Plug and Bandit already bring it in. Declared
+      # because the render path now emits into it directly
+      # (`AudioProxy.Telemetry`), and a direct use should be a direct dep.
+      {:telemetry, "~> 1.0"},
       {:stream_data, "~> 1.1", only: [:test]}
     ]
   end
