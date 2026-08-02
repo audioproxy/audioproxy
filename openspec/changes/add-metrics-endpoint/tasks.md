@@ -1,7 +1,7 @@
 ## 1. Instrumentation
 
-- [ ] 1.1 Telemetry events: render start/stop/exception (duration, format, outcome), cache hit/miss/coalesced, HTTP request stop (endpoint class, status), write-back failure; semaphore events already exist
-- [ ] 1.2 Unit tests: each code path fires its event with expected measurements/metadata (test handlers)
+- [ ] 1.1 Attach the aggregator to the telemetry that already exists; create only what is missing. Present as of `add-request-logging`: `[:audio_proxy, :render, :start | :stop | :exception]` with duration, bytes, format, canonical source and outcome/failure class (`AudioProxy.Telemetry` documents the contract, and `AudioProxy.LogHandler` is the proof a second consumer costs the render path nothing), plus the HTTP side as Bandit's own `[:bandit, :request, :stop]` read through `conn.assigns` for endpoint class, error class, options and source. The semaphore's events already exist too. **Still to create:** cache outcomes (hit/miss/coalesced) and write-back failures
+- [ ] 1.2 Unit tests for the events this slice creates: each code path fires with the expected measurements/metadata (test handlers). The render and HTTP events are already covered by `AudioProxy.TelemetryTest` and `AudioProxy.RequestLoggingIntegrationTest` — extend rather than restate
 
 ## 2. Aggregation & exposition
 
