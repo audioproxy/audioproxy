@@ -19,6 +19,7 @@
 require "fileutils"
 require "json"
 require "net/http"
+require "open3"
 require "openssl"
 require "securerandom"
 require "tmpdir"
@@ -68,22 +69,46 @@ rescue StandardError => e
   @failures << description
 end
 
-def sh(*args, capture: true)
-  out = IO.popen([*args, {err: [:child, :out]}], &:read)
-  [out, $?.success?]
+# Returns [stdout, ok?]. stderr is kept OUT of the first element on purpose:
+# docker writes advisories there — "the requested image's platform does not
+# match the detected host platform" being the one that bites — and a caller
+# doing Float(out) or JSON.parse(out) then chokes on a warning it never asked
+# for. Folding the two together made every command that returns a *value* a
+# parsing hazard. stderr still reaches the failure message below, where it is
+# the useful half.
+def sh(*args)
+  stdout, stderr, status = Open3.capture3(*args)
+  @last_stderr = stderr
+  [stdout, status.success?]
+end
+
+# For the cases that genuinely want both streams — container logs, where the
+# BEAM's crash output goes to stderr and its Logger output to stdout, and
+# reading only one loses half the story.
+def sh_combined(*args)
+  stdout, stderr, status = Open3.capture3(*args)
+  [stdout.to_s + stderr.to_s, status.success?]
 end
 
 def sh!(*args)
   out, ok = sh(*args)
-  raise "command failed: #{args.join(" ")}\n#{out}" unless ok
+  raise "command failed: #{args.join(" ")}\n#{out}#{@last_stderr}" unless ok
 
   out
 end
 
 # Every container this script starts is registered for teardown, so a failure
 # mid-suite does not strand one holding a published port.
+#
+# The id is picked out by shape rather than taken as "the output". `sh` keeps
+# stderr separate now, so this is belt-and-braces — but docker has been known to
+# put advisories on stdout too, and handing one of those to `docker inspect`
+# produces an error about a container that was in fact started correctly.
 def docker_run(*args)
-  cid = sh!("docker", "run", "-d", *args).strip
+  out = sh!("docker", "run", "-d", *args)
+  cid = out.lines.map(&:strip).reverse.find { |line| line.match?(/\A[0-9a-f]{64}\z/) }
+  raise "no container id in docker run output:\n#{out}" unless cid
+
   @containers << cid
   cid
 end
@@ -134,7 +159,7 @@ def await_health(cid, port, timeout: 60)
   rescue StandardError
     {}
   end
-  logs, _ = sh("docker", "logs", cid)
+  logs, _ = sh_combined("docker", "logs", cid)
 
   log "--- container never became healthy; diagnostics follow ---"
   log "state: running=#{state["Running"].inspect} exit=#{state["ExitCode"].inspect} error=#{state["Error"].inspect}"
@@ -241,7 +266,10 @@ end
 # ---------------------------------------------------------------------------
 
 def check_image_properties
-  ffmpeg = sh!("docker", "run", "--rm", "--entrypoint", "ffmpeg", IMAGE, "-version").lines.first.to_s
+  # Selected by content, not position: docker's own advisories share this stream
+  # (see docker_run), so "the first line" is not reliably ffmpeg's banner.
+  ffmpeg = sh!("docker", "run", "--rm", "--entrypoint", "ffmpeg", IMAGE, "-version")
+    .lines.find { |line| line.start_with?("ffmpeg version") }.to_s
   major = ffmpeg[/ffmpeg version (\d+)/, 1]&.to_i
 
   check "VERSIONS.md records an expected ffmpeg major" do
@@ -258,6 +286,16 @@ def check_image_properties
   # and finding a system erl here would mean the wrong base image.
   check "runtime stage has no system erlang (ERTS is bundled)" do
     !sh("docker", "run", "--rm", "--entrypoint", "sh", IMAGE, "-c", "command -v erl").last
+  end
+
+  # The render lifecycle signals ffmpeg via System.find_executable("kill"),
+  # which wants a real binary — `command -v` would find the shell builtin and
+  # tell us nothing, so this tests for the file. Alpine's busybox provided one
+  # for free and Debian slim does not; without it a disconnect or timeout cannot
+  # terminate a render and the no-orphan guarantee quietly stops holding.
+  check "image provides the kill binary the render lifecycle needs" do
+    sh("docker", "run", "--rm", "--entrypoint", "sh", IMAGE,
+       "-c", "test -x /bin/kill || test -x /usr/bin/kill").last
   end
 
   inspect_out = JSON.parse(sh!("docker", "inspect", IMAGE)).first
@@ -339,7 +377,7 @@ def check_readonly_mount(fixtures)
   # in the command would look identical to a working guarantee.
   rw_ok = sh("docker", "run", "--rm", "--user", "0:0",
              "-v", "#{fixtures}:/fixtures", "--entrypoint", "sh", IMAGE,
-             "-c", "touch /fixtures/probe && rm /fixtures/probe").last
+             "-c", "touch /fixtures/probe && rm /fixtures/probe")[1]
 
   check "the same write succeeds when the mount is writable (control)" do
     rw_ok
@@ -440,7 +478,7 @@ def run_until_exit(env, timeout: 30)
     code = state["ExitCode"] unless state["Running"]
     !state["Running"]
   end
-  logs, _ = sh("docker", "logs", cid)
+  logs, _ = sh_combined("docker", "logs", cid)
   docker_rm(cid)
   [code, logs]
 end

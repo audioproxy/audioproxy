@@ -450,7 +450,7 @@ migrate.
 | [docs/audio-proxy-api-v1.md](docs/audio-proxy-api-v1.md) | **The source of truth.** URL grammar, every processing option, cache-key rules, response headers, error codes |
 | [docs/sources.md](docs/sources.md) | Source encodings and escaping, what is refused, the source-type contract and canonical identity |
 | [docs/development.md](docs/development.md) | Toolchain, per-slice worktrees and devcontainers, the test suite and its tags, CI, how a release is cut |
-| [VERSIONS.md](VERSIONS.md) | What the image is built from — Alpine, Elixir/OTP and ffmpeg pins, and how to bump one |
+| [VERSIONS.md](VERSIONS.md) | What the image is built from — Debian, Elixir/OTP and ffmpeg pins, why not Alpine, and how to bump one |
 | [docs/ffmpeg-arguments.md](docs/ffmpeg-arguments.md) | How options become ffmpeg arguments — filter order, per-format flags, known gaps |
 | [docs/rendering.md](docs/rendering.md) | How a render runs — the subprocess, the chunk stream, buffering and lifecycle guarantees |
 | `openspec/specs/` | Capability specs for what is built; `openspec/changes/` holds what is planned |

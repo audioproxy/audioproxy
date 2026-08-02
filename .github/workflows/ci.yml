@@ -97,7 +97,7 @@ jobs:
           echo "test stage:    $test_ffmpeg"
           echo "runtime stage: $ship_ffmpeg"
           if [ "$test_ffmpeg" != "$ship_ffmpeg" ]; then
-            echo "::error::test and runtime stages ship different ffmpeg builds — check ALPINE_VERSION in the Dockerfile"
+            echo "::error::test and runtime stages ship different ffmpeg builds — check DEBIAN_VERSION in the Dockerfile"
             exit 1
           fi
 

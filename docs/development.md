@@ -222,7 +222,7 @@ modules are not a public interface.
 |---|---|
 | New option, new format, new endpoint — nothing existing changes meaning | Minor |
 | A change to what an existing URL means, or to how a cache key is derived | **Major** |
-| Bug fix, dependency update, ffmpeg/Alpine/OTP pin bump | Patch |
+| Bug fix, dependency update, ffmpeg/Debian/OTP pin bump | Patch |
 
 Two of those are worth spelling out, because both look smaller than they are:
 
