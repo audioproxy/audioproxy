@@ -175,6 +175,34 @@ defmodule AudioProxy.VariantStore.LocalTest do
       assert File.ls!(Path.join(root, "tmp")) == []
     end
 
+    test "a failing put leaves a foreign sidecar alone", %{root: root} do
+      # The window this pins: another put for the same key has renamed its
+      # sidecar into place and not yet its data file. A failing put tidying
+      # "the" orphan meta there would erase that put's committed metadata.
+      key = key()
+      meta = Path.join([root, binary_part(key, 0, 2), binary_part(key, 2, 2), key <> ".meta"])
+      File.mkdir_p!(Path.dirname(meta))
+      File.write!(meta, "someone else's commit in progress")
+
+      aborting = Stream.map(1..3, fn _ -> raise "render died" end)
+      assert {:error, _reason} = VariantStore.put_stream(key, aborting, @metadata)
+
+      assert File.read!(meta) == "someone else's commit in progress"
+    end
+
+    test "sweep_staging clears leftovers from killed writes, and only those", %{root: root} do
+      key = key()
+      put!(key, "a committed variant")
+
+      stale = Path.join([root, "tmp", "#{key}.99.data"])
+      File.write!(stale, "half-written staging from a crash")
+
+      assert :ok = AudioProxy.VariantStore.Local.sweep_staging(root)
+
+      refute File.exists?(stale)
+      assert {:ok, %{size: 19}} = VariantStore.head(key)
+    end
+
     test "a write failure reports and leaves nothing readable", %{root: root} do
       key = key()
 

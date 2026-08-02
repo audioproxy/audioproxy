@@ -15,7 +15,7 @@ defmodule AudioProxy.VariantStore.Local do
 
       <root>/ab/cd/abcd…            the bytes
       <root>/ab/cd/abcd….meta       the metadata, as JSON
-      <root>/tmp/                   in-flight writes
+      <root>/tmp/                   in-flight writes, swept at boot
 
   Anything that is not a well-formed cache key is refused before it can name
   a path, so a key cannot traverse out of the root.
@@ -87,6 +87,28 @@ defmodule AudioProxy.VariantStore.Local do
     end
   end
 
+  @doc """
+  Removes leftover staging files under `<root>/tmp`.
+
+  Every in-process failure cleans its own staging, but a write killed
+  outright — a VM crash, a shutdown that outran a mid-commit tee — leaves its
+  temp files behind, and nothing else ever looks at them again. Called once
+  from `AudioProxy.Application.start/2`, which is safe precisely because a
+  `file://` store is single-node by design: at boot, no writer of this store
+  can be staging.
+  """
+  @spec sweep_staging(Path.t()) :: :ok
+  def sweep_staging(root) do
+    tmp = Path.join(root, "tmp")
+
+    case File.ls(tmp) do
+      {:ok, names} -> Enum.each(names, &File.rm(Path.join(tmp, &1)))
+      {:error, _absent} -> :ok
+    end
+
+    :ok
+  end
+
   ## Writing
 
   defp write(key, chunks, metadata) do
@@ -122,7 +144,7 @@ defmodule AudioProxy.VariantStore.Local do
         :ok
 
       {:error, _reason} = error ->
-        discard(data_tmp, meta_tmp, data, meta)
+        discard(data_tmp, meta_tmp)
         error
     end
   end
@@ -146,14 +168,16 @@ defmodule AudioProxy.VariantStore.Local do
     end
   end
 
-  defp discard(data_tmp, meta_tmp, data, meta) do
+  # Only this write's own staging — never the final paths. Tidying a sidecar
+  # that made it into place looks harmless (`head/1` requires the data file,
+  # so it is unreadable) but is a hazard: a *concurrent* put for the same key
+  # sits in the window between its two renames exactly when its data file is
+  # absent, and removing "the" orphan meta there erases that put's committed
+  # sidecar, leaving its bytes invisible. An orphan sidecar costs a few bytes
+  # and is overwritten by the next put; a deleted live one costs a re-render.
+  defp discard(data_tmp, meta_tmp) do
     File.rm(data_tmp)
     File.rm(meta_tmp)
-
-    # A sidecar that made it into place without its data file is unreadable
-    # (`head/1` requires both) but still worth tidying away.
-    unless File.exists?(data), do: File.rm(meta)
-
     :ok
   end
 

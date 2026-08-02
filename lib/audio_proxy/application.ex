@@ -24,6 +24,13 @@ defmodule AudioProxy.Application do
     Logger.configure(level: config.log_level)
     AudioProxy.LogHandler.attach()
 
+    # Staging left behind by a write that was killed outright would otherwise
+    # accumulate forever. Before the tree starts, nothing can be staging.
+    case config.variant_store do
+      {:file, root} -> AudioProxy.VariantStore.Local.sweep_staging(root)
+      nil -> :ok
+    end
+
     if config.allow_insecure do
       Logger.warning(
         "AP_ALLOW_INSECURE is enabled — /insecure/ URLs bypass signature verification; never enable in production"
