@@ -34,6 +34,7 @@ second-opinion.md
 # a test parses it; nothing else here is needed to build or test.
 openspec/
 docs/
+examples/
 CLAUDE.md
 VERSIONS.md
 Dockerfile
