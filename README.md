@@ -94,10 +94,10 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 
 **Next: what makes it production-shaped**
 
-- **A variant cache.** Today every request re-renders. Rendered variants will be written back to object storage and served from there on later requests, with `Range` support and byte-serving.
+- **A variant cache.** Today every request re-renders. Rendered variants will be written back to a store and served from there on later requests, with `Range` support and byte-serving. Where they are stored is a separate choice from where sources come from: a local directory for a single node, object storage when you have more than one.
 - **Bounded concurrency.** A cap on simultaneous renders with a wait queue, so a burst of traffic queues instead of thrashing the machine.
 - **Deduplication.** Concurrent requests for the same variant will share one render rather than starting several.
-- **S3 sources**, which is what the cache is built on.
+- **S3 sources**, so the audio itself can live in object storage.
 
 **After that**
 
