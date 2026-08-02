@@ -1,8 +1,8 @@
 ## 1. Behaviour and config
 
 - [x] 1.1 `AudioProxy.VariantStore` behaviour: `head/1`, `get_stream/2` (Range-aware), `put_stream/3` (bytes + metadata), `presign/2`, `capabilities/0`; `@type t`/`@spec` on the seam
-- [ ] 1.2 `AP_VARIANT_STORE` in `AudioProxy.Config`: scheme parse + backend dispatch, unknown scheme rejected; remove `AP_VARIANT_BUCKET`
-- [ ] 1.3 Boot validation: `file://` path exists and writable; `AP_SERVE_MODE=redirect` against a store without `presign` aborts naming both variables
+- [x] 1.2 `AP_VARIANT_STORE` in `AudioProxy.Config`: scheme parse + backend dispatch, unknown scheme rejected; remove `AP_VARIANT_BUCKET`
+- [x] 1.3 Boot validation: `file://` path exists and writable; `AP_SERVE_MODE=redirect` against a store without `presign` aborts naming both variables
 
 ## 2. Local backend
 
@@ -21,7 +21,7 @@
 - [ ] 4.2 No-partial: mid-render failure and cancel → nothing readable; write failure → client unaffected
 - [ ] 4.3 Slow-client full-speed: throttled reader, variant complete before client finishes
 - [ ] 4.4 Disconnect policy both ways (store on: completes; store off: cancels)
-- [ ] 4.5 Boot: unknown scheme, unusable path, redirect+`file://` each abort naming their variables
+- [x] 4.5 Boot: unknown scheme, unusable path, redirect+`file://` each abort naming their variables
 
 ## 5. Docs
 

@@ -15,7 +15,7 @@ defmodule AudioProxy.ConfigTest do
                allow_insecure: false,
                source_allowlist: [],
                local_root: nil,
-               variant_bucket: nil,
+               variant_store: nil,
                max_concurrency: System.schedulers_online(),
                queue_size: 32,
                max_src_bytes: 2_000_000_000,
@@ -26,7 +26,7 @@ defmodule AudioProxy.ConfigTest do
     end
 
     test "an empty value counts as unset" do
-      assert Config.build!(%{"AP_VARIANT_BUCKET" => ""}).variant_bucket == nil
+      assert Config.build!(%{"AP_VARIANT_STORE" => ""}).variant_store == nil
       assert Config.build!(%{"AP_KEY" => "   "}).key == nil
 
       assert Config.build!(%{"AP_MAX_CONCURRENCY" => ""}).max_concurrency ==
@@ -138,6 +138,98 @@ defmodule AudioProxy.ConfigTest do
       File.write!(file, "")
 
       assert_raise Error, fn -> Config.build!(%{"AP_LOCAL_ROOT" => file}) end
+    end
+  end
+
+  describe "AP_VARIANT_STORE" do
+    @describetag :tmp_dir
+
+    test "is unset by default, which disables the variant cache" do
+      assert Config.build!(%{}).variant_store == nil
+    end
+
+    test "a file:// URL parses to the local store, expanded", %{tmp_dir: tmp_dir} do
+      config =
+        Config.build!(%{"AP_VARIANT_STORE" => "file://#{tmp_dir}", "AP_SERVE_MODE" => "proxy"})
+
+      assert config.variant_store == {:file, Path.expand(tmp_dir)}
+    end
+
+    test "an unknown scheme aborts, naming the variable" do
+      error =
+        assert_raise Error, fn -> Config.build!(%{"AP_VARIANT_STORE" => "gopher://cache"}) end
+
+      assert error.message =~ "AP_VARIANT_STORE"
+      assert error.message =~ "gopher"
+    end
+
+    test "a value with no scheme at all aborts, naming the variable" do
+      error =
+        assert_raise Error, fn -> Config.build!(%{"AP_VARIANT_STORE" => "/var/cache/audio"}) end
+
+      assert error.message =~ "AP_VARIANT_STORE"
+    end
+
+    test "s3:// is refused until its backend lands, naming the variable" do
+      error =
+        assert_raise Error, fn -> Config.build!(%{"AP_VARIANT_STORE" => "s3://variants"}) end
+
+      assert error.message =~ "AP_VARIANT_STORE"
+      assert error.message =~ "s3://"
+    end
+
+    test "the two-slash file URL typo is caught as such, not as a missing directory" do
+      error =
+        assert_raise Error, fn -> Config.build!(%{"AP_VARIANT_STORE" => "file://var/cache"}) end
+
+      assert error.message =~ "AP_VARIANT_STORE"
+      assert error.message =~ "three slashes"
+    end
+
+    test "a directory that is not there aborts, naming the variable" do
+      error =
+        assert_raise Error, fn ->
+          Config.build!(%{"AP_VARIANT_STORE" => "file:///nope/not/a/directory"})
+        end
+
+      assert error.message =~ "AP_VARIANT_STORE"
+      assert error.message =~ "existing directory"
+    end
+
+    test "a directory that refuses writes aborts, naming the variable", %{tmp_dir: tmp_dir} do
+      File.chmod!(tmp_dir, 0o555)
+      on_exit(fn -> File.chmod!(tmp_dir, 0o755) end)
+
+      error =
+        assert_raise Error, fn ->
+          Config.build!(%{"AP_VARIANT_STORE" => "file://#{tmp_dir}", "AP_SERVE_MODE" => "proxy"})
+        end
+
+      assert error.message =~ "AP_VARIANT_STORE"
+      assert error.message =~ "writable"
+    end
+
+    test "redirect serving against a file:// store aborts, naming both variables",
+         %{tmp_dir: tmp_dir} do
+      # Explicit and defaulted redirect alike: the effective mode is what the
+      # store cannot satisfy, however it was arrived at.
+      for env <- [%{}, %{"AP_SERVE_MODE" => "redirect"}] do
+        error =
+          assert_raise Error, fn ->
+            Config.build!(Map.put(env, "AP_VARIANT_STORE", "file://#{tmp_dir}"))
+          end
+
+        assert error.message =~ "AP_SERVE_MODE"
+        assert error.message =~ "AP_VARIANT_STORE"
+      end
+    end
+
+    test "proxy serving against a file:// store is accepted", %{tmp_dir: tmp_dir} do
+      config =
+        Config.build!(%{"AP_VARIANT_STORE" => "file://#{tmp_dir}", "AP_SERVE_MODE" => "proxy"})
+
+      assert config.serve_mode == :proxy
+      assert {:file, _root} = config.variant_store
     end
   end
 

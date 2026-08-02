@@ -20,7 +20,7 @@ defmodule AudioProxy.Config do
   | `AP_ALLOW_INSECURE` | boolean | `false` |
   | `AP_SOURCE_ALLOWLIST` | comma-separated list | `[]` |
   | `AP_LOCAL_ROOT` | existing directory, not `/` | unset (`nil`) — local sources disabled |
-  | `AP_VARIANT_BUCKET` | string | unset (`nil`) — no variant cache |
+  | `AP_VARIANT_STORE` | scheme-tagged URL (`file:///path`) | unset (`nil`) — no variant cache |
   | `AP_MAX_CONCURRENCY` | positive integer | `System.schedulers_online/0` |
   | `AP_QUEUE_SIZE` | non-negative integer | `32` |
   | `AP_MAX_SRC_BYTES` | positive integer | `2_000_000_000` |
@@ -66,7 +66,7 @@ defmodule AudioProxy.Config do
           allow_insecure: boolean(),
           source_allowlist: [String.t()],
           local_root: String.t() | nil,
-          variant_bucket: String.t() | nil,
+          variant_store: AudioProxy.VariantStore.config() | nil,
           max_concurrency: pos_integer(),
           queue_size: non_neg_integer(),
           max_src_bytes: pos_integer(),
@@ -89,25 +89,28 @@ defmodule AudioProxy.Config do
   @doc """
   Builds a validated config map from an environment map, without storing it.
 
-  Pure — this is the function tests exercise for parsing and validation.
+  This is the function tests exercise for parsing and validation. It writes
+  nothing to `:persistent_term`; it does touch the filesystem where a value
+  *is* a filesystem claim — `AP_LOCAL_ROOT` must be an existing directory,
+  and a `file://` variant store is probed for writability.
   """
   @spec build!(map()) :: t()
   def build!(env) when is_map(env) do
-    %{
+    validate!(%{
       port: port(env),
       key: hex(env, "AP_KEY", @min_key_bytes),
       salt: hex(env, "AP_SALT"),
       allow_insecure: boolean(env, "AP_ALLOW_INSECURE", false),
       source_allowlist: list(env, "AP_SOURCE_ALLOWLIST"),
       local_root: directory(env, "AP_LOCAL_ROOT"),
-      variant_bucket: string(env, "AP_VARIANT_BUCKET"),
+      variant_store: store(env, "AP_VARIANT_STORE"),
       max_concurrency: integer(env, "AP_MAX_CONCURRENCY", System.schedulers_online(), :positive),
       queue_size: integer(env, "AP_QUEUE_SIZE", @default_queue_size, :non_negative),
       max_src_bytes: integer(env, "AP_MAX_SRC_BYTES", @default_max_src_bytes, :positive),
       render_timeout: integer(env, "AP_RENDER_TIMEOUT", @default_render_timeout, :positive),
       serve_mode: enum(env, "AP_SERVE_MODE", @serve_modes, :redirect),
       log_level: enum(env, "AP_LOG_LEVEL", @log_levels, @default_log_level)
-    }
+    })
   end
 
   @doc "Returns the whole stored config."
@@ -199,7 +202,78 @@ defmodule AudioProxy.Config do
     end
   end
 
-  defp string(env, var), do: fetch(env, var)
+  # `AP_VARIANT_STORE` is a scheme-tagged URL, parsed the way a source is:
+  # the scheme picks the backend, the rest is the backend's address. Rejected
+  # here rather than at first use so a container pointed at a store it cannot
+  # write fails to boot instead of rendering everything twice, silently.
+  defp store(env, var) do
+    with value when is_binary(value) <- fetch(env, var) do
+      case URI.new(value) do
+        {:ok, %URI{scheme: "file", host: host, path: path}}
+        when host in [nil, ""] and is_binary(path) and path != "" ->
+          store_directory!(var, value, path)
+
+        # `file://var/cache` parses `var` as a *host* — an easy two-slash typo
+        # that would otherwise fail as a nonexistent directory named `/cache`.
+        {:ok, %URI{scheme: "file", host: host}} when is_binary(host) and host != "" ->
+          raise Error,
+                "#{var} file URLs take three slashes (file:///path); #{inspect(value)} reads #{inspect(host)} as a host"
+
+        {:ok, %URI{scheme: "s3"}} ->
+          raise Error,
+                "#{var} does not support s3:// yet (the S3 backend is a separate slice); use file:///path"
+
+        {:ok, %URI{scheme: scheme}} ->
+          raise Error,
+                "#{var} must be a scheme-tagged URL (file:///path), got scheme #{inspect(scheme)} in #{inspect(value)}"
+
+        {:error, _part} ->
+          raise Error, "#{var} must be a scheme-tagged URL (file:///path), got: #{inspect(value)}"
+      end
+    end
+  end
+
+  # Existence and writability are both proved at boot, and writability by the
+  # exact write the store performs — a file created under `<root>/tmp` — not
+  # by mode bits, which say nothing about read-only mounts.
+  defp store_directory!(var, value, path) do
+    expanded = Path.expand(path)
+
+    unless File.dir?(expanded) do
+      raise Error, "#{var} must name an existing directory, got: #{inspect(value)}"
+    end
+
+    probe =
+      Path.join([expanded, "tmp", ".boot-probe-#{System.unique_integer([:positive])}"])
+
+    with :ok <- File.mkdir_p(Path.dirname(probe)),
+         :ok <- File.write(probe, ""),
+         :ok <- File.rm(probe) do
+      {:file, expanded}
+    else
+      {:error, reason} ->
+        raise Error,
+              "#{var} must name a writable directory, got: #{inspect(value)} (#{inspect(reason)})"
+    end
+  end
+
+  # Cross-field: redirect serving is a 302 to a presigned variant URL, which
+  # only a backend with the `:presign` capability can produce. Refused at boot
+  # — naming both variables, since either can resolve it — rather than failing
+  # on every HIT.
+  defp validate!(%{serve_mode: :redirect, variant_store: {scheme, _} = store} = config) do
+    backend = AudioProxy.VariantStore.backend_for(store)
+
+    if :presign in backend.capabilities() do
+      config
+    else
+      raise Error,
+            "AP_SERVE_MODE=redirect serves cache hits via presigned URLs, which a #{scheme}:// " <>
+              "AP_VARIANT_STORE cannot produce; set AP_SERVE_MODE=proxy or use a store that can presign"
+    end
+  end
+
+  defp validate!(config), do: config
 
   # Checked here rather than on the request path so that a container pointed at
   # a directory that is not mounted fails to boot, instead of answering every
