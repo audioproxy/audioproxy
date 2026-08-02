@@ -242,7 +242,7 @@ curl -D - -o preview.mp3 "localhost:4000/$SIG$REST"
 HTTP/1.1 200 OK
 transfer-encoding: chunked
 content-type: audio/mpeg
-cache-control: public, max-age=31536000, immutable
+cache-control: public, max-age=31536000, immutable, no-transform
 etag: "6f1c…"
 x-audio-proxy: MISS
 ```
@@ -256,6 +256,25 @@ Requests for the same variant share a render, so a burst — a page that loads t
 If the client goes away mid-stream, the render goes with it, unless someone else is still listening to the same one: closing the last connection kills the ffmpeg process rather than leaving it encoding into a socket nobody is reading. A render that fails *before* any bytes are sent is one of the JSON errors below; one that fails after them can only be signalled by cutting the connection short, so treat a chunked response that ends without its terminating chunk as a failed download.
 
 For what happens behind that (the subprocess, coalescing, buffering, the timeout and the kill discipline) see [docs/rendering.md](docs/rendering.md).
+
+## Caching and CDNs
+
+The proxy is built to sit behind a CDN without special configuration on either side: the URL names the variant completely, the `ETag` is the cache key, there are no cookies and no `Vary`, and changing `cb` busts every tier at once. Every response states how long it may be held, so no CDN negative-caching default — where Cloudflare, CloudFront, and Fastly differ most — ever decides retention:
+
+| Response | `Cache-Control` | Why |
+|---|---|---|
+| `200` media / peaks | `public, max-age=31536000, immutable, no-transform` | The URL encodes the variant, so it *is* immutable; `no-transform` keeps edge features from recompressing or mangling the bytes |
+| `404` | `max-age=10` | Sources appear — a file uploaded moments after the miss is served within seconds |
+| `413`, `415` | `max-age=10` | Verdicts about the current source bytes, which a re-upload changes |
+| `401`, `422` | `max-age=60` | Pure functions of the URL: a bad signature never becomes good, invalid options never become valid — only a deploy changes that |
+| `429`, `500`, `504` | `no-store` | Transient — caching a transient failure amplifies it (`429` carries `Retry-After`) |
+| `/health` | `no-store` | Liveness is only worth anything fresh |
+
+Three behaviors round out the CDN-facing surface:
+
+- **Revalidation costs no render.** A request whose `If-None-Match` matches the variant's `ETag` answers `304` before the proxy touches storage or spawns anything — the ETag derives from the URL alone. The signature still gates: an unsigned request is `401`, matching validator or not.
+- **HEAD works.** `HEAD` on a signed URL answers the status and headers a `GET` would, through every check including the source stat, with an empty body and no render. Errors answer as `GET` does, bodiless. `HEAD /health` works too.
+- **`Range` on an uncached variant is ignored.** A `Range` header on a variant that has to be rendered gets the full `200` chunked stream (RFC 9110 permits this), with no `Accept-Ranges` and no `206`. Range serving belongs to cached variants: once the variant cache lands, a `HIT` redirects to storage, which serves `206` natively — that discipline arrives with that slice.
 
 ## Processing options
 

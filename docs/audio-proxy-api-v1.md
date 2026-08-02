@@ -136,7 +136,16 @@ Straight mapping of `ffprobe -show_format -show_streams`, filtered. Cached aggre
 
 ### Common headers
 
-`Content-Type` per format · `Cache-Control: public, max-age=31536000, immutable` (URL encodes the variant, so it *is* immutable) · `ETag` = cache key, sent quoted, since RFC 9110 defines an entity-tag as a quoted-string and a bare token is not one.
+`Content-Type` per format · `Cache-Control: public, max-age=31536000, immutable, no-transform` (URL encodes the variant, so it *is* immutable; `no-transform` because the bytes are the product and must survive edge features that recompress or mangle bodies) · `ETag` = cache key, sent quoted, since RFC 9110 defines an entity-tag as a quoted-string and a bare token is not one.
+
+### Edge-cache discipline
+
+Every response, success or error, carries an explicit `Cache-Control` — no CDN negative-caching default ever decides retention:
+
+- Errors: `404`/`413`/`415` → `max-age=10` (verdicts about the current source bytes; a re-upload changes them), `401`/`422` → `max-age=60` (pure functions of the URL; only a deploy changes them), `429`/`5xx` → `no-store` (transient; caching a transient failure amplifies it). `/health` and the unmatched-route `404` state theirs too (`no-store` and `max-age=10`).
+- **Conditional requests**: an `If-None-Match` matching the URL-derived `ETag` answers `304` with `ETag` and `Cache-Control`, no body, no render, no storage access. Placed after signature verification — never an existence oracle for unsigned probes.
+- **HEAD** on signed endpoints answers the status and headers a `GET` would, through the full check chain including the source stat, with an empty body and no render subprocess. Errors as `GET`, bodiless. No `X-Audio-Proxy`: that header reports a render's outcome, and none ran.
+- **Range on a MISS is ignored**: the full `200` chunked stream, no `Accept-Ranges`, no `206`/`416` (RFC 9110 §14.2 permits ignoring `Range`). `206` semantics belong to cached variants, served by storage after the HIT redirect.
 
 ### Errors (JSON body)
 
