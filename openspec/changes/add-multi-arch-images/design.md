@@ -20,5 +20,5 @@ Extends `add-docker-release`'s pipeline: same Dockerfile, same tag scheme, two a
 ## Risks / Trade-offs
 
 - [Doubled image CI time on every main push] → arch matrix runs in parallel on separate runners; wall-clock cost is ~the slower of the two, not the sum.
-- [alpine's ffmpeg versions could diverge between arches] → the per-arch version assertion catches it; `VERSIONS.md` records both if they ever differ, and that state blocks a release until reconciled or consciously accepted.
+- [debian's ffmpeg versions could diverge between arches] → the per-arch version assertion catches it; `VERSIONS.md` records both if they ever differ, and that state blocks a release until reconciled or consciously accepted.
 - [Mixed-arch fleet + shared variant bucket → same cache key, arch-dependent bytes] → accepted and documented (equivalent to the existing ffmpeg-upgrade variance); deployments that require byte-stability pin one arch.
