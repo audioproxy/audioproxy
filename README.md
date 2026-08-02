@@ -40,6 +40,16 @@ curl -o speech.mp3 "$BASE/insecure/f:mp3/br:64/ch:1/sr:22050/$SRC"
 
 Both start arriving while ffmpeg is still encoding: the response is chunked, not buffered to disk first. Change any option and you have a different variant, with no server-side configuration to add: the URL is the whole request.
 
+To hear it rather than download it, save this as `player.html` and open it in a browser:
+
+```html
+<audio controls src="http://localhost:4000/insecure/f:mp3/br:128/plain/local://track.wav"></audio>
+```
+
+Playback starts before the render finishes, which is the point. `f:mp3` because every browser plays it; Safari will not play Ogg or Opus.
+
+**The duration will read as unknown and the scrubber will not work, both by design.** A render in progress has no length and nothing to seek into, so it is delivered chunked with no `Content-Length` and no `Accept-Ranges`. Seeking belongs to a *cached* variant, which has a known size and can be range-requested. Until the variant cache lands every request is a fresh render, so the seekable path is not reachable yet. See the [Roadmap](#roadmap).
+
 Two things that matter beyond a first try:
 
 - **`AP_ALLOW_INSECURE` is development only.** It is what lets the literal `insecure` stand in for a signature, so while it is on, anyone who can reach the port can render anything under `AP_LOCAL_ROOT`. [Signing URLs](#signing-urls) is the real thing.
