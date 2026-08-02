@@ -20,7 +20,8 @@ defmodule AudioProxy.ConfigTest do
                queue_size: 32,
                max_src_bytes: 2_000_000_000,
                render_timeout: 300,
-               serve_mode: :redirect
+               serve_mode: :redirect,
+               log_level: :info
              }
     end
 
@@ -92,6 +93,13 @@ defmodule AudioProxy.ConfigTest do
     test "serve mode becomes an atom" do
       assert Config.build!(%{"AP_SERVE_MODE" => "redirect"}).serve_mode == :redirect
       assert Config.build!(%{"AP_SERVE_MODE" => "proxy"}).serve_mode == :proxy
+    end
+
+    test "log level becomes an atom Logger accepts" do
+      for level <- Config.log_levels() do
+        assert Config.build!(%{"AP_LOG_LEVEL" => Atom.to_string(level)}).log_level == level
+        assert level in Logger.levels()
+      end
     end
   end
 
@@ -167,6 +175,16 @@ defmodule AudioProxy.ConfigTest do
       assert error.message =~ "AP_SERVE_MODE"
       assert error.message =~ "redirect"
       assert error.message =~ "proxy"
+    end
+
+    test "unknown AP_LOG_LEVEL aborts, listing the allowed values" do
+      error = assert_raise Error, fn -> Config.build!(%{"AP_LOG_LEVEL" => "verbose"}) end
+
+      assert error.message =~ "AP_LOG_LEVEL"
+
+      for level <- ~w(debug info warning error) do
+        assert error.message =~ level
+      end
     end
 
     test "non-boolean AP_ALLOW_INSECURE aborts, naming the variable" do

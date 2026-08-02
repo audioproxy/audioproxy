@@ -26,6 +26,7 @@ defmodule AudioProxy.Config do
   | `AP_MAX_SRC_BYTES` | positive integer | `2_000_000_000` |
   | `AP_RENDER_TIMEOUT` | positive integer (seconds) | `300` |
   | `AP_SERVE_MODE` | `redirect` \\| `proxy` | `:redirect` |
+  | `AP_LOG_LEVEL` | `debug` \\| `info` \\| `warning` \\| `error` | `:info` |
 
   The listener port is read from `AP_PORT`, falling back to `PORT` (which the
   worktree workflow sets to the branch's hashed port), then to `4000`.
@@ -49,6 +50,12 @@ defmodule AudioProxy.Config do
   @default_render_timeout 300
   @serve_modes [:redirect, :proxy]
 
+  # Logger's own levels, narrowed to the four an operator has a reason to pick.
+  # `:notice` and friends exist in OTP's scale but nothing here emits them, so
+  # offering them would only be a way to configure a level with no meaning.
+  @log_levels [:debug, :info, :warning, :error]
+  @default_log_level :info
+
   @truthy ~w(1 true yes on)
   @falsy ~w(0 false no off)
 
@@ -64,7 +71,8 @@ defmodule AudioProxy.Config do
           queue_size: non_neg_integer(),
           max_src_bytes: pos_integer(),
           render_timeout: pos_integer(),
-          serve_mode: :redirect | :proxy
+          serve_mode: :redirect | :proxy,
+          log_level: :debug | :info | :warning | :error
         }
 
   @doc """
@@ -97,7 +105,8 @@ defmodule AudioProxy.Config do
       queue_size: integer(env, "AP_QUEUE_SIZE", @default_queue_size, :non_negative),
       max_src_bytes: integer(env, "AP_MAX_SRC_BYTES", @default_max_src_bytes, :positive),
       render_timeout: integer(env, "AP_RENDER_TIMEOUT", @default_render_timeout, :positive),
-      serve_mode: serve_mode(env)
+      serve_mode: enum(env, "AP_SERVE_MODE", @serve_modes, :redirect),
+      log_level: enum(env, "AP_LOG_LEVEL", @log_levels, @default_log_level)
     }
   end
 
@@ -124,6 +133,10 @@ defmodule AudioProxy.Config do
   @doc "The serve modes `AP_SERVE_MODE` accepts."
   @spec serve_modes() :: [atom()]
   def serve_modes, do: @serve_modes
+
+  @doc "The levels `AP_LOG_LEVEL` accepts."
+  @spec log_levels() :: [atom()]
+  def log_levels, do: @log_levels
 
   ## Parsers
 
@@ -220,16 +233,16 @@ defmodule AudioProxy.Config do
     end
   end
 
-  defp serve_mode(env) do
-    case fetch(env, "AP_SERVE_MODE") do
+  defp enum(env, var, allowed, default) do
+    case fetch(env, var) do
       nil ->
-        :redirect
+        default
 
       value ->
-        Enum.find(@serve_modes, fn mode -> Atom.to_string(mode) == value end) ||
+        Enum.find(allowed, fn candidate -> Atom.to_string(candidate) == value end) ||
           raise(
             Error,
-            "AP_SERVE_MODE must be one of #{inspect(Enum.map(@serve_modes, &Atom.to_string/1))}, got: #{inspect(value)}"
+            "#{var} must be one of #{inspect(Enum.map(allowed, &Atom.to_string/1))}, got: #{inspect(value)}"
           )
     end
   end
