@@ -41,6 +41,10 @@ The system SHALL serve requests whose cache key exists in the store without star
 - **WHEN** the store supports presigning and `AP_SERVE_MODE=redirect`
 - **THEN** the response is `302` to a short-lived presigned URL
 
+#### Scenario: The redirect itself is never cached
+- **WHEN** a HIT is served as a `302`
+- **THEN** the redirect response carries `Cache-Control: no-store` — a cached 302 would hand out presigned URLs that outlive their expiry
+
 ### Requirement: Serve mode must be supported by the store
 The system SHALL treat redirect serving as a capability of the configured backend, and SHALL refuse at boot to run a serve mode the store cannot satisfy.
 
