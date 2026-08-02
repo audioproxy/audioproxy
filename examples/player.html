@@ -1,0 +1,106 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>audio_proxy player</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.6 system-ui, sans-serif; max-width: 54rem; margin: 3rem auto; padding: 0 1.25rem; }
+  h1 { font-size: 1.4rem; margin-bottom: .25rem; }
+  .sub { color: #777; margin-top: 0; }
+  input { width: 100%; font: 13px/1.5 ui-monospace, SFMono-Regular, monospace; padding: .6rem .7rem; box-sizing: border-box; border: 1px solid #8884; border-radius: 6px; background: transparent; color: inherit; }
+  audio { width: 100%; margin: 1rem 0; }
+  .presets { display: flex; flex-wrap: wrap; gap: .4rem; margin: .75rem 0 0; }
+  .presets button { font: 12px ui-monospace, monospace; padding: .35rem .6rem; border: 1px solid #8884; border-radius: 999px; background: transparent; color: inherit; cursor: pointer; }
+  .presets button:hover { border-color: #888; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: .3rem 1.25rem; font: 13px ui-monospace, monospace; margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid #8883; }
+  dt { color: #888; }
+  .err { color: #c33; }
+  .note { font-size: 13px; color: #777; border-left: 2px solid #8884; padding-left: .9rem; margin: 1.75rem 0 0; }
+  code { font-size: .92em; }
+</style>
+
+<h1>audio_proxy player</h1>
+<p class="sub">Edit the URL and press Enter, or pick a preset. The readouts below show what the browser thinks of the response.</p>
+
+<input id="url" spellcheck="false">
+<div class="presets" id="presets"></div>
+
+<audio id="player" controls></audio>
+
+<dl>
+  <dt>status</dt><dd id="status">—</dd>
+  <dt>duration</dt><dd id="duration">—</dd>
+  <dt>seekable</dt><dd id="seekable">—</dd>
+  <dt>buffered</dt><dd id="buffered">—</dd>
+</dl>
+
+<p class="note">
+  <strong>Serve this file over <code>http://localhost:…</code></strong> — for example
+  <code>ruby -run -e httpd . -p 8097</code> from this directory. Opening it as a
+  <code>file://</code> or <code>data:</code> URL gives the page an opaque origin, and Chrome
+  refuses to let a non-secure origin reach the loopback address space. The failure shows up
+  as a CORS error that has nothing to do with the proxy.
+</p>
+
+<script>
+  // Matches the Quick start in the README: a file called track.wav under AP_LOCAL_ROOT.
+  const BASE = "http://localhost:4000";
+  const SRC = "plain/local://track.wav";
+
+  const PRESETS = [
+    ["mp3 128k", "f:mp3/br:128"],
+    ["30s preview, faded", "f:opus/br:96/t:0:30/fade:1:1"],
+    ["speech mono 22k", "f:mp3/br:64/ch:1/sr:22050"],
+    ["podcast, -16 LUFS", "f:mp3/br:128/norm:ebu"],
+    ["24-bit FLAC excerpt", "f:flac/bd:24/t:0:20"],
+    ["wav 16k for STT", "f:wav/ch:1/sr:16000"]
+  ];
+
+  const url = document.getElementById("url");
+  const player = document.getElementById("player");
+  const statusEl = document.getElementById("status");
+  const set = (id, v) => (document.getElementById(id).textContent = v);
+
+  const build = opts => `${BASE}/insecure/${opts}/${SRC}`;
+
+  for (const [label, opts] of PRESETS) {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.onclick = () => { url.value = build(opts); load(); };
+    document.getElementById("presets").append(b);
+  }
+
+  function load() {
+    statusEl.className = "";
+    set("status", "loading…");
+    player.src = url.value.trim();
+    player.load();
+  }
+
+  // A media element reports every failure as MEDIA_ERR_SRC_NOT_SUPPORTED, including
+  // ones that never reached the network. If the page itself is not a secure context
+  // that is overwhelmingly the reason, so say so rather than blaming the URL.
+  player.addEventListener("error", () => {
+    const code = player.error ? player.error.code : "?";
+    statusEl.className = "err";
+    set("status", window.isSecureContext
+      ? `error ${code} — check the proxy is running and the source exists`
+      : `error ${code} — this page's origin is ${location.origin}, which Chrome will not let reach loopback. Serve it over http://localhost instead.`);
+  });
+
+  player.addEventListener("loadedmetadata", () => set("status", "ready"));
+  player.addEventListener("playing", () => set("status", "playing"));
+
+  setInterval(() => {
+    const d = player.duration;
+    set("duration", !d ? "—" : d === Infinity ? "Infinity — still rendering, no Content-Length" : d.toFixed(2) + "s");
+    set("seekable", player.seekable.length && player.seekable.end(0) > 0
+      ? "0–" + player.seekable.end(0).toFixed(1) + "s"
+      : "not seekable — a render in progress has nothing to seek into");
+    set("buffered", player.buffered.length ? player.buffered.end(0).toFixed(1) + "s" : "—");
+  }, 400);
+
+  url.addEventListener("keydown", e => { if (e.key === "Enter") load(); });
+
+  url.value = build(PRESETS[0][1]);
+  load();
+</script>
