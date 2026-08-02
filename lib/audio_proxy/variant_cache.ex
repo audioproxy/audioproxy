@@ -74,7 +74,7 @@ defmodule AudioProxy.VariantCache do
 
   require Logger
 
-  alias AudioProxy.{Config, ErrorJSON, VariantStore}
+  alias AudioProxy.{Config, ErrorJSON, LogHandler, VariantStore}
 
   @typedoc "What `lookup/1` found, if anything."
   @type hit :: {:ok, VariantStore.entry()} | :miss
@@ -140,8 +140,16 @@ defmodule AudioProxy.VariantCache do
       # Configured for redirect against a backend that could not produce one.
       # The variant is right there, so serve it rather than fail the request;
       # the log line is what tells an operator their serve mode is not working.
+      # `reason` comes from a backend whose entire job is producing URLs that
+      # carry a live signature, so it is redacted like any other text this
+      # application did not build. `AudioProxy.LogHandler` makes that guarantee
+      # for the telemetry it consumes; a direct `Logger` call has to ask.
       {:error, reason} ->
-        Logger.warning("could not presign variant #{key}, proxying instead: #{inspect(reason)}")
+        Logger.warning(
+          "could not presign variant #{key}, proxying instead: " <>
+            LogHandler.redact(inspect(reason))
+        )
+
         proxy(conn, key, entry)
     end
   end
