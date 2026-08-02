@@ -35,8 +35,12 @@ defmodule AudioProxy.Application do
     # registry and its supervisor sit between them, because a coordinator
     # spawns a render in `init/1` and must therefore stop before the thing it
     # spawns into — which reverse-order shutdown gives for free.
+    #
+    # The semaphore is first for the same reason read the other way: a
+    # coordinator releases its slot from `terminate/2`, so the thing it releases
+    # into has to outlive it.
     children =
-      [AudioProxy.Ffmpeg.RenderSupervisor] ++
+      [AudioProxy.Semaphore, AudioProxy.Ffmpeg.RenderSupervisor] ++
         AudioProxy.RenderCoordinator.children() ++ listener(config)
 
     Logger.info("audio_proxy #{vsn()} starting (serve_mode: #{config.serve_mode})")
