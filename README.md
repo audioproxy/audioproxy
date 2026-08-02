@@ -400,12 +400,15 @@ The listener port is read from `AP_PORT`, then `PORT`, then `4000`.
 Everything goes to stdout, one line per completed request:
 
 ```
-12:31:07.442 request_id=GMf5ECU8WG_tDMEAAAJC [info] render 200 opts=br:96/f:opus src=local://piece.wav 27141 bytes in 63.4ms
+12:31:07.442 request_id=GMf5ECU8WG_tDMEAAAJC [info] render 200 opts=br:96/f:opus src=local://piece.wav cache=MISS 27141 bytes in 63.4ms
+12:31:07.981 request_id=GMf5ECU9xK2sPQ1AAAJD [info] render 200 opts=br:96/f:opus src=local://piece.wav cache=COALESCED 27141 bytes in 2.8ms
 12:31:09.118 request_id=GMf5EGolMMyBOD4AAA7B [info] render 422 invalid_options 74 bytes in 0.3ms
-12:31:11.006 request_id=GMf5ECRh8raItPUAAAOl [warning] render 504 render_timeout opts=f:mp3 src=local://long.wav 72 bytes in 300004.7ms
+12:31:11.006 request_id=GMf5ECRh8raItPUAAAOl [warning] render 504 render_timeout opts=f:mp3 src=local://long.wav cache=MISS 72 bytes in 300004.7ms
 ```
 
-Reading one left to right: the endpoint (`render`, `health`, or `unknown` for a path that matched no route), the status, the error code from the [Errors](#errors) table when the request failed, the normalized options string and the canonical source once the proxy has got far enough to know them (a `401` knows neither and omits both), the bytes sent, and how long it took.
+Reading one left to right: the endpoint (`render`, `health`, or `unknown` for a path that matched no route), the status, the error code from the [Errors](#errors) table when the request failed, the normalized options string and the canonical source once the proxy has got far enough to know them (a `401` knows neither and omits both), whether the request rendered or shared one, the bytes sent, and how long it took.
+
+`cache=` is the field to read before drawing conclusions from a duration. The second line above delivered the same 27 kB as the first in a fortieth of the time because it attached to the render already running for that variant — not because ffmpeg was fast.
 
 `request_id` is on every line, and the same id comes back to the client in the `x-request-id` response header — so a report of "this URL was slow at 12:31" can be traced to the render behind it. Send your own `x-request-id` and it is used instead, which is what makes the log line up with a proxy or gateway in front.
 

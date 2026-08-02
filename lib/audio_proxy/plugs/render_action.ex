@@ -145,7 +145,8 @@ defmodule AudioProxy.Plugs.RenderAction do
       span =
         Telemetry.render_start(%{
           format: conn.assigns.options.format,
-          source: Source.canonical(source)
+          source: Source.canonical(source),
+          cache_status: status
         })
 
       conn
