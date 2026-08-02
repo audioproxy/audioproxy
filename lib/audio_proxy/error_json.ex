@@ -97,8 +97,14 @@ defmodule AudioProxy.ErrorJSON do
   @type structured :: OptionError.t() | atom() | {:queue_full, non_neg_integer()}
 
   # Reasons that all mean "no servable source": the shared resolver's
-  # rejections (`AudioProxy.Source`), the local type's own, and the storage
+  # rejections (`AudioProxy.Source`), each source type's own, and the storage
   # seam's verdicts (`authorize/1`, `stat/1`, `ffmpeg_input/1`).
+  #
+  # `:no_backend` is the one worth a word. A remote source whose backend has
+  # not shipped yet is, from a client's side of the wire, exactly "not one this
+  # proxy may serve" — §5's own words for the 404 row — so it answers the same
+  # blind 404 as everything else here rather than a 5xx blaming the operator
+  # for a URL that names nothing servable.
   @source_not_found [
     :unknown_encoding,
     :invalid_encoding,
@@ -107,6 +113,12 @@ defmodule AudioProxy.ErrorJSON do
     :control_character,
     :unknown_scheme,
     :empty_path,
+    :missing_bucket,
+    :missing_key,
+    :invalid_url,
+    :userinfo_not_allowed,
+    :source_too_long,
+    :no_backend,
     :not_allowed,
     :not_found
   ]

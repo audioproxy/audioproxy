@@ -68,10 +68,30 @@ defmodule AudioProxy.Plugs.ResolveSourceTest do
     end
 
     test "an unknown scheme is not found" do
-      conn = call("plain/s3://bucket/key.wav")
+      conn = call("plain/ftp://host/key.wav")
 
       assert conn.status == 404
       assert JSON.decode!(conn.resp_body) == @generic_404
+    end
+
+    test "a remote source the allowlist does not admit is the same 404" do
+      # The no-oracle rule across source types: an unallowlisted bucket, an
+      # unallowlisted host and a missing local file are one response.
+      put_config(%{source_allowlist: ["masters"]})
+
+      assert JSON.decode!(call("plain/s3://secrets/key.wav").resp_body) == @generic_404
+      assert JSON.decode!(call("plain/https://evil.example/a.wav").resp_body) == @generic_404
+      assert call("plain/s3://secrets/key.wav").status == 404
+      assert call("plain/https://evil.example/a.wav").status == 404
+    end
+
+    test "a remote source the allowlist admits resolves" do
+      put_config(%{source_allowlist: ["masters", "*.media.example"]})
+
+      assert call("plain/s3://masters/key.wav").assigns.source == {:s3, "masters", "key.wav"}
+
+      assert call("plain/https://cdn.media.example/a.wav").assigns.source ==
+               {:http, "https://cdn.media.example/a.wav"}
     end
 
     test "an unknown encoding is not found" do

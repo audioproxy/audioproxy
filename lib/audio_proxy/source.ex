@@ -16,9 +16,11 @@ defmodule AudioProxy.Source do
   slice. Ask this module to parse a source and it will decode, vet, and hand
   the remainder to whichever type claims the scheme.
 
-  One type is registered: `local://`, files under `AP_LOCAL_ROOT`
-  (`AudioProxy.Source.Local`). Anything else is `{:error, :unknown_scheme}`
-  until `add-remote-files-source` adds `s3://` and `https://`.
+  Three types are registered: `local://`, files under `AP_LOCAL_ROOT`
+  (`AudioProxy.Source.Local`); `s3://`, an object in a bucket
+  (`AudioProxy.Source.S3`); and `https://`, a URL at an allowlisted origin
+  (`AudioProxy.Source.Https`). Anything else — `http://` included, deliberately
+  — is `{:error, :unknown_scheme}`.
 
   ## Decode exactly once
 
@@ -61,7 +63,7 @@ defmodule AudioProxy.Source do
 
   # Source types, in dispatch order. Each slice that adds one appends here;
   # nothing loads a type at runtime.
-  @types [AudioProxy.Source.Local]
+  @types [AudioProxy.Source.Local, AudioProxy.Source.S3, AudioProxy.Source.Https]
 
   # A `%` that is not the start of a well-formed escape.
   @malformed_escape_re ~r/%(?![0-9A-Fa-f]{2})/
@@ -109,6 +111,9 @@ defmodule AudioProxy.Source do
       {:ok, {:local, "previews/track.wav"}}
 
       iex> AudioProxy.Source.parse("plain/s3://masters/a.wav")
+      {:ok, {:s3, "masters", "a.wav"}}
+
+      iex> AudioProxy.Source.parse("plain/http://media.example/a.wav")
       {:error, :unknown_scheme}
 
       iex> AudioProxy.Source.parse("nonsense/x")

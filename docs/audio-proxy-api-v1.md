@@ -17,7 +17,7 @@ GET /{signature}/{options}/{source}
 - **source** — one of:
   - `plain/local://{path}` — file below `AP_LOCAL_ROOT` (URL-escaped path)
   - `plain/s3://{bucket}/{key}` — S3 object (URL-escaped key)
-  - `plain/{https-url}` — arbitrary HTTP(S) source, URL-escaped; subject to an allowlist
+  - `plain/{https-url}` — an `https://` source, URL-escaped; subject to an allowlist. `http://` is refused
   - `enc/{base64url(source)}` — encoded form, avoids escaping headaches
 
 ### Local sources
@@ -33,6 +33,16 @@ Two things sit outside a path-based check, and both are deployment assumptions r
 Paths are bounded before resolution: at most 64 components and 1024 bytes, refused as 404. The bound is a denial-of-service control — the confinement primitive is superlinear in component count.
 
 Metadata comes from the filesystem: regular files only (a directory, FIFO or device is a 404, as is a missing file), size checked against `AP_MAX_SRC_BYTES` for the 413, and size-plus-mtime as the ETag material behind conditional requests on `/info`.
+
+### Remote sources
+
+`s3://{bucket}/{key}` names an object; both halves are required, and the key is kept as its raw decoded bytes, since that is what S3 stores. `https://{host}/{path}` names a URL. Bounds are the stores' own: 63 bytes of bucket and 1024 of key (S3's maxima), 2048 bytes of URL and 253 of host (the de-facto URL maximum and DNS's name limit).
+
+The canonical string for an HTTPS source folds every second *spelling* of one resource — case, a trailing root dot, an explicit `:443`, an absent path (rendered `/`), an empty query, any fragment, and an IP literal's spelling (`[0:0:0:0:0:0:0:1]` → `[::1]`) — because each survivor would buy one object a second cache key. It preserves the URL's own percent-encoding and its dot segments, because only the origin knows whether `a%2Fb` and `a/b`, or `a/../b` and `b`, are the same object. IP literals fold through strict parsing only: the lenient parser reads `01.2.3.4` as 1.2.3.4, and folding that would let one allowlist entry admit two subjects.
+
+`http://` and userinfo (`https://user:pass@…`) are refused at the grammar rather than left to the allowlist, which keeps the allowlist single-axis: host, and nothing else.
+
+`AP_SOURCE_ALLOWLIST` gates both forms. An entry is an exact name, a trailing-`*` prefix glob for buckets, a leading-`*.` label-anchored suffix glob for hosts, or a bare `*`; a `*` anywhere else matches nothing. Buckets match case-sensitively and hosts fold case, as S3 and DNS respectively do; an IP-literal host is matched bracketless. **Unset accepts S3 sources and refuses HTTPS ones** — bucket credentials are already a gate, an outbound fetch has none. A source failing the allowlist is the same **404** as a missing one.
 
 Example:
 
@@ -172,7 +182,7 @@ Mid-stream render failure after `200` is signaled by abnormal termination of the
 |---|---|
 | `AP_KEY`, `AP_SALT` | Hex-encoded HMAC key/salt; key must decode to ≥ 32 bytes (generate: `openssl rand -hex 32`) |
 | `AP_ALLOW_INSECURE` | Accept unsigned URLs (dev only) |
-| `AP_SOURCE_ALLOWLIST` | Comma-separated bucket/host patterns |
+| `AP_SOURCE_ALLOWLIST` | Comma-separated bucket/host patterns; unset accepts every bucket and refuses every host (§1) |
 | `AP_LOCAL_ROOT` | Root directory for `local://` sources; unset = local sources disabled. Must exist at boot |
 | `AP_VARIANT_STORE` | Variant store, scheme-tagged: `file:///path` or `s3://bucket` (S3 backend pending); unset = no cache, always render. `file://` must exist and be writable at boot |
 | `AP_MAX_CONCURRENCY` | Max simultaneous ffmpeg processes (default: CPU count) |
