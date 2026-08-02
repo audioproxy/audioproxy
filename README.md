@@ -101,12 +101,12 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 - Transcoding to MP3, AAC/M4A, Opus, Vorbis, FLAC and WAV, with trimming, fades, loudness normalisation, channel and sample-rate control
 - Renders stream while they encode, from files in a mounted directory
 - Concurrent requests for the same variant share one render, with mid-render joiners catching up from the start
+- A cap on simultaneous renders with a bounded wait queue, so a burst queues (and then sheds, with `Retry-After`) instead of thrashing the machine
 - A single container, published per release
 
 **Next: what makes it production-shaped**
 
 - **A variant cache.** Requests that overlap already share a render, but nothing survives it, so the next one encodes the variant again. Rendered variants will be written back to a store and served from there on later requests, with `Range` support and byte-serving. Where they are stored is a separate choice from where sources come from: a local directory for a single node, object storage when you have more than one.
-- **Bounded concurrency.** A cap on simultaneous renders with a wait queue, so a burst of traffic queues instead of thrashing the machine.
 - **S3 sources**, so the audio itself can live in object storage.
 
 **After that**
@@ -255,7 +255,9 @@ Requests for the same variant share a render, so a burst — a page that loads t
 
 If the client goes away mid-stream, the render goes with it, unless someone else is still listening to the same one: closing the last connection kills the ffmpeg process rather than leaving it encoding into a socket nobody is reading. A render that fails *before* any bytes are sent is one of the JSON errors below; one that fails after them can only be signalled by cutting the connection short, so treat a chunked response that ends without its terminating chunk as a failed download.
 
-For what happens behind that (the subprocess, coalescing, buffering, the timeout and the kill discipline) see [docs/rendering.md](docs/rendering.md).
+At most `AP_MAX_CONCURRENCY` renders run at once. A request that needs one when they are all busy waits its turn, up to `AP_QUEUE_SIZE` of them; past that, the answer is a `429` with `Retry-After` rather than a machine with more encoders on it than cores. Waiting is invisible from the client's side — the response simply starts later — and requests that share a render share its slot, so the cap counts encodes rather than connections.
+
+For what happens behind that (the subprocess, coalescing, slots, buffering, the timeout and the kill discipline) see [docs/rendering.md](docs/rendering.md).
 
 ## Processing options
 
@@ -368,7 +370,7 @@ Failures are JSON, one shape everywhere: `{"error": "…", "message": "…"}`.
 | `500` | `render_failed` | The render failed for a reason that is not yours: no encoder on the host, no disk space, a failure the proxy could not classify. Worth retrying |
 | `504` | `render_timeout` | The render exceeded `AP_RENDER_TIMEOUT` |
 
-All of these are reachable except `429`, which arrives with the render queue (`openspec/changes/add-render-semaphore`). A failure *after* the response has begun is not in this table and cannot be: see [Rendering a variant](#rendering-a-variant).
+A failure *after* the response has begun is not in this table and cannot be: see [Rendering a variant](#rendering-a-variant).
 
 ## Configuration
 
@@ -384,8 +386,8 @@ Note that the variables below are the full configuration surface for the design,
 | `AP_SOURCE_ALLOWLIST` | comma-separated | empty | Permitted source buckets/hosts (used once remote source types land) |
 | `AP_LOCAL_ROOT` | existing directory | unset | Root for `local://` sources; unset disables them. Must exist at boot, and may not be `/` |
 | `AP_VARIANT_BUCKET` | string | unset | Write-back target; unset = always render |
-| `AP_MAX_CONCURRENCY` | positive integer | schedulers online | Max simultaneous ffmpeg processes |
-| `AP_QUEUE_SIZE` | non-negative integer | `32` | Waiting renders before `429` |
+| `AP_MAX_CONCURRENCY` | positive integer | schedulers online | Max simultaneous ffmpeg processes. Requests that share a render share its slot, so this counts encodes, not connections |
+| `AP_QUEUE_SIZE` | non-negative integer | `32` | Requests that may wait for a slot before the next one is answered `429` with `Retry-After`. `0` means no waiting at all |
 | `AP_MAX_SRC_BYTES` | positive integer | `2000000000` | Reject larger sources with `413`; also caps the bytes a render may hold in memory |
 | `AP_RENDER_TIMEOUT` | positive integer | `300` | Seconds a render may take before ffmpeg is killed and the request answered `504`. Raise it for full-length transcodes of long masters; the default suits previews. See [docs/rendering.md](docs/rendering.md) |
 | `AP_SERVE_MODE` | `redirect` \| `proxy` | `redirect` | Serve cache hits by redirect or proxied |

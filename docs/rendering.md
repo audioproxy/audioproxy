@@ -216,11 +216,56 @@ Three ways a coordinator ends, differing in what happens to the key:
   it a barrier the way `cancel/1` is. One subscriber dying among several is
   just a removal; the render continues.
 
-`AP_MAX_CONCURRENCY` is not enforced here yet — the semaphore slice acquires a
-slot before the coordinator spawns its pipeline and releases it on terminate,
-so the slot's lifetime is the subprocess' lifetime and queue waiting happens
-before deduplicated work starts. Coalescing already bounds the worst hot-key
-case; what is still uncapped is a burst across *distinct* keys.
+## Slots: `AP_MAX_CONCURRENCY` and the wait queue
+
+Coalescing bounds the worst hot-key case. What it cannot bound is a burst across
+*distinct* keys, and that is what `AudioProxy.Semaphore` is for: a counting
+semaphore of `AP_MAX_CONCURRENCY` slots with a FIFO wait queue of
+`AP_QUEUE_SIZE` behind it.
+
+**A slot is per render, not per request.** The coordinator takes one before it
+spawns its pipeline and releases it from `terminate/2`, so twenty requests
+coalescing on one key cost one slot, and the slot's lifetime is the subprocess'
+lifetime — including the kill discipline, since the release happens *after* the
+cancel rather than before it. A slot handed over while the previous ffmpeg was
+still being SIGKILLed would exceed the cap by exactly the margin that takes.
+
+**The coordinator waits without blocking.** It asks with `Semaphore.request/1`,
+which answers immediately with `:granted`, `:queued` or a queue-full error, and
+starts its render when the grant arrives as a message. So a coordinator has one
+phase more than the render does — `:queued`, before `:rendering` — and keeps
+answering joins throughout it. That matters: the requests coalescing onto a
+queued render are exactly the ones that must not each take a slot of their own.
+A subscriber cannot tell the two phases apart, and has no reason to. It is
+waiting for bytes either way.
+
+**A full queue is a start failure, not a render failure.** The slot is asked for
+in the coordinator's `init/1`, so `subscribe/2` answers
+`{:error, {:queue_full, retry_after}}` and no coordinator is left registered
+under that key — the next request asks the semaphore again instead of joining
+something that is never going to render. `AudioProxy.ErrorJSON` renders that
+tuple as a `429` with `Retry-After`, which is the only place that header comes
+from.
+
+The estimate on it is a moving average of recent slot-hold durations, scaled by
+how deep the queue already is: roughly "how long the renders in front of you
+have been taking, times how many of them there are, over how many run at once",
+clamped to at least a second and at most `AP_RENDER_TIMEOUT`. Coarse by
+construction — a client that comes back early finds the queue full and is told
+again.
+
+**Slots are recovered by monitor, not by discipline.** Every holder and every
+waiter is monitored: a coordinator that crashes releases its slot when the
+`DOWN` lands, and a waiter that dies is dropped from the queue rather than
+granted one nobody is holding. `release/1` is a promptness optimisation on top
+of that, and is idempotent. The path this exists for is the render that *hangs*
+rather than fails — a stalled origin, an input that never yields a byte — where
+nothing but `AP_RENDER_TIMEOUT` ends it: the timeout fails the render, the
+coordinator stops, and the slot goes to the next waiter.
+
+Occupancy and queue depth are published as `[:audio_proxy, :semaphore, _]`
+telemetry events (`acquired`, `queued`, `rejected`, `released`, `abandoned`),
+which is what `add-metrics-endpoint` will gauge without touching this path.
 
 ## Delivery over HTTP
 
