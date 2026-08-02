@@ -155,10 +155,17 @@ defmodule AudioProxy.RenderEndpointStreamTest do
       assert timed_out.head =~ "http/1.1 504"
 
       # Asserted on the process itself: the next request succeeding proves
-      # nothing here, because a stale message is inert rather than harmful. The
-      # mailbox depth is the property.
+      # nothing here, because a stale message is inert rather than harmful.
+      #
+      # `{:plug_conn, :sent}` is exempted: it is Plug's own bookkeeping, sent
+      # by the adapter to the connection process itself, and Bandit discards
+      # it in a `handle_info` clause of its own — which only runs once the
+      # handler returns to its GenServer loop, a moment this assertion can
+      # outrun (and on CI regularly did). It is Bandit's to consume; what
+      # must not be here is anything of the *render's*.
       assert {:ok, [connection]} = ThousandIsland.connection_pids(bandit)
-      assert {:message_queue_len, 0} = Process.info(connection, :message_queue_len)
+      {:messages, messages} = Process.info(connection, :messages)
+      assert Enum.reject(messages, &match?({:plug_conn, :sent}, &1)) == []
 
       # And the connection still works afterwards.
       :ok = RawHttp.send_get(socket, signed("/f:mp3/plain/local://quick.wav"))
