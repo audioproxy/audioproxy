@@ -36,10 +36,25 @@ The question is what mechanism lets a client say "I would rather wait and get so
   2. **Narrowing the trigger to a non-zero offset does not help.** A chunked response without `Accept-Ranges` marks the element non-seekable — measured `seekable.end(0)` of `0` against `20` for a range-capable response — so the user cannot drag the scrubber and the browser never issues a seek range. The trigger cannot fire for the case that motivated it. To let a browser seek, the *first* response must already carry `Content-Length` and `Accept-Ranges`, which means deciding to materialise before anything is known about intent.
   3. **`<audio src>` cannot set request headers**, so `Prefer: wait` is equally unreachable from HTML. A page author would need `fetch()` plus an object URL, and having fetched the bytes they no longer need the server to materialise anything.
 
-  **Conclusion: there is no trigger that serves a browser.** Any mechanism reaches only clients that construct requests deliberately — scripts, downloaders, ffmpeg. That is a much smaller audience than the player UI this change was written for.
+  **What this rules out is the browser signalling intent.** It does not rule out the *page author* signalling it, which is the distinction the first version of this design missed.
 
-- **What actually serves a browser is warming the cache.** Fetch the URL once and discard it, then set `src`; the second request is a HIT with `Content-Length` and `Accept-Ranges` and seeks normally. Two requests, no new API surface, no held render slot, nothing to build here. It is available to any page author in three lines, and it works today the moment `add-variant-cache` lands.
+- **Trigger: a `/sync/` path prefix, chosen when the URL is signed.**
+
+      /sync/{signature}/{options}/{source}
+
+  The author writes `src="/sync/..."` when a scrubber matters and the plain URL when it does not. A browser needs no new capability, because it is simply fetching a different URL.
+
+  This mirrors the delivery-mode prefix the API doc already reserves for segmented output (`/hls/{sig}/{options}/{source}/index.m3u8`), so it introduces a shape the router and verifier have to learn for v2 regardless, rather than a shape invented here.
+
+  The cache key is untouched: `{options}` is byte-identical either way, so both URLs resolve to one variant and one stored object. Only the framing differs, which is the whole point.
+
+  - **The prefix SHALL be inside the signed material.** Leaving it outside would let anyone holding a streaming URL prepend `/sync` and convert it into a held render slot and a full render — not a data exposure, but a free amplification of cost. Signing it means the issuer decides which mode a URL is good for, which is the same posture as every other part of the URL.
+  - **This diverges from how `/hls/` is currently sketched**, where the signature is the second segment and the prefix is outside it. The two should be decided together rather than ending up with one signed prefix and one unsigned one. Flagged for whoever designs the HLS slice.
+  - `VerifySignature` currently assumes the signature is the first path segment (`String.split(path, "/", parts: 3)`). Generalising it is a security-sensitive edit and wants its own careful review.
+
+- **Warming the cache remains the zero-build alternative.** Fetch the URL once and discard it, then set `src`; the second request is a HIT with `Content-Length` and `Accept-Ranges` and seeks normally. Two requests, no new API surface, no held render slot. Whether `/sync/` is worth building comes down to whether "change the URL" is enough better than "fetch it twice" to justify a signed prefix, a verifier change and a held render slot.
   - Query parameter: rejected for the same cache-key reason as a path option, plus it would have to be excluded from the signature or it changes URL identity.
+  - Request header (`Prefer: wait`): rejected as the primary trigger because `<audio src>` cannot set headers, so it misses the motivating client. Worth keeping as a secondary opt-in for programmatic clients if one ever asks.
 
 - **Materialise means render → store → serve as a HIT.** With a variant store configured, this is not a new delivery path at all: render to completion, write back, then answer from the store using the machinery `add-variant-cache` already builds. That is why this change depends on it. The alternative — a bespoke buffer-and-serve path — would duplicate range handling and metadata for no gain.
 

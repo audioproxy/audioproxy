@@ -1,19 +1,23 @@
 ## ADDED Requirements
 
 ### Requirement: A client may request a complete, seekable variant
-The system SHALL provide a delivery mode in which an uncached variant is rendered to completion before the response body begins, answered with `Content-Length` and `Accept-Ranges`, or `206` when a byte range was requested. The trigger SHALL be transport-level and SHALL NOT form part of the variant's cache key: byte-identical variants have one identity however they were delivered.
+The system SHALL provide a delivery mode, requested as `/sync/{signature}/{options}/{source}`, in which an uncached variant is rendered to completion before the response body begins, answered with `Content-Length` and `Accept-Ranges`, or `206` when a byte range was requested. The prefix SHALL be covered by the signature, and SHALL NOT form part of the variant's cache key: byte-identical variants have one identity however they were delivered.
 
-#### Scenario: Range on an uncached variant is answered with content
-- **WHEN** a variant that is not cached is requested with `Range: bytes=0-1023`
-- **THEN** the render completes first and the response is `206` with exactly that range and a correct `Content-Range`
+#### Scenario: A sync URL yields a complete response
+- **WHEN** an uncached variant is requested as `/sync/{signature}/{options}/{source}`
+- **THEN** the render completes first and the response carries `Content-Length` and `Accept-Ranges`, or `206` with a correct `Content-Range` if a range was requested
 
 #### Scenario: Delivery mode does not fork the cache key
-- **WHEN** the same variant is fetched once by streaming and once by materialising
+- **WHEN** the same variant is fetched once by its plain URL and once by its `/sync/` URL
 - **THEN** both resolve to the same cache key and the store holds one object
 
 #### Scenario: Streaming stays the default
-- **WHEN** an uncached variant is requested with no range and no explicit materialise signal
-- **THEN** the response is the chunked `200` of API doc §5, unchanged
+- **WHEN** an uncached variant is requested by its plain URL
+- **THEN** the response is the chunked `200` of API doc §5, unchanged, whatever `Range` header the client sent
+
+#### Scenario: The prefix is covered by the signature
+- **WHEN** a signature issued for a plain URL is replayed with `/sync/` prepended
+- **THEN** verification fails, so holding a streaming URL cannot be escalated into a held render slot
 
 ### Requirement: Materialised renders populate the store
 The system SHALL write a materialised variant back to the configured store on completion, so that the cost of waiting is paid once.

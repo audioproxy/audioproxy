@@ -4,8 +4,10 @@
 
 ## 1. Trigger and delivery
 
-- [ ] 1.1 Honour `Range` on a MISS as the materialise signal; no path option, no query parameter, nothing that reaches the cache key
+- [ ] 1.1 `/sync/{signature}/{options}/{source}` prefix as the materialise signal - reachable from `<audio src>` because the *page author* picks the URL, which is what `Range` could never be (a browser sends `Range: bytes=0-` on every first media request). No path option and no query parameter: `{options}` stays byte-identical, so both spellings resolve to one cache key and one stored object
 - [ ] 1.2 Materialise via the cache path where a store is configured: render → write back → serve as a HIT, reusing `add-variant-cache`'s range and metadata handling rather than a second implementation
+- [ ] 1.2a Sign the prefix: `/sync/...` and the plain URL carry different signatures, so holding a streaming URL cannot be escalated into a held render slot by prepending a path segment
+- [ ] 1.2b Generalise `AudioProxy.Plugs.VerifySignature`, which today assumes the signature is the first path segment (`String.split(path, "/", parts: 3)`). Security-sensitive: wants its own review, and should be settled together with the reserved `/hls/` prefix so the codebase does not end up with one signed prefix and one unsigned one
 - [ ] 1.3 Response shaping: `200` + `Content-Length` + `Accept-Ranges` for a whole-object materialise, `206` + `Content-Range` for a range
 
 ## 2. Spooling when no store is configured
@@ -32,5 +34,5 @@
 ## 5. Docs
 
 - [ ] 5.1 API doc §5: a MISS has two shapes, with the trigger and the trade stated. Contract change to the source of truth, lands with the code
-- [ ] 5.2 README: **`Range` is a quiet way to opt into a much slower first response** — a client that sends it by reflex will wait for the whole render. Say so where the `<audio>` snippet explains why the scrubber is dead
+- [ ] 5.2 README: `/sync/` trades time-to-first-byte for a working scrubber. Say so where the `<audio>` snippet explains why the scrubber is dead, and note that warming the cache achieves the same thing without it
 - [ ] 5.3 `AP_RENDER_SPOOL` in the configuration table
