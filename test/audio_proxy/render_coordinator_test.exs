@@ -50,14 +50,36 @@ defmodule AudioProxy.RenderCoordinatorTest do
       assert Enum.count(results, &(&1.status == :miss)) == 1
       assert Enum.count(results, &(&1.status == :coalesced)) == 19
 
-      # And one render, which is what the count of coordinators means: each
-      # spawns exactly one subprocess in `init/1`.
       assert [_only_one] = Enum.uniq(Enum.map(results, & &1.render))
 
       for result <- results do
         assert result.outcome == :ok
         assert result.bytes == @paced_bytes
       end
+    end
+
+    test "a burst starts exactly one subprocess, counted while it is running" do
+      key = unique_key()
+      test = self()
+
+      # A render that is still going when the count is taken — the burst test
+      # above can only assert on statuses and pids, because by the time its
+      # tasks return there is nothing left to count. This is the property
+      # stated as a number: one subprocess for twenty subscribers.
+      subscribers =
+        for _ <- 1..20, do: spawn(fn -> subscribe_and_wait(key, ["sleep", "30"], test) end)
+
+      # They sleep forever by design, so nothing else will ever end them.
+      on_exit(fn -> Enum.each(subscribers, &Process.exit(&1, :kill)) end)
+
+      renders =
+        for _ <- 1..20 do
+          assert_receive {:subscribed, render}, @deadline
+          render
+        end
+
+      assert [coordinator] = Enum.uniq(renders)
+      assert length(renders_for(coordinator)) == 1
     end
 
     test "distinct keys render independently" do
@@ -91,11 +113,16 @@ defmodule AudioProxy.RenderCoordinatorTest do
 
     test "joining mid-render is backlog then live chunks, with no seam" do
       key = unique_key()
-      first = Task.async(fn -> subscribe_and_collect(key, @paced) end)
+      test = self()
+      first = Task.async(fn -> subscribe_and_collect(key, @paced, announce_to: test) end)
 
-      # Past the first emit and inside the first sleep, so there is something
-      # to catch up on and something still to come.
-      Process.sleep(150)
+      # Joined on the render's own progress, not on a clock: the first chunk
+      # having been delivered is exactly the precondition this test needs, and
+      # a `sleep` long enough to imply it on a fast machine is not long enough
+      # on a loaded CI runner — where the backlog would come back empty and the
+      # assertion below would fail for a reason that is not a bug.
+      assert_receive {:first_chunk, _render}, @deadline
+
       second = Task.async(fn -> subscribe_and_collect(key, @paced) end)
 
       first = Task.await(first, @deadline)
@@ -129,17 +156,28 @@ defmodule AudioProxy.RenderCoordinatorTest do
   describe "subscriber lifecycle" do
     test "one subscriber dying leaves the render running for the others" do
       key = unique_key()
+      test = self()
 
       survivors =
         for _ <- 1..2, do: Task.async(fn -> subscribe_and_collect(key, @paced) end)
 
-      doomed = spawn(fn -> subscribe_and_wait(key, @paced) end)
-      Process.sleep(150)
+      doomed = spawn(fn -> subscribe_and_wait(key, @paced, test) end)
+
+      # Attached, on its own say-so rather than after a sleep.
+      assert_receive {:subscribed, render}, @deadline
+      assert doomed in subscribers(render)
+
       Process.exit(doomed, :kill)
 
       for survivor <- survivors do
         assert Task.await(survivor, @deadline).bytes == @paced_bytes
       end
+
+      # Both halves, because only asserting the survivors finish would pass
+      # against a coordinator that never removed a dead subscriber at all —
+      # and that coordinator would then never reach "last subscriber gone" and
+      # would leak the render.
+      refute doomed in subscribers(render)
     end
 
     test "the last subscriber leaving cancels the render and kills the subprocess" do
@@ -177,6 +215,49 @@ defmodule AudioProxy.RenderCoordinatorTest do
 
       assert_receive {:DOWN, ^coordinator, :process, ^render, _reason}, @deadline
       assert gone_within?(os_pid, @deadline)
+    end
+  end
+
+  describe "losing the race to a coordinator that is going away" do
+    test "a join that finds the winner already gone retries into a fresh render" do
+      key = unique_key()
+
+      # Occupy the key with something that will refuse the join and vanish —
+      # which is what a coordinator does between failing (it unregisters) and
+      # actually stopping. Reproducing it with a real coordinator would mean
+      # racing that window; this makes it the only outcome.
+      placeholder =
+        spawn(fn ->
+          {:ok, _} = Registry.register(AudioProxy.RenderCoordinator.Registry, key, nil)
+
+          receive do
+            _join_call ->
+              # Unregister before dying: the Registry cleans up after a dead
+              # owner asynchronously, and the retry must find the key free.
+              Registry.unregister(AudioProxy.RenderCoordinator.Registry, key)
+              exit(:gone)
+          end
+        end)
+
+      wait_until(fn -> Registry.lookup(AudioProxy.RenderCoordinator.Registry, key) != [] end)
+
+      result = subscribe_and_collect(key, @paced)
+
+      refute Process.alive?(placeholder)
+      assert result.status == :miss
+      assert result.bytes == @paced_bytes
+    end
+
+    test "leaving a coordinator that has already stopped is :ok, not an exit" do
+      key = unique_key()
+      {:ok, :miss, render, []} = RenderCoordinator.subscribe(key, spec(["exit", "0"]))
+
+      monitor = Process.monitor(render)
+      assert_receive {:DOWN, ^monitor, :process, ^render, _reason}, @deadline
+
+      # The caller is a request that has just finished with a render; that the
+      # render tidied itself away first must not turn its cleanup into a crash.
+      assert :ok = RenderCoordinator.unsubscribe(render)
     end
   end
 
@@ -235,14 +316,32 @@ defmodule AudioProxy.RenderCoordinatorTest do
 
   defp unique_key, do: "key-#{System.unique_integer([:positive, :monotonic])}"
 
+  defp wait_until(condition, remaining \\ @deadline)
+
+  defp wait_until(_condition, remaining) when remaining <= 0, do: flunk("condition never held")
+
+  defp wait_until(condition, remaining) do
+    unless condition.() do
+      Process.sleep(10)
+      wait_until(condition, remaining - 10)
+    end
+  end
+
   defp spec(directives), do: [args: directives, executable: RenderHarness.fake_cmd()]
 
   # Subscribes, drains to the terminal message, and reports what this
   # subscriber saw: its status, the coordinator it attached to, the catch-up it
   # was handed, and the concatenation of everything — which is the thing all
   # the equality assertions above are about.
-  defp subscribe_and_collect(key, directives) do
+  #
+  # `:announce_to` gets `{:subscribed, render}` the moment this subscriber is
+  # attached, and `{:first_chunk, render}` when its first live chunk lands.
+  # Those are what let a test join "after the render is under way" without
+  # guessing at a clock.
+  defp subscribe_and_collect(key, directives, opts \\ []) do
     {:ok, status, render, backlog} = RenderCoordinator.subscribe(key, spec(directives))
+
+    announce(opts, {:subscribed, render})
 
     collect(render, %{
       status: status,
@@ -251,21 +350,30 @@ defmodule AudioProxy.RenderCoordinatorTest do
       chunks: Enum.reverse(backlog),
       terminal_messages: 0,
       outcome: nil,
-      bytes: nil
+      bytes: nil,
+      announce_to: Keyword.get(opts, :announce_to)
     })
+  end
+
+  defp announce(opts, message) do
+    with pid when is_pid(pid) <- Keyword.get(opts, :announce_to), do: send(pid, message)
   end
 
   # Subscribes and then does nothing at all — a subscriber whose only job is to
   # exist until something kills it.
-  defp subscribe_and_wait(key, directives) do
-    {:ok, _status, _render, _backlog} = RenderCoordinator.subscribe(key, spec(directives))
+  defp subscribe_and_wait(key, directives, announce_to) do
+    {:ok, _status, render, _backlog} = RenderCoordinator.subscribe(key, spec(directives))
+
+    send(announce_to, {:subscribed, render})
+
     Process.sleep(:infinity)
   end
 
   defp collect(render, acc) do
     receive do
       {:chunk, ^render, data} ->
-        collect(render, %{acc | chunks: [data | acc.chunks]})
+        if acc.announce_to, do: send(acc.announce_to, {:first_chunk, render})
+        collect(render, %{acc | chunks: [data | acc.chunks], announce_to: nil})
 
       {:done, ^render, _info} ->
         # Kept receiving for a moment after the terminal message, so a second
@@ -301,21 +409,31 @@ defmodule AudioProxy.RenderCoordinatorTest do
 
   defp joined(acc), do: acc.chunks |> Enum.reverse() |> IO.iodata_to_binary()
 
-  ## Subprocess probing
+  ## Coordinator and subprocess probing
 
-  # The coordinator's render is the newest child of the render supervisor, and
-  # the coordinator is its consumer — which is what identifies it here.
+  # White-box, deliberately. The subscriber set has no public accessor and
+  # wants none — but "the dead one was removed" is not observable from the
+  # outside without waiting for a consequence, and a test that waits for a
+  # consequence cannot tell "removed" from "not yet removed".
+  defp subscribers(coordinator) do
+    coordinator |> :sys.get_state() |> Map.fetch!(:subscribers) |> Map.keys()
+  end
+
+  # Every render the supervisor is holding for this coordinator. The count is
+  # the single-flight property stated directly: one coordinator spawning two
+  # subprocesses, or two coordinators for one key, both show up here as a
+  # number other than 1.
+  defp renders_for(coordinator) do
+    AudioProxy.Ffmpeg.RenderSupervisor
+    |> DynamicSupervisor.which_children()
+    |> Enum.map(fn {_id, pid, _type, _modules} -> pid end)
+    |> Enum.filter(&(consumer(&1) == coordinator))
+  end
+
   defp subprocess_pid(coordinator) do
-    os_pid =
-      AudioProxy.Ffmpeg.RenderSupervisor
-      |> DynamicSupervisor.which_children()
-      |> Enum.map(fn {_id, pid, _type, _modules} -> pid end)
-      |> Enum.find_value(fn render ->
-        if consumer(render) == coordinator, do: AudioProxy.Ffmpeg.Render.os_pid(render)
-      end)
+    assert [render] = renders_for(coordinator)
 
-    assert os_pid, "no render found with the coordinator as its consumer"
-    os_pid
+    AudioProxy.Ffmpeg.Render.os_pid(render)
   end
 
   defp consumer(render) do
