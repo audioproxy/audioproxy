@@ -247,9 +247,25 @@ something that is never going to render. `AudioProxy.ErrorJSON` renders that
 tuple as a `429` with `Retry-After`, which is the only place that header comes
 from.
 
-The estimate on it is a moving average of recent slot-hold durations, scaled by
-how deep the queue already is: roughly "how long the renders in front of you
-have been taking, times how many of them there are, over how many run at once",
+**A wait that runs out is the same 429, not a 504.** The queue being *full* and
+the queue being *too slow* are the same answer from the client's side, so they
+get the same one. The render endpoint waits for `{:rendering, _}` — the
+coordinator's announcement that it has a slot and has started — under the same
+budget it later gives the render itself, and expiring before that message is
+429 with a fresh `Retry-After` from the semaphore. Expiring after it is 504,
+which now means what it says: a render exists and has gone silent. Before the
+split, a request that merely queued too long was told "Render exceeded
+AP_RENDER_TIMEOUT" about a render that had never started, and the request log
+repeated it.
+
+That budget is also what bounds the wait. Letting a queued request wait
+indefinitely would hold the connection — and the queue place behind it — for as
+long as the queue took.
+
+The estimate on a rejection is a moving average of recent slot-hold durations,
+scaled by how deep the queue already is: roughly "how long the renders in front
+of you have been taking, times how many of them there are, over how many run at
+once",
 clamped to at least a second and at most `AP_RENDER_TIMEOUT`. Coarse by
 construction — a client that comes back early finds the queue full and is told
 again.
