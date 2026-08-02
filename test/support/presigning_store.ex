@@ -16,6 +16,14 @@ defmodule AudioProxy.PresigningStore do
   Wire it up with `put_config(%{variant_store: {:module, AudioProxy.PresigningStore}})`
   and clear it with `reset/0`; see `AudioProxy.VariantStore.backend_for/1` for
   why that config shape exists.
+
+  ## Misbehaving on purpose
+
+  `declare_size/2` makes `head/1` report a size the bytes do not back — a
+  store whose object shrank under a reader, which is what makes a proxied hit
+  promise a `Content-Length` it cannot deliver. The `file://` backend cannot
+  produce that disagreement, because its `get_stream/2` re-runs `head/1`
+  itself.
   """
 
   @behaviour AudioProxy.VariantStore
@@ -49,10 +57,18 @@ defmodule AudioProxy.PresigningStore do
     end
   end
 
+  @doc """
+  Makes `head/1` report `size` for `key`, whatever its bytes actually are.
+
+  See *Misbehaving on purpose*.
+  """
+  @spec declare_size(AudioProxy.VariantStore.key(), non_neg_integer()) :: :ok
+  def declare_size(key, size), do: update(key, &%{&1 | size: size})
+
   @impl true
   def head(key) do
     case objects() do
-      %{^key => {bytes, metadata}} -> {:ok, %{size: byte_size(bytes), metadata: metadata}}
+      %{^key => object} -> {:ok, %{size: object.size, metadata: object.metadata}}
       _absent -> {:error, :not_found}
     end
   end
@@ -60,11 +76,18 @@ defmodule AudioProxy.PresigningStore do
   @impl true
   def get_stream(key, range) do
     with {:ok, %{size: size}} <- head(key) do
-      {bytes, _metadata} = Map.fetch!(objects(), key)
+      object = Map.fetch!(objects(), key)
 
       case slice(range, size) do
-        {:ok, offset, length} -> {:ok, [binary_part(bytes, offset, length)]}
-        :error -> {:error, :invalid_range}
+        # Clamped against the *real* bytes, which is what lets `declare_size/2`
+        # under-deliver instead of raising on a read past the end.
+        {:ok, offset, length} ->
+          available = max(min(length, byte_size(object.bytes) - offset), 0)
+
+          {:ok, [binary_part(object.bytes, offset, available)]}
+
+        :error ->
+          {:error, :invalid_range}
       end
     end
   end
@@ -73,7 +96,17 @@ defmodule AudioProxy.PresigningStore do
   def put_stream(key, chunks, metadata) do
     bytes = chunks |> Enum.to_list() |> IO.iodata_to_binary()
 
-    :persistent_term.put(@storage_key, Map.put(objects(), key, {bytes, metadata}))
+    object = %{bytes: bytes, metadata: metadata, size: byte_size(bytes)}
+
+    :persistent_term.put(@storage_key, Map.put(objects(), key, object))
+
+    :ok
+  end
+
+  defp update(key, fun) do
+    objects = objects()
+
+    :persistent_term.put(@storage_key, Map.update!(objects, key, fun))
 
     :ok
   end

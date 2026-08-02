@@ -346,6 +346,36 @@ defmodule AudioProxy.VariantCacheTest do
     end
   end
 
+  describe "a store that moves under a reader" do
+    setup do
+      put_config(%{variant_store: {:module, PresigningStore}, serve_mode: :proxy})
+      :ok
+    end
+
+    test "a body short of its declared Content-Length tears the response down" do
+      # Completing this response would hand a keep-alive client a well-formed
+      # 200 whose body is shorter than it promised — so the next response on
+      # that connection is read as this one's remaining bytes. An abnormal
+      # close is the only honest signal left once the head has gone out (§5).
+      key = store!(@variant)
+      PresigningStore.declare_size(key, byte_size(@variant) * 2)
+
+      assert catch_exit(request(signed(@rest))) ==
+               {:shutdown, {:variant_truncated, byte_size(@variant) * 2, byte_size(@variant)}}
+    end
+
+    test "a body that exactly matches its declared length completes normally" do
+      # The other side of the same check: this is the ordinary path, and it
+      # must not be tripped by the counting.
+      store!(@variant)
+
+      conn = request(signed(@rest))
+
+      assert conn.status == 200
+      assert conn.resp_body == @variant
+    end
+  end
+
   describe "an evicted variant" do
     test "is a miss again, not a failure", %{store: store} do
       # Nothing keeps a store from being swept between two requests. The bytes

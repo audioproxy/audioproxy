@@ -16,10 +16,16 @@ defmodule AudioProxy.VariantCache do
 
   `serve/3` can still answer `:miss`: an entry can be evicted between the head
   and the read, and nothing has been sent at that point, so the request falls
-  through to a render rather than failing. Everything after the response head
-  is committed, and a store read that fails there tears the connection down —
-  the same signal, and for the same reason, as a render that fails after its
-  200 (§5).
+  through to a render rather than failing.
+
+  Everything after the response head is committed, and there the only signal
+  left is an abnormal close — the same one, for the same reason, as a render
+  that fails after its 200 (§5). Two things reach it. A store read that
+  *raises* propagates and the adapter tears the connection down. A store read
+  that ends *short* would otherwise complete normally, so `write/3` counts the
+  bytes and exits when they fall short of the `Content-Length` already
+  promised; see the comment there for why a well-formed short body is the
+  worse outcome of the two.
 
   ## Proxy mode declares a length
 
@@ -168,7 +174,7 @@ defmodule AudioProxy.VariantCache do
           |> put_resp_header("content-length", Integer.to_string(length))
           |> send_chunked(status)
 
-        {:ok, write(conn, stream)}
+        {:ok, write(conn, stream, length)}
 
       # Evicted between the head and the read. Nothing has been sent, so this
       # is still a miss and the caller renders.
@@ -181,21 +187,46 @@ defmodule AudioProxy.VariantCache do
   # status line and the declared length are already on the wire — so it
   # propagates and the adapter tears the connection down, which is §5's signal
   # for a body that will not be completed.
-  defp write(conn, stream) do
+  #
+  # A read that ends *short* needs the same treatment and does not get it for
+  # free, which is why the bytes are counted. `Content-Length` has been
+  # promised; `Local.stream/3` halts rather than raises when the file turns out
+  # to be shorter than `head/1` said, so without this the response would end
+  # cleanly, well-formed, and a body short of its own declared length. Over a
+  # keep-alive connection that is worse than a truncated download: the client
+  # waits for bytes that never come and reads the next response as this one's
+  # body. Neither Bandit nor Plug reconciles the count, so this does.
+  defp write(conn, stream, declared) do
     stream
-    |> Enum.reduce_while(conn, fn data, conn ->
+    |> Enum.reduce_while({conn, 0}, fn data, {conn, written} ->
       case chunk(conn, data) do
         {:ok, conn} ->
-          {:cont, conn}
+          {:cont, {conn, written + byte_size(data)}}
 
         # Nothing to clean up: no render is running, and the stream's own
-        # teardown closes the store handle as the enumeration unwinds.
+        # teardown closes the store handle as the enumeration unwinds. Not a
+        # short body either — nobody is left to be misled by one.
         {:error, reason} ->
           Logger.debug("client disconnected mid-hit: #{inspect(reason)}")
-          {:halt, conn}
+          {:halt, {:gone, conn}}
       end
     end)
-    |> halt()
+    |> finish(declared)
+  end
+
+  defp finish({:gone, conn}, _declared), do: halt(conn)
+  defp finish({conn, declared}, declared), do: halt(conn)
+
+  # The reason is `:shutdown`-tagged and names both counts, so an operator
+  # reading the adapter's exit report can tell a store that moved under a read
+  # from a bug in this module. Same mechanism, and the same reasoning, as
+  # `AudioProxy.Plugs.RenderAction.abort/2`.
+  defp finish({_conn, written}, declared) do
+    Logger.warning(
+      "variant store delivered #{written} of #{declared} declared bytes; tearing down the response"
+    )
+
+    exit({:shutdown, {:variant_truncated, declared, written}})
   end
 
   # The variant's own headers, as the write-back stored them — not rebuilt
