@@ -167,10 +167,22 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
       # A generated sine is the same signal on both channels, so the two
       # channels' pairs have to agree — which they only can if the reducer read
       # the interleaving the way ffmpeg wrote it.
-      for <<left_min, left_max, right_min, right_max>> <- Enum.chunk_every(peaks["data"], 4) do
+      #
+      # A *list* pattern, deliberately. `for <<a, b, c, d>> <- list` is a
+      # binary generator: every element of a list of lists fails the pattern
+      # and is silently filtered, so the version of this loop that used one
+      # ran zero times and asserted nothing while passing.
+      channel_pairs = Enum.chunk_every(peaks["data"], 4)
+      assert length(channel_pairs) == 16
+
+      for [left_min, left_max, right_min, right_max] <- channel_pairs do
         assert_in_delta left_min, right_min, @signal_tolerance
         assert_in_delta left_max, right_max, @signal_tolerance
       end
+
+      # The loop above is comparing channels, so it would also pass on all
+      # zeros. This is what says there is a waveform in there at all.
+      assert Enum.any?(peaks["data"], &(abs(&1) > @expected_peak - @signal_tolerance))
     end
   end
 
