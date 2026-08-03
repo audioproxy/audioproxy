@@ -41,6 +41,13 @@
   as a CORS error that has nothing to do with the proxy.
 </p>
 
+<p class="note">
+  With a variant store configured (<code>AP_VARIANT_STORE</code>), loading the same URL a
+  second time is a cache hit: the duration readout goes from <code>Infinity</code> to the
+  real length and the scrubber works, because a stored variant is served with
+  <code>Content-Length</code> and <code>Accept-Ranges</code>. First play streams, second play seeks.
+</p>
+
 <script>
   // Matches the Quick start in the README: a file called track.wav under AP_LOCAL_ROOT.
   const BASE = "http://localhost:4000";
