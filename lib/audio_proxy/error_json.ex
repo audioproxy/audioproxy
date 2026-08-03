@@ -23,7 +23,9 @@ defmodule AudioProxy.ErrorJSON do
                                              (queue full, or a wait for a
                                              slot that ran out of budget)
       :render_failed                 500     render_failed
+      :probe_failed                  500     probe_failed
       :render_timeout                504     render_timeout
+      :probe_timeout                 504     probe_timeout
 
   The 416 row belongs to the variant cache: only a stored variant has a known
   size and therefore a range that can be refused. A `Range` on anything still
@@ -200,6 +202,18 @@ defmodule AudioProxy.ErrorJSON do
     {504, [], encode(%{error: "render_timeout", message: "Render exceeded AP_RENDER_TIMEOUT"})}
   end
 
+  # The probe pair. Separate rows rather than reusing the render ones because
+  # the body names the limit an operator would raise, and `AP_RENDER_TIMEOUT`
+  # is not that limit for `/info` — the two budgets are configured apart, and
+  # an error that named the wrong one would send them to the wrong variable.
+  def render(:probe_failed) do
+    {500, [], encode(%{error: "probe_failed", message: "Probe failed"})}
+  end
+
+  def render(:probe_timeout) do
+    {504, [], encode(%{error: "probe_timeout", message: "Probe exceeded AP_PROBE_TIMEOUT"})}
+  end
+
   @doc """
   Names the error class — the same word the response body's `error` field
   carries.
@@ -218,6 +232,8 @@ defmodule AudioProxy.ErrorJSON do
   def class(:undecodable_source), do: :undecodable_source
   def class(:render_failed), do: :render_failed
   def class(:render_timeout), do: :render_timeout
+  def class(:probe_failed), do: :probe_failed
+  def class(:probe_timeout), do: :probe_timeout
 
   @doc """
   Sends the rendered error and halts the conn — the only call a plug needs.

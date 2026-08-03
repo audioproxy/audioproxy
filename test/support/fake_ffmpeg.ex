@@ -19,6 +19,17 @@ defmodule AudioProxy.FakeFfmpeg do
   @doc "Absolute path to the stand-in encoder."
   @spec path() :: String.t()
   def path, do: Path.expand("fake_ffmpeg.sh", __DIR__)
+
+  @doc """
+  Absolute path to the stand-in prober.
+
+  The info endpoint's action takes its executable as a plug option for the same
+  reason the render action does: the response shape, the validator and the
+  error mapping are properties of the action, and a real `ffprobe` can neither
+  hang on demand nor emit output that is not JSON.
+  """
+  @spec probe_path() :: String.t()
+  def probe_path, do: Path.expand("fake_ffprobe.sh", __DIR__)
 end
 
 defmodule AudioProxy.FakeFfmpeg.Pipeline do
@@ -30,7 +41,9 @@ defmodule AudioProxy.FakeFfmpeg.Pipeline do
   plug AudioProxy.Plugs.ParseOptions
   plug AudioProxy.Plugs.ResolveSource
   # Resolved at compile time, which is the same filesystem the tests run on.
-  plug AudioProxy.Plugs.RenderAction, executable: AudioProxy.FakeFfmpeg.path()
+  plug AudioProxy.Plugs.Action,
+    render: [executable: AudioProxy.FakeFfmpeg.path()],
+    info: [executable: AudioProxy.FakeFfmpeg.probe_path()]
 end
 
 defmodule AudioProxy.FakeFfmpeg.Router do

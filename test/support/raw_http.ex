@@ -27,6 +27,10 @@ defmodule AudioProxy.RawHttp do
   closed socket the way every failure case does and one reader serves all of
   them. Pass `close: false` for the keep-alive cases, which need the connection
   — and the process behind it — to survive the first response.
+
+  `headers: [{"if-none-match", tag}]` adds request headers, for the conditional
+  cases. They are written verbatim: a test asserting on how the server parses a
+  header must be able to send one this module does not understand.
   """
   @spec get(String.t(), :inet.port_number(), keyword()) :: :gen_tcp.socket()
   def get(path, port, opts \\ []) do
@@ -47,7 +51,12 @@ defmodule AudioProxy.RawHttp do
   def send_get(socket, path, opts \\ []) do
     close = if Keyword.get(opts, :close, true), do: "Connection: close\r\n", else: ""
 
-    :gen_tcp.send(socket, "GET #{path} HTTP/1.1\r\nHost: localhost\r\n#{close}\r\n")
+    headers =
+      opts
+      |> Keyword.get(:headers, [])
+      |> Enum.map_join(fn {name, value} -> "#{name}: #{value}\r\n" end)
+
+    :gen_tcp.send(socket, "GET #{path} HTTP/1.1\r\nHost: localhost\r\n#{close}#{headers}\r\n")
   end
 
   @doc """

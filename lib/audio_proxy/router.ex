@@ -2,14 +2,14 @@ defmodule AudioProxy.Router do
   @moduledoc """
   Top-level HTTP router.
 
-  `/health` is unsigned liveness. Everything else in the signed URL space —
-  today only the render endpoint — is dispatched to a pipeline that verifies
-  the signature before any other processing; an unsigned or badly-signed
-  request is a 401 from there, and anything that matches no route at all is
-  the JSON 404 below. The `info` and `metrics` routes from
-  `docs/audio-proxy-api-v1.md` §2 arrive with their own slices.
+  `/health` is unsigned liveness. Everything else in the signed URL space — the
+  render endpoint and `/info`, which share a route — is dispatched to a
+  pipeline that verifies the signature before any other processing; an unsigned
+  or badly-signed request is a 401 from there, and anything that matches no
+  route at all is the JSON 404 below. The `metrics` route from
+  `docs/audio-proxy-api-v1.md` §2 arrives with its own slice.
 
-  The render route binds `:sig` and `rest` for dispatch only. Neither binding
+  The signed route binds `:sig` and `rest` for dispatch only. Neither binding
   is read downstream: the signature covers the raw request path, which
   `AudioProxy.Plugs.VerifySignature` re-splits from `conn.request_path` —
   route bindings are percent-decoded and re-segmented, so they can never
@@ -20,7 +20,10 @@ defmodule AudioProxy.Router do
   `:endpoint_class` names the route in the log line and is what filters
   `/health` down to debug (`AudioProxy.LogHandler`). It is assigned here
   rather than in the pipeline because a 401 halts before any pipeline plug
-  could say what the request was asking for. `Plug.RequestId` runs ahead of
+  could say what the request was asking for — which is also why the signed
+  route assigns `:render` rather than the truth: only
+  `AudioProxy.Plugs.ParseOptions` can tell a render from an info request, and
+  it re-assigns `:info` once it has. `Plug.RequestId` runs ahead of
   matching, so every line a request produces — its own and its render's —
   carries the same id, and the client gets it back in `x-request-id`.
   """

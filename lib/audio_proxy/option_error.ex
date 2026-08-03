@@ -38,6 +38,7 @@ defmodule AudioProxy.OptionError do
           | :requires_bounded_trim
           | :sample_rate_above_lossy_cap
           | :fade_exceeds_duration
+          | :info_takes_no_options
 
   @type t :: %__MODULE__{
           segment: String.t(),
@@ -122,6 +123,9 @@ defmodule AudioProxy.OptionError do
 
       :fade_exceeds_duration ->
         "#{inspect(error.segment)} is longer than the trimmed region"
+
+      :info_takes_no_options ->
+        "#{inspect(error.segment)} cannot be combined with \"info\""
     end
   end
 end
