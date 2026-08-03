@@ -140,9 +140,23 @@ Straight mapping of `ffprobe -show_format -show_streams`, filtered. Cached aggre
 
 ### Cache HIT
 
-- Default: `302` redirect to a short-lived presigned URL for the variant object → S3/CDN serves `Accept-Ranges`, `206`, `Content-Length` natively and the proxy leaves the hot path.
-- Optional proxied mode (`AP_SERVE_MODE=proxy`): proxy serves the object itself with full Range support.
-- Header: `X-Audio-Proxy: HIT`.
+Checked before coalescing and before the source is stat'd — a stored variant is immutable bytes that owe nothing to a source which may since have been deleted. Header: `X-Audio-Proxy: HIT`, in both modes.
+
+**Redirect mode** (`AP_SERVE_MODE=redirect`, the default): `302` to a presigned URL for the variant object, valid for `AP_PRESIGN_TTL` seconds → S3/CDN serves `Accept-Ranges`, `206` and `Content-Length` natively and the proxy leaves the hot path. The redirect itself carries `Cache-Control: no-store`: its `Location` is a credential with an expiry, and a cached `302` hands out URLs that have already expired. The variant's own `Content-Type` and `Cache-Control` come from the store, which holds the ones the write-back saved — so a followed redirect delivers what a proxied HIT would have sent.
+
+**Proxy mode** (`AP_SERVE_MODE=proxy`): the proxy serves the object itself — `200` with `Content-Length` and `Accept-Ranges: bytes`, relayed as it is read, so a declared length and progressive delivery are both true and the whole object is never resident. A `Range` is answered with `206` and `Content-Range`. A syntactically valid range no byte can satisfy is a `416` with `Content-Range: bytes */{size}` and `Cache-Control: no-store` — its body depends on a request header, and nothing here sends `Vary: Range`. Multi-range specs, non-`bytes` units and malformed values are ignored and answered with the whole variant, which RFC 9110 §14.2 permits; there is no `multipart/byteranges` response.
+
+### Cache state changes the framing
+
+The same URL is framed differently depending on what is cached, and clients must not assume one framing for a given URL:
+
+| | MISS / COALESCED | HIT |
+|---|---|---|
+| Framing | `Transfer-Encoding: chunked` | `Content-Length` |
+| `Accept-Ranges` | absent | `bytes` |
+| `Range` | ignored | `206` / `416` |
+
+Both begin delivering before the variant is complete or fully read. What a client observes is a property of the *cache state*, never of the configured backend or serve mode: the same signed URL against a `file://` deployment and an `s3://` one delivers the same bytes with the same `Content-Type`, `ETag` and `Cache-Control`, and is range-capable on a HIT either way. Backends differ in where the bytes come from, never in what a client must implement.
 
 ### Common headers
 
@@ -152,10 +166,10 @@ Straight mapping of `ffprobe -show_format -show_streams`, filtered. Cached aggre
 
 Every response, success or error, carries an explicit `Cache-Control` — no CDN negative-caching default ever decides retention:
 
-- Errors: `404`/`413`/`415` → `max-age=10` (verdicts about the current source bytes; a re-upload changes them), `401`/`422` → `max-age=60` (pure functions of the URL; only a deploy changes them), `429`/`5xx` → `no-store` (transient; caching a transient failure amplifies it). `/health` and the unmatched-route `404` state theirs too (`no-store` and `max-age=10`).
+- Errors: `404`/`413`/`415` → `max-age=10` (verdicts about the current source bytes; a re-upload changes them), `401`/`422` → `max-age=60` (pure functions of the URL; only a deploy changes them), `416`/`429`/`5xx` → `no-store` (transient, or — for `416` — dependent on a request header no `Vary` declares). `/health` and the unmatched-route `404` state theirs too (`no-store` and `max-age=10`).
 - **Conditional requests**: an `If-None-Match` matching the URL-derived `ETag` answers `304` with `ETag` and `Cache-Control`, no body, no render, no storage access. Placed after signature verification — never an existence oracle for unsigned probes.
-- **HEAD** on signed endpoints answers the status and headers a `GET` would, through the full check chain including the source stat, with an empty body and no render subprocess. Errors as `GET`, bodiless. No `X-Audio-Proxy`: that header reports a render's outcome, and none ran.
-- **Range on a MISS is ignored**: the full `200` chunked stream, no `Accept-Ranges`, no `206`/`416` (RFC 9110 §14.2 permits ignoring `Range`). `206` semantics belong to cached variants, served by storage after the HIT redirect.
+- **HEAD** on signed endpoints answers the status and headers a `GET` would, through the full check chain including the source stat, with an empty body and no render subprocess. Errors as `GET`, bodiless. No `X-Audio-Proxy`: that header reports a render's outcome, and none ran. It deliberately does **not** consult the variant cache, so it reports the render path's framing even where a `GET` would answer a HIT's, or a `302`; making HEAD the one request whose answer depends on cache state would invite clients to build on exactly what the framing contract above tells them not to.
+- **Range on a MISS is ignored**: the full `200` chunked stream, no `Accept-Ranges`, no `206`/`416` (RFC 9110 §14.2 permits ignoring `Range`). `206` semantics belong to cached variants — served by the proxy or by storage, per the serve mode.
 
 ### Errors (JSON body)
 
@@ -165,6 +179,7 @@ Every response, success or error, carries an explicit `Cache-Control` — no CDN
 | `404` | Source not found / not readable |
 | `413` | Source exceeds `AP_MAX_SRC_BYTES` |
 | `415` | Source format not decodable |
+| `416` | `Range` unsatisfiable against a cached variant (proxy mode only) |
 | `422` | Invalid or conflicting options |
 | `429` | Render queue full (`Retry-After` set) |
 | `500` | The render failed for a reason that is not the client's: no encoder, no space, a diagnostic the classifier does not recognise |
@@ -189,6 +204,7 @@ Mid-stream render failure after `200` is signaled by abnormal termination of the
 | `AP_QUEUE_SIZE` | Waiting renders before `429` |
 | `AP_MAX_SRC_BYTES`, `AP_RENDER_TIMEOUT` | Abuse limits |
 | `AP_SERVE_MODE` | `redirect` \| `proxy` |
+| `AP_PRESIGN_TTL` | Seconds a HIT's presigned URL stays valid (default: 300); redirect mode only |
 
 Redirect serving is a *capability of the store's backend*: `redirect` answers a HIT with a 302 to a presigned variant URL, which only a backend that can presign (`s3://`) can produce. `AP_SERVE_MODE=redirect` against a store without that capability (`file://`) is refused at boot, with an error naming both variables — never per request.
 

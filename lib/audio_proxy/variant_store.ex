@@ -84,8 +84,13 @@ defmodule AudioProxy.VariantStore do
   """
   @type capability :: :presign
 
-  @typedoc "The parsed `AP_VARIANT_STORE` value, as `AudioProxy.Config` holds it."
-  @type config :: {:file, Path.t()}
+  @typedoc """
+  The parsed `AP_VARIANT_STORE` value, as `AudioProxy.Config` holds it.
+
+  `{:module, backend}` is the test seam described at `backend_for/1`, not a
+  value any environment can produce.
+  """
+  @type config :: {:file, Path.t()} | {:module, module()}
 
   @doc "Reports whether the variant named by `key` is stored, whole, with its metadata."
   @callback head(key()) :: {:ok, entry()} | {:error, :not_found}
@@ -132,6 +137,13 @@ defmodule AudioProxy.VariantStore do
   """
   @spec backend_for(config()) :: module()
   def backend_for({:file, _root}), do: AudioProxy.VariantStore.Local
+
+  # A backend that names itself. `AudioProxy.Config` never produces this shape
+  # — `AP_VARIANT_STORE` is a URL, and every scheme maps to a module above — so
+  # it is not configuration surface. It is the seam the serving path is tested
+  # through: `:presign` is a capability no shipped backend has until the S3
+  # one lands, and redirect mode would otherwise ship unexercised.
+  def backend_for({:module, module}) when is_atom(module), do: module
 
   @doc "The configured backend module. Callers must check `configured?/0` first."
   @spec backend() :: module()

@@ -70,6 +70,13 @@ defmodule AudioProxy.ErrorJSONTest do
       assert body == %{"error" => "queue_full", "message" => "Render queue is full"}
     end
 
+    test "416: range not satisfiable carries the variant's size (producer: the variant cache)" do
+      assert {416, headers, body} = decoded({:range_not_satisfiable, 200})
+
+      assert headers == [{"content-range", "bytes */200"}]
+      assert body == %{"error" => "range_not_satisfiable", "message" => "Range not satisfiable"}
+    end
+
     test "504: render timeout (producer lands with add-render-endpoint)" do
       assert {504, [], body} = decoded(:render_timeout)
 
@@ -119,6 +126,7 @@ defmodule AudioProxy.ErrorJSONTest do
       {OptionError.new("f:bogus", :invalid_value), "max-age=60"},
       {:source_too_large, "max-age=10"},
       {:undecodable_source, "max-age=10"},
+      {{:range_not_satisfiable, 200}, "no-store"},
       {{:queue_full, 3}, "no-store"},
       {:render_failed, "no-store"},
       {:render_timeout, "no-store"}

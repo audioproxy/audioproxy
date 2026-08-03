@@ -17,10 +17,16 @@ defmodule AudioProxy.ErrorJSON do
       source failure (see below)     404     not_found
       :source_too_large              413     source_too_large
       :undecodable_source            415     undecodable_source
+      {:range_not_satisfiable, size} 416     range_not_satisfiable  Content-Range
       %OptionError{}                 422     invalid_options
       {:queue_full, retry_after}     429     queue_full          Retry-After
       :render_failed                 500     render_failed
       :render_timeout                504     render_timeout
+
+  The 416 row belongs to the variant cache: only a stored variant has a known
+  size and therefore a range that can be refused. A `Range` on anything still
+  rendering is ignored, per §5, so this status is unreachable from the render
+  path.
 
   The 500 row is the one addition to §5's table, and it is deliberate: §5
   enumerates what a *client* can have got wrong, and a render that fails for
@@ -52,6 +58,11 @@ defmodule AudioProxy.ErrorJSON do
                                    signature never becomes good, invalid
                                    options never become valid; only a deploy
                                    changes that, and 60 s bounds the window
+      416             no-store     the only response here whose body depends
+                                   on a request *header*; a shared cache
+                                   without `Vary: Range` would hand it to a
+                                   client that asked for a range the variant
+                                   can satisfy
       429, 5xx        no-store     transient; caching a transient failure
                                    amplifies it
 
@@ -94,7 +105,11 @@ defmodule AudioProxy.ErrorJSON do
   semaphore slice will produce, carrying the queue's own estimate so this
   module never invents a `Retry-After` value.
   """
-  @type structured :: OptionError.t() | atom() | {:queue_full, non_neg_integer()}
+  @type structured ::
+          OptionError.t()
+          | atom()
+          | {:queue_full, non_neg_integer()}
+          | {:range_not_satisfiable, non_neg_integer()}
 
   # Reasons that all mean "no servable source": the shared resolver's
   # rejections (`AudioProxy.Source`), each source type's own, and the storage
@@ -142,6 +157,13 @@ defmodule AudioProxy.ErrorJSON do
   """
   @spec render(structured()) ::
           {status :: pos_integer(), headers :: [{String.t(), String.t()}], body :: String.t()}
+  # `Content-Range: bytes */size` is what tells the client the size it should
+  # have asked within — RFC 9110 §14.4 requires it on a 416.
+  def render({:range_not_satisfiable, size}) when is_integer(size) and size >= 0 do
+    body = encode(%{error: "range_not_satisfiable", message: "Range not satisfiable"})
+    {416, [{"content-range", "bytes */#{size}"}], body}
+  end
+
   def render(%OptionError{} = error) do
     {422, [], encode(%{error: "invalid_options", message: OptionError.message(error)})}
   end
@@ -188,6 +210,7 @@ defmodule AudioProxy.ErrorJSON do
   def class(%OptionError{}), do: :invalid_options
   def class(reason) when reason in @source_not_found, do: :not_found
   def class({:queue_full, _retry_after}), do: :queue_full
+  def class({:range_not_satisfiable, _size}), do: :range_not_satisfiable
   def class(:invalid_signature), do: :invalid_signature
   def class(:source_too_large), do: :source_too_large
   def class(:undecodable_source), do: :undecodable_source
@@ -221,7 +244,7 @@ defmodule AudioProxy.ErrorJSON do
   @spec cache_control(pos_integer()) :: String.t()
   def cache_control(status) when status in [404, 413, 415], do: "max-age=10"
   def cache_control(status) when status in [401, 422], do: "max-age=60"
-  def cache_control(status) when status == 429 or status >= 500, do: "no-store"
+  def cache_control(status) when status in [416, 429] or status >= 500, do: "no-store"
 
   defp encode(map), do: JSON.encode!(map)
 end
