@@ -1,23 +1,21 @@
 {
   "name": "audio_proxy",
-  "build": {
-    "dockerfile": "Dockerfile",
-    "context": ".."
-  },
+  // A compose project rather than a bare Dockerfile build since add-s3-client:
+  // the :minio suite needs a real S3-compatible store alongside the app, and a
+  // fake that verified signatures would only be a second SigV4 implementation
+  // agreeing with the first. docker-compose.yml has the rest of the reasoning,
+  // including why minio publishes no ports.
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "app",
+  // Both, and stopped together — a worktree's MinIO should not outlive it.
+  "runServices": ["app", "minio"],
   "workspaceFolder": "/workspaces/audio_proxy",
-  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/audio_proxy,type=bind,consistency=cached",
   "remoteUser": "dev",
-  "containerEnv": {
-    // bin/agent-* branch on this to tell "inside the container" from "on the
-    // host", so they never recurse through devcontainer exec.
-    "DEVCONTAINER": "1"
-  },
   // Deps + compile. Runs once, when the container is first created.
   "postCreateCommand": "bin/agent-setup",
-  // forwardPorts is ignored by the devcontainer CLI (VS Code only), so the
-  // listener port is published via appPort below; wt overrides it per worktree
-  // through PORT in .devcontainer/.env.
-  "appPort": ["${localEnv:PORT:4000}:${localEnv:PORT:4000}"],
+  // The workspace mount, DEVCONTAINER=1 and the published listener port all
+  // moved into docker-compose.yml, which is where compose expects them.
+  // `appPort` in particular has no meaning for a compose-backed devcontainer.
   "customizations": {
     "vscode": {
       "extensions": ["JakeBecker.elixir-ls", "editorconfig.editorconfig"]

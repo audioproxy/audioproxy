@@ -40,9 +40,39 @@ jobs:
 
       - run: mix compile --warnings-as-errors
 
-      # `--include integration` adds the socket-binding tests to the run;
-      # :ffmpeg stays excluded (that tag has its own job below).
-      - run: mix test --include integration
+      # MinIO backs the :minio suite, which is where the S3 layer is checked
+      # against a store that actually verifies signatures. Started with
+      # `docker run` rather than as a `services:` container because the minio
+      # image needs a command (`server /data`) and the services block has
+      # nowhere to put one.
+      - name: Start MinIO
+        run: |
+          set -euo pipefail
+
+          docker run -d --name minio \
+            -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null 2>&1; then
+              echo "MinIO is up"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "::error::MinIO did not become healthy"
+          docker logs minio
+          exit 1
+
+      # `--include integration` adds the socket-binding tests; `--include
+      # minio` adds the ones needing the store above. :ffmpeg stays excluded
+      # (that tag has its own job below).
+      - run: mix test --include integration --include minio
+        env:
+          AP_TEST_MINIO_ENDPOINT: http://127.0.0.1:9000
 
   # ---------------------------------------------------------------------------
   # Image verification. Both jobs build from the same Dockerfile and share a

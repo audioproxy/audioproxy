@@ -408,10 +408,38 @@ Note that the variables below are the full configuration surface for the design,
 | `AP_SERVE_MODE` | `redirect` \| `proxy` | `redirect` | Serve cache hits by redirect or proxied. See [Choosing a serve mode](#choosing-a-serve-mode) |
 | `AP_PRESIGN_TTL` | positive integer | `300` | Seconds a cache hit's presigned URL stays valid. Redirect mode only |
 | `AP_LOG_LEVEL` | `debug` \| `info` \| `warning` \| `error` | `info` | Lowest level written to stdout. See [Logs](#logs) |
+| `AP_S3_ENDPOINT` | origin URL | unset | Talk to an S3-compatible store instead of AWS. See [S3 credentials](#s3-credentials) |
 
 Booleans accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`, case-insensitively. An empty value counts as unset.
 
 The listener port is read from `AP_PORT`, then `PORT`, then `4000`.
+
+### S3 credentials
+
+S3 access is the one thing configured with **standard AWS variables** rather than `AP_`-prefixed ones, because every tool that produces credentials already writes those names:
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `AWS_ACCESS_KEY_ID` | with the others | Access key |
+| `AWS_SECRET_ACCESS_KEY` | with the others | Secret key |
+| `AWS_REGION` (or `AWS_DEFAULT_REGION`) | with the others | Signing region — part of every signature, so there is nothing safe to guess |
+| `AWS_SESSION_TOKEN` | no | For temporary credentials |
+
+They are validated as a group at boot: all three, or none. Half a credential signs nothing, and a container that starts and then fails its first S3 request is worse than one that does not start.
+
+**Credentials come from the environment only.** There is no IMDS or STS lookup, so an EC2/EKS instance role does not work — supply keys. That is a known limitation, not an oversight.
+
+```bash
+AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=… AWS_REGION=eu-central-1 …
+```
+
+`AP_S3_ENDPOINT` points at something other than AWS — MinIO, localstack, or any S3-compatible store:
+
+```bash
+AP_S3_ENDPOINT=http://minio:9000 …
+```
+
+Setting it also switches addressing from virtual-hosted (`bucket.s3.region.amazonaws.com`) to path-style (`endpoint/bucket/key`), which is what those stores expect. It takes an origin and nothing else: a path, query, fragment, or embedded credentials (`http://key:secret@minio:9000`) are all refused at boot. Credentials especially — they belong in the `AWS_*` variables, and accepting them here would ignore them silently.
 
 ### Variant store
 

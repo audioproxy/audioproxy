@@ -28,9 +28,29 @@ defmodule AudioProxy.Config do
   | `AP_SERVE_MODE` | `redirect` \\| `proxy` | `:redirect` |
   | `AP_PRESIGN_TTL` | positive integer (seconds) | `300` |
   | `AP_LOG_LEVEL` | `debug` \\| `info` \\| `warning` \\| `error` | `:info` |
+  | `AP_S3_ENDPOINT` | `http(s)://host[:port]` | unset (`nil`) — AWS proper |
 
   The listener port is read from `AP_PORT`, falling back to `PORT` (which the
   worktree workflow sets to the branch's hashed port), then to `4000`.
+
+  ## The AWS variables
+
+  S3 credentials are the one thing here **not** `AP_`-prefixed:
+  `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` and
+  `AWS_REGION` (or `AWS_DEFAULT_REGION`). Every tool that produces credentials
+  already writes those names, and renaming them would mean an operator
+  translating a working environment into this proxy's dialect for no gain.
+
+  They are read *here* rather than left to `ex_aws`'s own resolution, which
+  would otherwise reach into application env and, on EC2, into IMDS. Keeping
+  them in this map means the whole configuration surface is still one thing,
+  validated once, at boot — and that what the proxy will use is what the
+  operator set, not whatever a metadata endpoint happened to answer.
+  `AudioProxy.S3` hands them to `ex_aws` per request.
+
+  Validated all-or-nothing: a half-configured client fails at its first
+  request instead of at boot, which is the failure this module exists to
+  prevent.
   """
 
   defmodule Error do
@@ -79,7 +99,23 @@ defmodule AudioProxy.Config do
           render_timeout: pos_integer(),
           serve_mode: :redirect | :proxy,
           presign_ttl: pos_integer(),
-          log_level: :debug | :info | :warning | :error
+          log_level: :debug | :info | :warning | :error,
+          s3: s3()
+        }
+
+  @typedoc """
+  The S3 settings, as one group.
+
+  All of `region`, `access_key_id` and `secret_access_key` are `nil` together
+  when S3 is not configured — the partial set is refused at boot, so anything
+  that finds one of them finds all three.
+  """
+  @type s3 :: %{
+          region: String.t() | nil,
+          access_key_id: String.t() | nil,
+          secret_access_key: String.t() | nil,
+          session_token: String.t() | nil,
+          endpoint: URI.t() | nil
         }
 
   @doc """
@@ -117,7 +153,8 @@ defmodule AudioProxy.Config do
       render_timeout: integer(env, "AP_RENDER_TIMEOUT", @default_render_timeout, :positive),
       serve_mode: enum(env, "AP_SERVE_MODE", @serve_modes, :redirect),
       presign_ttl: integer(env, "AP_PRESIGN_TTL", @default_presign_ttl, :positive),
-      log_level: enum(env, "AP_LOG_LEVEL", @log_levels, @default_log_level)
+      log_level: enum(env, "AP_LOG_LEVEL", @log_levels, @default_log_level),
+      s3: s3(env)
     })
   end
 
@@ -244,6 +281,76 @@ defmodule AudioProxy.Config do
 
         {:error, _part} ->
           raise Error, "#{var} must be a scheme-tagged URL (file:///path), got: #{inspect(value)}"
+      end
+    end
+  end
+
+  # The S3 group, parsed together because it only means anything together. An
+  # access key with no secret, or either with no region, cannot sign — and
+  # refusing the partial set at boot turns a run of 500s on the first S3
+  # request into a container that does not start.
+  defp s3(env) do
+    id = fetch(env, "AWS_ACCESS_KEY_ID")
+    secret = fetch(env, "AWS_SECRET_ACCESS_KEY")
+    region = fetch(env, "AWS_REGION") || fetch(env, "AWS_DEFAULT_REGION")
+
+    credentials!(id, secret, region)
+
+    %{
+      region: region,
+      access_key_id: id,
+      secret_access_key: secret,
+      session_token: fetch(env, "AWS_SESSION_TOKEN"),
+      endpoint: s3_endpoint(env, "AP_S3_ENDPOINT")
+    }
+  end
+
+  defp credentials!(nil, nil, _region), do: :ok
+
+  defp credentials!(id, secret, region) do
+    cond do
+      is_nil(id) or is_nil(secret) ->
+        raise Error,
+              "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be set together — one without the other cannot sign a request"
+
+      # Signing is region-scoped: the region is inside the credential scope,
+      # so a wrong or missing one is a signature every store rejects. There is
+      # no safe default to guess, least of all against a non-AWS endpoint.
+      is_nil(region) ->
+        raise Error,
+              "AWS_REGION (or AWS_DEFAULT_REGION) must be set when AWS credentials are — it is part of every signature"
+
+      true ->
+        :ok
+    end
+  end
+
+  # An origin and nothing more: the path is decided per request by the
+  # addressing style, so a path here would either be ignored or silently
+  # prefixed onto every key. Both are worse than refusing it.
+  #
+  # Userinfo is refused for the sharper version of the same reason. S3
+  # credentials come from the AWS variables, and nothing downstream reads
+  # userinfo — so `http://key:secret@minio:9000` would look to an operator
+  # like credentials supplied and behave like credentials omitted, failing
+  # later as a signature error that names nothing. The message does not echo
+  # the value, so a boot failure cannot put a secret in a log.
+  defp s3_endpoint(env, var) do
+    with value when is_binary(value) <- fetch(env, var) do
+      case URI.new(value) do
+        {:ok, %URI{userinfo: userinfo}} when is_binary(userinfo) ->
+          raise Error,
+                "#{var} must not carry credentials — S3 credentials come from AWS_ACCESS_KEY_ID " <>
+                  "and AWS_SECRET_ACCESS_KEY, and userinfo here would be silently ignored"
+
+        {:ok, %URI{scheme: scheme, host: host, path: path, query: nil, fragment: nil} = uri}
+        when scheme in ["http", "https"] and is_binary(host) and host != "" and
+               path in [nil, "", "/"] ->
+          %{uri | path: nil}
+
+        _otherwise ->
+          raise Error,
+                "#{var} must be an origin URL with no path, query or fragment (http://minio:9000), got: #{inspect(value)}"
       end
     end
   end

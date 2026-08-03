@@ -56,9 +56,40 @@ excluded by default but run in CI; locally:
 mix test --include integration
 ```
 
-**The two tags never go on the same test.** They are exclusion filters, and
-including one overrides the other's exclusion, so a test carrying both would be
-dragged into the `test` CI job, which has no ffmpeg. A socket-binding test that
+Tests tagged `:minio` need a real S3-compatible store. `AudioProxy.S3` is a
+thin layer over `ex_aws_s3`, so what is worth testing is *our* half — the
+config overrides, the addressing decision, the error translation, the
+metadata round trip, the single-`PutObject` fast path and the part grouping
+`ex_aws` does not do. A stub would agree with us about all of it; a store
+does not.
+
+In the devcontainer MinIO is already running as a compose service at
+`minio:9000`, so this just works:
+
+```bash
+mix test --only minio
+```
+
+Anywhere else, point the suite at a store you started yourself:
+
+```bash
+docker run -d --name minio -p 9000:9000 \
+  -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+  minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+
+AP_TEST_MINIO_ENDPOINT=http://127.0.0.1:9000 mix test --only minio
+```
+
+Credentials are fixed at `minioadmin`/`minioadmin` and the bucket
+(`audio-proxy-test`) is created by the suite. It **fails rather than skips**
+when MinIO is unreachable: these tests are excluded by default, so anything
+that asked for them wants them run, and a green run against nothing is a lie
+about coverage.
+
+**No two of the three tags go on the same test.** They are exclusion filters, and
+including one overrides the others' exclusion, so a test carrying two would be
+dragged into a job that cannot satisfy it — the `test` CI job has no ffmpeg,
+and `--only minio` on a laptop has no store. A socket-binding test that
 also needs the real encoder is therefore tagged `:ffmpeg` only —
 `AudioProxy.RenderEndpointFfmpegTest` is the one that does. Everything else
 about the streaming path runs against a stand-in encoder
@@ -113,7 +144,7 @@ README tells operators to use rather than an incidental detail — write access 
 
 | Job | Needs | Runs | Notes |
 |---|---|---|---|
-| `test` | — | `mix format --check-formatted`, `mix compile --warnings-as-errors`, `mix test --include integration` | No external binaries — the untagged + `:integration` suite must pass on a bare runner |
+| `test` | — | `mix format --check-formatted`, `mix compile --warnings-as-errors`, starts MinIO, then `mix test --include integration --include minio` | No external *binaries* — the untagged + `:integration` suite must pass on a bare runner |
 | `image-ffmpeg` | `test` | Builds the `test` and `runtime` stages, then `mix test --only ffmpeg` inside the image | Asserts the two stages carry the *same* ffmpeg build, and that its major matches [`VERSIONS.md`](../VERSIONS.md) |
 | `smoke` | `test` | Builds the release image, runs [`bin/smoke-image`](../bin/smoke-image) | Boot, health, an end-to-end render off a read-only mount, a signed percent-escaped URL over h2c, config validation, SIGTERM during a render |
 | `publish` | `smoke`, `image-ffmpeg` | Pushes to GHCR | Never runs for a pull request; see [Releases](#releases) |
@@ -275,6 +306,15 @@ The devcontainer image
 ([`.devcontainer/Dockerfile`](../.devcontainer/Dockerfile)) pins the same
 Elixir/OTP pair as `.tool-versions`, plus `ffmpeg`/`ffprobe` — they are part of
 the product, so the `:ffmpeg`-tagged tests need the real binaries.
+
+Since `add-s3-client` the devcontainer is a **compose project**
+([`.devcontainer/docker-compose.yml`](../.devcontainer/docker-compose.yml)):
+an `app` service built from that Dockerfile, and a `minio` service for the
+`:minio` suite. The devcontainer CLI derives the compose project name from
+the workspace folder, so each worktree gets its own `app` *and* its own
+`minio` with no shared state. MinIO publishes no host port for exactly that
+reason — only `app` reaches it, over the compose network at `minio:9000` — so
+parallel worktrees cannot collide on 9000.
 
 The binstubs are host/container dual-purpose — they branch on the `DEVCONTAINER`
 env var so they never recurse through `devcontainer exec`:
