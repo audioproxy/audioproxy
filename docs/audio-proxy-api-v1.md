@@ -133,7 +133,7 @@ The mapping is explicit rather than a passthrough, because ffprobe's output is v
 
 | Field | Source | Rule |
 |---|---|---|
-| `format` | `format.format_name`, refined by `stream.codec_name` | The `f:` token of §3.1, not the demuxer name: the `mov,mp4,m4a,3gp,3g2,mj2` family is `m4a`, and Ogg is `opus` or `ogg` by codec. An unrecognised container falls through to the first name in the list |
+| `format` | `format.format_name`, refined by `stream.codec_name` | Whichever name in ffprobe's comma-separated list is a §3.1 token, so the `mov,mp4,m4a,3gp,3g2,mj2` family is `m4a` and Ogg is `opus` or `ogg` by codec. Membership, not the whole string: the list's contents and order are ffprobe's business and change between versions. A container §3.1 has no token for falls through to the first name (`matroska,webm` → `matroska`) — `format` describes the *source*, and a source may be in a container this proxy cannot emit |
 | `duration` | `format.duration`, else `stream.duration` | Seconds, float |
 | `sample_rate`, `channels` | the audio stream | Integers |
 | `bit_depth` | `stream.bits_per_raw_sample`, else `stream.bits_per_sample` | Never `sample_fmt`: a lossy stream decodes to a float format and has no depth to report |
@@ -154,6 +154,8 @@ Each fallback is tried on the *extracted* value: ffprobe writes `"N/A"` rather t
 A `HEAD` answers what the check chain determines — `401`, `404`, `413` and the caching headers — and stops there, so it never spawns a probe and therefore answers `200` where a `GET` would answer `415`. That is the same discipline `HEAD` follows on the render endpoint, for the same reason: diagnosing `415` *is* the work `HEAD` exists to skip.
 
 ### 4.3 Cost
+
+`AP_MAX_SRC_BYTES` does **not** apply to `/info`, unlike every other signed request: a probe reads container headers and never decodes, so a source too large to *render* still costs a probe nothing to describe — and the client most in need of the endpoint is precisely the one holding a long source it means to ask a trimmed preview of.
 
 A probe reads container headers and stops; it never decodes. It therefore does **not** take an `AP_MAX_CONCURRENCY` slot — that cap exists to bound encoders pinning cores, and queueing probes behind renders would make the endpoint a client calls *before* it knows what to request the slowest thing in the proxy. `AP_PROBE_TIMEOUT` is what bounds this path, and it is separate from and shorter than `AP_RENDER_TIMEOUT`.
 

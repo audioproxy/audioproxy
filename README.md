@@ -284,7 +284,7 @@ etag: "a1f3…"
 
 | Field | Meaning |
 |---|---|
-| `format` | The `f:` token this source would be, not the container's internal name: an MP4 is `m4a`, and Ogg is `opus` or `ogg` depending on what is inside it |
+| `format` | The `f:` token this source would be, not the container's internal name: an MP4 is `m4a`, and Ogg is `opus` or `ogg` depending on what is inside it. A source in a container the proxy cannot itself produce is named plainly (`matroska`) rather than forced into a token |
 | `duration` | Seconds, as a float |
 | `sample_rate`, `channels` | The source's own, which is what a variant inherits when you leave `sr` or `ch` off |
 | `bit_depth` | Lossless sources only |
@@ -298,7 +298,7 @@ etag: "a1f3…"
 
 Responses carry an `ETag` derived from the source object, so a client or CDN that has seen this metadata before revalidates for the price of a `304`. `Cache-Control` is one hour rather than the year a rendered variant gets, and deliberately not `immutable`: a variant's URL describes its bytes exactly and can never go stale, while this describes a file somebody may re-upload tomorrow.
 
-Probing is cheap — it reads the file's header and stops — so it does not queue behind renders and has its own, shorter, `AP_PROBE_TIMEOUT`.
+Probing is cheap — it reads the file's header and stops — so it does not queue behind renders and has its own, shorter, `AP_PROBE_TIMEOUT`. For the same reason `AP_MAX_SRC_BYTES` does not apply here: a source too large to render can still be described, which is what you want, since the long file is exactly the one you were going to ask for a trimmed preview of.
 
 ## Processing options
 
@@ -421,7 +421,7 @@ Failures are JSON, one shape everywhere: `{"error": "…", "message": "…"}`.
 |---|---|---|
 | `401` | `invalid_signature` | Missing or invalid signature |
 | `404` | `not_found` | The source is missing, unreadable, unparseable, or not one this proxy may serve, deliberately indistinguishable, so a `404` tells you nothing about what exists on disk |
-| `413` | `source_too_large` | The source exceeds `AP_MAX_SRC_BYTES` |
+| `413` | `source_too_large` | The source exceeds `AP_MAX_SRC_BYTES`. Renders only — `/info` describes a source of any size |
 | `415` | `undecodable_source` | The source format is not decodable, or — on `/info` — carries no audio at all |
 | `422` | `invalid_options` | Invalid or conflicting options; the message names the offending segment |
 | `429` | `queue_full` | The render queue is full, or this request waited longer than `AP_RENDER_TIMEOUT` for a slot; `Retry-After` is set |
@@ -448,7 +448,7 @@ Note that the variables below are the full configuration surface for the design,
 | `AP_VARIANT_STORE` | URL (`file:///path`) | unset | Where rendered variants are written back; unset = no cache, always render. See [Variant store](#variant-store) |
 | `AP_MAX_CONCURRENCY` | positive integer | schedulers online | Max simultaneous ffmpeg processes. Requests that share a render share its slot, so this counts encodes, not connections |
 | `AP_QUEUE_SIZE` | non-negative integer | `32` | Requests that may wait for a slot before the next one is answered `429` with `Retry-After`. `0` means no waiting at all |
-| `AP_MAX_SRC_BYTES` | positive integer | `2000000000` | Reject larger sources with `413`; also caps the bytes a render may hold in memory |
+| `AP_MAX_SRC_BYTES` | positive integer | `2000000000` | Reject larger sources with `413`; also caps the bytes a render may hold in memory. Does not apply to `/info`, which only reads headers |
 | `AP_RENDER_TIMEOUT` | positive integer | `300` | Seconds a render may take before ffmpeg is killed and the request answered `504`. Raise it for full-length transcodes of long masters; the default suits previews. See [docs/rendering.md](docs/rendering.md) |
 | `AP_PROBE_TIMEOUT` | positive integer | `10` | Seconds an `/info` probe may take before ffprobe is killed and the request answered `504`. Separate from `AP_RENDER_TIMEOUT`, and much shorter: a probe reads the file's header rather than decoding it. See [Asking what a source is](#asking-what-a-source-is) |
 | `AP_SERVE_MODE` | `redirect` \| `proxy` | `redirect` | Serve cache hits by redirect or proxied. See [Choosing a serve mode](#choosing-a-serve-mode) |

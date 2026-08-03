@@ -236,13 +236,22 @@ defmodule AudioProxy.InfoEndpointTest do
       assert JSON.decode!(conn.resp_body) == @generic_404
     end
 
-    test "a source over AP_MAX_SRC_BYTES is 413 without probing" do
+    test "a source over AP_MAX_SRC_BYTES is still described" do
+      # Unlike the render path. A probe reads headers, so the limit buys
+      # nothing here — and the long source is exactly the one a client needs
+      # described before it can ask for a trimmed preview of it.
       put_config(%{max_src_bytes: 1})
 
-      conn = get(signed("/info/plain/local://piece.wav"))
+      conn = info(signed("/info/plain/local://piece.wav"))
 
-      assert conn.status == 413
-      assert DynamicSupervisor.which_children(AudioProxy.Ffmpeg.RenderSupervisor) == []
+      assert conn.status == 200
+      assert JSON.decode!(conn.resp_body)["format"] == "wav"
+    end
+
+    test "the render path still refuses the same source" do
+      put_config(%{max_src_bytes: 1})
+
+      assert get(signed("/f:mp3/plain/local://piece.wav")).status == 413
     end
 
     test "an unsigned info request is 401 before anything else" do

@@ -8,8 +8,22 @@ defmodule AudioProxy.Plugs.InfoAction do
   `AudioProxy.Ffprobe`, filtered to §4's object.
 
   The order is `stat` then probe, and the stat earns its place twice over: it
-  is what answers 404 and 413 before a subprocess exists, and its ETag material
-  is half of this response's validator.
+  is what answers 404 before a subprocess exists, and its ETag material is half
+  of this response's validator.
+
+  ## `AP_MAX_SRC_BYTES` does not apply here
+
+  The render path refuses an oversized source with 413, and this endpoint
+  deliberately does not — which is a departure from the proposal's "413 as
+  usual", made once it was clear what the limit buys on this path. Nothing.
+  A probe reads container headers and stops; against an HTTP source ffmpeg
+  ranges for them, so a four-gigabyte master costs the same probe a four-megabyte
+  one does. The limit exists to stop a render from *decoding* something huge.
+
+  Refusing anyway would also be self-defeating in the one case that matters:
+  the client most in need of `/info` is the one holding a long source it means
+  to ask for a trimmed preview of, and answering "too large to describe" leaves
+  it guessing at the very numbers the endpoint exists to supply.
 
   ## The ETag is not a cache key
 
@@ -39,10 +53,11 @@ defmodule AudioProxy.Plugs.InfoAction do
   ## HEAD
 
   Same discipline as `AudioProxy.Plugs.RenderAction`: every check the chain can
-  run, then a bodiless 200, with no subprocess. The divergence that buys is the
-  same one, and is deliberate — a HEAD on an unprobeable source answers 200
-  where the GET answers 415, because diagnosing 415 *is* the probe. There is no
-  `Content-Length` either, for the same reason.
+  run — here the stat, and nothing else — then a bodiless 200 with no
+  subprocess. The divergence that buys is the same one, and is deliberate: a
+  HEAD on an unprobeable source answers 200 where the GET answers 415, because
+  diagnosing 415 *is* the probe. There is no `Content-Length` either, for the
+  same reason.
 
   ## Failures
 
@@ -57,7 +72,7 @@ defmodule AudioProxy.Plugs.InfoAction do
 
   import Plug.Conn
 
-  alias AudioProxy.{Config, ErrorJSON, Ffprobe, Source}
+  alias AudioProxy.{ErrorJSON, Ffprobe, Source}
 
   # An hour, then revalidate. See the moduledoc for why not `immutable`.
   @cache_control "public, max-age=3600"
@@ -84,10 +99,8 @@ defmodule AudioProxy.Plugs.InfoAction do
   def call(conn, opts) do
     source = conn.assigns.source
 
-    with {:ok, stat} <- Source.stat(source),
-         :ok <- within_limit(stat.size) do
-      conn |> describe(source, stat) |> answer(source, stat, opts)
-    else
+    case Source.stat(source) do
+      {:ok, stat} -> conn |> describe(source, stat) |> answer(source, stat, opts)
       {:error, reason} -> ErrorJSON.halt_with(conn, reason)
     end
   end
@@ -130,16 +143,6 @@ defmodule AudioProxy.Plugs.InfoAction do
     else
       {:error, reason} -> ErrorJSON.halt_with(conn, reason)
     end
-  end
-
-  # `AP_MAX_SRC_BYTES` is an abuse limit on the source, not on the render, so
-  # it applies to a probe of that source too — a client must not be able to use
-  # `/info` to make the proxy open something the render path would refuse. An
-  # unknown size passes, per the `AudioProxy.Source.Type` contract.
-  defp within_limit(nil), do: :ok
-
-  defp within_limit(size) do
-    if size > Config.get(:max_src_bytes), do: {:error, :source_too_large}, else: :ok
   end
 
   ## The validator
