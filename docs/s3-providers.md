@@ -1,9 +1,11 @@
 # S3-compatible providers
 
 The proxy talks to object storage over the S3 API, so it is not limited to AWS.
-Point `AP_S3_ENDPOINT` at another provider and addressing switches from
-virtual-hosted (`bucket.s3.region.amazonaws.com`) to path-style
-(`endpoint/bucket/key`), which is what every provider below expects.
+Point `AP_S3_ENDPOINT` at another provider and addressing defaults to
+path-style (`endpoint/bucket/key`), which is what every provider below expects
+except Tigris. With no endpoint set — AWS proper — the default is
+virtual-hosted (`bucket.s3.region.amazonaws.com`). Either default can be
+overridden with `AP_S3_ADDRESSING`.
 
 This page collects working configurations. For what the variables mean, see
 [S3 credentials](../README.md#s3-credentials) in the README.
@@ -11,13 +13,31 @@ This page collects working configurations. For what the variables mean, see
 ## What is tested and what is not
 
 **MinIO is the only store this project tests against.** The `:minio` suite runs
-in CI and in the devcontainer, and it exercises the same code path every
-provider here uses: path-style addressing against a custom endpoint, SigV4
+in CI and in the devcontainer, and it exercises the same code path most
+providers here use: path-style addressing against a custom endpoint, SigV4
 signing, multipart upload, ranged reads.
 
 Everything on this page is derived from each provider's own documentation, not
-from a test run against it. AWS itself is in the same position — expected to
-work, never exercised, because the virtual-hosted branch has no test.
+from a test run against it.
+
+**Virtual-hosted addressing is asserted, not exercised.** Neither Tigris nor
+AWS is reachable from CI, and MinIO is reached by hostname and port, so
+`bucket.minio` would need DNS nobody configured. The suite therefore pins the
+virtual-hosted decision by inspecting the URL that would go on the wire — for a
+signed request and for a presigned URL, checking that the two agree — rather
+than by fetching anything. That catches a misconfigured addressing style
+deterministically, and it is genuinely weaker than a round trip: it cannot tell
+you the store accepts what we send. If you are deploying against Tigris or AWS,
+verify it yourself with the borrowed suite below.
+
+Two things that used to be listed here as limitations no longer are. Every part
+of a multipart upload except the last is now exactly 5 MiB, which is what
+Cloudflare R2 requires and every other store here already tolerated — R2 is
+absent from this page because nobody has written a verified configuration for
+it, not because of a known incompatibility. And a store behind a private
+certificate authority can be reached over `https://` by pointing
+`AP_S3_CA_BUNDLE` at a PEM bundle, which matters for self-hosted MinIO or Ceph;
+every provider below uses publicly trusted certificates and needs nothing.
 
 If you want certainty for your provider, you can borrow the suite. It takes an
 endpoint from the environment, creates its own bucket, and cleans up after
@@ -107,7 +127,35 @@ AP_VARIANT_STORE=s3://my-variants/audio-proxy
 
 Regions are `fr-par` (Paris), `nl-ams` (Amsterdam) and `pl-waw` (Warsaw).
 Scaleway accepts both path-style and virtual-hosted addressing, so the
-path-style we send is fine.
+path-style default is fine and `AP_S3_ADDRESSING=virtual` also works.
+
+## Tigris (Fly.io)
+
+Tigris is the one provider here that **requires** virtual-hosted addressing:
+buckets created after 19 February 2025 do not accept path-style at all, so
+`AP_S3_ADDRESSING=virtual` is not optional.
+
+```bash
+AWS_ACCESS_KEY_ID=<tigris access key>
+AWS_SECRET_ACCESS_KEY=<tigris secret>
+AWS_REGION=auto
+AP_S3_ENDPOINT=https://fly.storage.tigris.dev
+AP_S3_ADDRESSING=virtual
+AP_VARIANT_STORE=s3://my-variants/audio-proxy
+```
+
+`AWS_REGION=auto` is right rather than lazy: Tigris is globally distributed and
+`auto` is the literal region string it expects in the SigV4 credential scope.
+
+`fly storage create` writes its own variable names into the app's secrets, and
+they do not all match ours. `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and
+`AWS_REGION` carry over unchanged; **`AWS_ENDPOINT_URL_S3` is the one to
+rename** — the proxy reads `AP_S3_ENDPOINT`, and an endpoint left only in
+`AWS_ENDPOINT_URL_S3` is not read by anything, which presents as requests going
+to AWS with Tigris credentials.
+
+Like every other provider on this page, this configuration is not exercised in
+CI — see *What is tested and what is not* above for what the suite does pin.
 
 ## Serving cache hits
 
@@ -127,16 +175,10 @@ sequential ranged GETs. Use it when you cannot redirect clients to storage.
 source objects and cached variants must live on the same provider. Reading
 sources from AWS while caching variants to Hetzner is not expressible today.
 
-**No custom CA bundle.** TLS verification uses the system trust store, so a
-self-hosted store behind a private CA cannot be reached over `https://`. Every
-provider on this page uses publicly trusted certificates, so this only bites
-self-hosted MinIO or Ceph.
-
-**Multipart part sizes vary.** Parts are at least 5 MiB but not all exactly
-equal, because they are grouped from a live render's chunks rather than from a
-file of known length. Every provider here accepts that. **Cloudflare R2 does
-not** — it requires all parts except the last to be the same size — which is
-why R2 is absent from this page.
+**One addressing style for the whole deployment.** `AP_S3_ADDRESSING` is
+global, so sources and variants are addressed the same way. Since the endpoint
+is global too, this only matters if a single store wants different styles for
+different buckets, which none of these do.
 
 **Incomplete multipart uploads.** The proxy aborts an upload on every failure
 path it can see, but not on a hard kill of the VM. Set a lifecycle rule

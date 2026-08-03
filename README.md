@@ -414,6 +414,8 @@ Note that the variables below are the full configuration surface for the design,
 | `AP_PRESIGN_TTL` | positive integer | `300` | Seconds a cache hit's presigned URL stays valid. Redirect mode only |
 | `AP_LOG_LEVEL` | `debug` \| `info` \| `warning` \| `error` | `info` | Lowest level written to stdout. See [Logs](#logs) |
 | `AP_S3_ENDPOINT` | origin URL | unset | Talk to an S3-compatible store instead of AWS. See [S3 credentials](#s3-credentials) and [docs/s3-providers.md](docs/s3-providers.md) |
+| `AP_S3_ADDRESSING` | `virtual` \| `path` | `virtual` with no `AP_S3_ENDPOINT`, `path` with one | Whether a request names its bucket in the host (`bucket.host/key`) or in the path (`host/bucket/key`). Tigris requires `virtual`; see [docs/s3-providers.md](docs/s3-providers.md) |
+| `AP_S3_CA_BUNDLE` | path to a PEM file | unset | Verify the store's certificate against this bundle instead of the system trust store, for a store behind a private CA. Must be readable at boot |
 
 Booleans accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`, case-insensitively. An empty value counts as unset.
 
@@ -444,9 +446,17 @@ AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=… AWS_REGION=eu-central-1 …
 AP_S3_ENDPOINT=http://minio:9000 …
 ```
 
-Setting it also switches addressing from virtual-hosted (`bucket.s3.region.amazonaws.com`) to path-style (`endpoint/bucket/key`), which is what those stores expect. It takes an origin and nothing else: a path, query, fragment, or embedded credentials (`http://key:secret@minio:9000`) are all refused at boot. Credentials especially — they belong in the `AWS_*` variables, and accepting them here would ignore them silently.
+It takes an origin and nothing else: a path, query, fragment, or embedded credentials (`http://key:secret@minio:9000`) are all refused at boot. Credentials especially — they belong in the `AWS_*` variables, and accepting them here would ignore them silently.
 
-**[docs/s3-providers.md](docs/s3-providers.md) has working configurations** for Backblaze B2, DigitalOcean Spaces, Hetzner and Scaleway: each one's endpoint and region conventions, which kind of credential to create, and the limitations to weigh before committing to a provider. It is also the honest account of what is tested — MinIO is, and nothing else is, AWS included.
+Setting it also switches the **addressing** default from virtual-hosted (`bucket.s3.region.amazonaws.com`, what AWS requires) to path-style (`endpoint/bucket/key`, what most S3-compatible stores expect). Override either default with `AP_S3_ADDRESSING`, which some providers need — Tigris accepts only virtual-hosted:
+
+```bash
+AP_S3_ENDPOINT=https://fly.storage.tigris.dev AP_S3_ADDRESSING=virtual AWS_REGION=auto …
+```
+
+A store behind a private certificate authority is reached over `https://` by pointing `AP_S3_CA_BUNDLE` at a PEM bundle; it replaces the system trust store rather than adding to it. There is deliberately no way to switch certificate verification off.
+
+**[docs/s3-providers.md](docs/s3-providers.md) has working configurations** for Backblaze B2, DigitalOcean Spaces, Hetzner, Scaleway and Tigris: each one's endpoint, region and addressing conventions, which kind of credential to create, and the limitations to weigh before committing to a provider. It is also the honest account of what is tested — MinIO is, and nothing else is, AWS included.
 
 ### Variant store
 
