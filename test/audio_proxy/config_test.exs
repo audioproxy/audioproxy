@@ -22,7 +22,14 @@ defmodule AudioProxy.ConfigTest do
                render_timeout: 300,
                serve_mode: :redirect,
                presign_ttl: 300,
-               log_level: :info
+               log_level: :info,
+               s3: %{
+                 region: nil,
+                 access_key_id: nil,
+                 secret_access_key: nil,
+                 session_token: nil,
+                 endpoint: nil
+               }
              }
     end
 
@@ -253,6 +260,124 @@ defmodule AudioProxy.ConfigTest do
 
       assert config.serve_mode == :proxy
       assert {:file, _root} = config.variant_store
+    end
+  end
+
+  describe "the AWS credential group" do
+    @credentials %{
+      "AWS_ACCESS_KEY_ID" => "AKIAIOSFODNN7EXAMPLE",
+      "AWS_SECRET_ACCESS_KEY" => "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+      "AWS_REGION" => "eu-central-1"
+    }
+
+    test "a complete set parses" do
+      s3 = Config.build!(@credentials).s3
+
+      assert s3.access_key_id == "AKIAIOSFODNN7EXAMPLE"
+      assert s3.secret_access_key == "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+      assert s3.region == "eu-central-1"
+      assert s3.session_token == nil
+    end
+
+    test "AWS_DEFAULT_REGION stands in for AWS_REGION" do
+      env = @credentials |> Map.delete("AWS_REGION") |> Map.put("AWS_DEFAULT_REGION", "us-west-2")
+
+      assert Config.build!(env).s3.region == "us-west-2"
+    end
+
+    test "AWS_REGION wins over AWS_DEFAULT_REGION" do
+      assert Config.build!(Map.put(@credentials, "AWS_DEFAULT_REGION", "us-west-2")).s3.region ==
+               "eu-central-1"
+    end
+
+    test "a session token is carried for temporary credentials" do
+      assert Config.build!(Map.put(@credentials, "AWS_SESSION_TOKEN", "temp")).s3.session_token ==
+               "temp"
+    end
+
+    test "an access key with no secret aborts" do
+      # Half a credential signs nothing. Refusing at boot beats a container
+      # that starts and then 500s on its first S3 request.
+      error =
+        assert_raise Error, fn ->
+          Config.build!(%{"AWS_ACCESS_KEY_ID" => "AKIAIOSFODNN7EXAMPLE"})
+        end
+
+      assert error.message =~ "AWS_ACCESS_KEY_ID"
+      assert error.message =~ "AWS_SECRET_ACCESS_KEY"
+    end
+
+    test "a secret with no access key aborts" do
+      assert_raise Error, fn -> Config.build!(%{"AWS_SECRET_ACCESS_KEY" => "secret"}) end
+    end
+
+    test "credentials with no region abort" do
+      # The region is inside the credential scope, so a missing one is a
+      # signature every store rejects — and there is nothing safe to guess.
+      error = assert_raise Error, fn -> Config.build!(Map.delete(@credentials, "AWS_REGION")) end
+
+      assert error.message =~ "AWS_REGION"
+    end
+
+    test "a region alone is fine — it configures nothing on its own" do
+      assert Config.build!(%{"AWS_REGION" => "eu-central-1"}).s3.access_key_id == nil
+    end
+  end
+
+  describe "AP_S3_ENDPOINT" do
+    test "an origin URL parses" do
+      endpoint = Config.build!(%{"AP_S3_ENDPOINT" => "http://minio:9000"}).s3.endpoint
+
+      assert endpoint.scheme == "http"
+      assert endpoint.host == "minio"
+      assert endpoint.port == 9000
+    end
+
+    test "a bare trailing slash is accepted and dropped" do
+      assert Config.build!(%{"AP_S3_ENDPOINT" => "https://minio.internal/"}).s3.endpoint.path ==
+               nil
+    end
+
+    test "a path is refused" do
+      # It would either be ignored or silently prefixed onto every key; both
+      # are worse than saying so.
+      error =
+        assert_raise Error, fn -> Config.build!(%{"AP_S3_ENDPOINT" => "http://minio:9000/s3"}) end
+
+      assert error.message =~ "AP_S3_ENDPOINT"
+    end
+
+    test "a query or fragment is refused" do
+      assert_raise Error, fn -> Config.build!(%{"AP_S3_ENDPOINT" => "http://minio:9000?a=1"}) end
+      assert_raise Error, fn -> Config.build!(%{"AP_S3_ENDPOINT" => "http://minio:9000#a"}) end
+    end
+
+    test "a non-HTTP scheme is refused" do
+      assert_raise Error, fn -> Config.build!(%{"AP_S3_ENDPOINT" => "s3://minio:9000"}) end
+    end
+
+    test "a value with no host is refused" do
+      assert_raise Error, fn -> Config.build!(%{"AP_S3_ENDPOINT" => "minio:9000"}) end
+    end
+
+    test "userinfo is refused rather than silently dropped" do
+      # Nothing downstream reads it, so credentials here would look supplied
+      # and behave omitted — failing later as a signature error that names
+      # nothing.
+      error =
+        assert_raise Error, fn ->
+          Config.build!(%{"AP_S3_ENDPOINT" => "http://key:secret@minio:9000"})
+        end
+
+      assert error.message =~ "AP_S3_ENDPOINT"
+      assert error.message =~ "AWS_ACCESS_KEY_ID"
+      # The message must not echo the value, or a boot failure puts a secret
+      # in the logs.
+      refute error.message =~ "secret"
+    end
+
+    test "a bare username with no password is refused too" do
+      assert_raise Error, fn -> Config.build!(%{"AP_S3_ENDPOINT" => "http://key@minio:9000"}) end
     end
   end
 

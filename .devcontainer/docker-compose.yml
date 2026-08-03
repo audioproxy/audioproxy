@@ -1,0 +1,54 @@
+# The devcontainer became a compose project when the S3 client landed: the
+# `:minio` suite needs a real S3-compatible store to sign against, and a fake
+# cannot verify a signature without becoming a second SigV4 implementation
+# agreeing with the first.
+#
+# One project per worktree. The devcontainer CLI derives the compose project
+# name from the workspace folder, so parallel worktrees get their own `app`
+# *and* their own `minio` with no shared state and no port collisions — which
+# is why minio publishes nothing to the host. Only `app` reaches it, over the
+# compose network, at the fixed name `minio:9000`.
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    volumes:
+      - ..:/workspaces/audio_proxy:cached
+    # The devcontainer keeps the container alive; the app itself is started by
+    # bin/agent-server through `devcontainer exec`.
+    command: sleep infinity
+    # wt exports the branch's hashed port before `devcontainer up`, and compose
+    # interpolates it from that environment. 4000 for a manual run.
+    ports:
+      - "${PORT:-4000}:${PORT:-4000}"
+    environment:
+      # bin/agent-* branch on this to tell "inside the container" from "on the
+      # host", so they never recurse through devcontainer exec.
+      DEVCONTAINER: "1"
+      # Where the :minio suite looks. Not AP_S3_ENDPOINT: that would configure
+      # the *application* to use MinIO for every run, and the dev server has no
+      # business pointing at a test store it did not ask for.
+      AP_TEST_MINIO_ENDPOINT: http://minio:9000
+    depends_on:
+      minio:
+        condition: service_healthy
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    # Deliberately no `ports:` — see the header. Nothing outside the compose
+    # network needs it, and publishing 9000 would collide across worktrees.
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    # Test fixtures only; a container restart is meant to lose them.
+    tmpfs:
+      - /data

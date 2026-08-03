@@ -27,7 +27,7 @@ Workflow mechanics (devcontainer, ports, hooks) are under *Dev workflow* below.
 - `ffprobe` for the `/info` endpoint.
 - **Single Docker container**: multi-stage build, `mix release` with bundled ERTS, `apt-get install ffmpeg` in the runtime stage. No sidecar, no external queue, no database.
 - **Debian slim, not Alpine — and this is not a preference to revisit for image size.** The image was Alpine first. On musl the BEAM intermittently aborts at startup (`sys_sigaltstack(): Failed to set alternate signal stack`, exit 134), measured at 2 failures in 10 runs on GitHub's runners, in the *runtime* container — the shipped image failing to boot. OTP's fix for it only ever worked against glibc. Debian costs ~80 MB and buys a release that starts. `VERSIONS.md` has the evidence; anyone proposing a return to Alpine has to answer it.
-- S3 access via a minimal SDK (evaluate `ex_aws_s3` vs `req` + `aws_signature`); presigned URLs are essential (see below).
+- **S3 access via `ex_aws_s3`** — settled in `add-s3-client`, see *Open questions* for the argument. `AudioProxy.S3` is a four-function facade over it so the surface stays small and the error vocabulary stays ours. Presigned URLs are essential (see below).
 
 ## Dependency policy
 
@@ -126,7 +126,14 @@ signature verification plug → options parser (options string = normalized cach
 ## Open questions (decide as they come up)
 
 - ~~Project/binary name~~ — settled for now: OTP app `audio_proxy`, still a working title. Renaming is a cheap find/replace while the project is small.
-- `ex_aws_s3` vs hand-rolled signing with `req`.
+- ~~`ex_aws_s3` vs hand-rolled signing with `req`~~ — settled in `add-s3-client`: **`ex_aws_s3`**, plus `ex_aws` and `sweet_xml`. Three packages.
+
+  Hand-rolled SigV4 was built first and worked — vectors, MinIO, the lot — and was still the wrong answer: ~2000 lines of signing, multipart orchestration and a fake S3 to test it against, all of it ours to maintain against a request contract AWS changes and we do not control. Volume was the deciding factor, not correctness.
+
+  Two things the migration turned up, both worth knowing before anyone revisits this:
+
+  - **`hackney` is deliberately absent.** `ex_aws` requires `hackney ~> 4.0` and ships an adapter for it, but that adapter cannot read hackney 4.0's bodyless responses (`{:ok, status, headers}`), so every `head/2` raises `CaseClauseError` from inside the dependency. An adapter had to be written either way, so it is `AudioProxy.S3.HttpClient` over OTP's `:httpc` — three new packages instead of twelve, and no QUIC/WebTransport stack in the image. Swapping back is a config key and one module.
+  - **`ExAws.S3.upload/4` uploads one part per stream element and always uses multipart.** So it rejects small objects outright (`EntityTooSmall`), and needs the stream pre-grouped into 5 MiB parts. `AudioProxy.S3` does both: a single-`PutObject` fast path, and part-grouping above it.
 - Peaks output: exact JSON schema (audiowaveform compatibility?).
 - Single-pass `loudnorm` accuracy — good enough for previews, revisit for masters.
 - **Distro ffmpeg vs compiled from source.** Currently distro packages: both the devcontainer and the release image are `apt install ffmpeg` on debian trixie (7.1.5), so they now agree by construction. Building from source would buy an exact pinned version identical in dev and prod, and a `--disable-everything` codec set trimmed to what the API actually offers (smaller image, smaller attack surface). It costs a long build stage, a hand-maintained codec list, and the security-patch duty that distro packaging otherwise handles. Decide in `add-docker-release`; if the answer is yes, the devcontainer must build the same way or dev and prod diverge on codec behaviour.

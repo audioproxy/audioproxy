@@ -99,10 +99,19 @@ defmodule AudioProxy.Ffmpeg.RenderFfmpegTest do
     test "a timeout kills a real ffmpeg", %{source: source} do
       {:ok, options} = Options.parse("f:mp3")
 
+      # The timeout has to fit inside a window: long enough that this process
+      # can still ask for the OS pid before the render times out and stops,
+      # short enough that it fires well before a 20-second sine finishes
+      # encoding (a few hundred milliseconds).
+      #
+      # It was 1 ms, which is under the scheduling latency of the very next
+      # line on a loaded runner: the render had already begun stopping, and
+      # `Render.os_pid/1` exited with `:normal` from inside
+      # `GenServer.call/3`. That flaked on main before it flaked on a branch.
       {:ok, render} =
         Render.start_link(
           args: Command.build(options, source),
-          timeout: 1
+          timeout: 100
         )
 
       os_pid = Render.os_pid(render)

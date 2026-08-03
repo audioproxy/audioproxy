@@ -413,10 +413,40 @@ Note that the variables below are the full configuration surface for the design,
 | `AP_SERVE_MODE` | `redirect` \| `proxy` | `redirect` | Serve cache hits by redirect or proxied. See [Choosing a serve mode](#choosing-a-serve-mode) |
 | `AP_PRESIGN_TTL` | positive integer | `300` | Seconds a cache hit's presigned URL stays valid. Redirect mode only |
 | `AP_LOG_LEVEL` | `debug` \| `info` \| `warning` \| `error` | `info` | Lowest level written to stdout. See [Logs](#logs) |
+| `AP_S3_ENDPOINT` | origin URL | unset | Talk to an S3-compatible store instead of AWS. See [S3 credentials](#s3-credentials) and [docs/s3-providers.md](docs/s3-providers.md) |
 
 Booleans accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`, case-insensitively. An empty value counts as unset.
 
 The listener port is read from `AP_PORT`, then `PORT`, then `4000`.
+
+### S3 credentials
+
+S3 access is the one thing configured with **standard AWS variables** rather than `AP_`-prefixed ones, because every tool that produces credentials already writes those names:
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `AWS_ACCESS_KEY_ID` | with the others | Access key |
+| `AWS_SECRET_ACCESS_KEY` | with the others | Secret key |
+| `AWS_REGION` (or `AWS_DEFAULT_REGION`) | with the others | Signing region — part of every signature, so there is nothing safe to guess |
+| `AWS_SESSION_TOKEN` | no | For temporary credentials |
+
+They are validated as a group at boot: all three, or none. Half a credential signs nothing, and a container that starts and then fails its first S3 request is worse than one that does not start.
+
+**Credentials come from the environment only.** There is no IMDS or STS lookup, so an EC2/EKS instance role does not work — supply keys. That is a known limitation, not an oversight.
+
+```bash
+AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=… AWS_REGION=eu-central-1 …
+```
+
+`AP_S3_ENDPOINT` points at something other than AWS — MinIO, localstack, or any S3-compatible store:
+
+```bash
+AP_S3_ENDPOINT=http://minio:9000 …
+```
+
+Setting it also switches addressing from virtual-hosted (`bucket.s3.region.amazonaws.com`) to path-style (`endpoint/bucket/key`), which is what those stores expect. It takes an origin and nothing else: a path, query, fragment, or embedded credentials (`http://key:secret@minio:9000`) are all refused at boot. Credentials especially — they belong in the `AWS_*` variables, and accepting them here would ignore them silently.
+
+**[docs/s3-providers.md](docs/s3-providers.md) has working configurations** for Backblaze B2, DigitalOcean Spaces, Hetzner and Scaleway: each one's endpoint and region conventions, which kind of credential to create, and the limitations to weigh before committing to a provider. It is also the honest account of what is tested — MinIO is, and nothing else is, AWS included.
 
 ### Variant store
 
@@ -527,6 +557,7 @@ Elixir with Plug and [Bandit](https://github.com/mtrudel/bandit), and no Phoenix
 |---|---|
 | [docs/audio-proxy-api-v1.md](docs/audio-proxy-api-v1.md) | **The source of truth.** URL grammar, every processing option, cache-key rules, response headers, error codes |
 | [docs/sources.md](docs/sources.md) | Source encodings and escaping, what is refused, the source-type contract and canonical identity |
+| [docs/s3-providers.md](docs/s3-providers.md) | Working configurations for Backblaze B2, DigitalOcean Spaces, Hetzner and Scaleway, and the limitations to know before committing to one |
 | [docs/development.md](docs/development.md) | Toolchain, per-slice worktrees and devcontainers, the test suite and its tags, CI, how a release is cut |
 | [examples/](examples) | A one-file browser player for trying variants, and why it has to be served rather than opened |
 | [VERSIONS.md](VERSIONS.md) | What the image is built from: Debian, Elixir/OTP and ffmpeg pins, why not Alpine, and how to bump one |
