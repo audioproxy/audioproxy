@@ -19,14 +19,17 @@ defmodule AudioProxy.Plugs.RenderAction do
   ffmpeg blocks forever on a read that never completes, holding a render slot
   until the timeout.
 
-  ## Two requests that never render
+  ## Three requests that never render
 
   An `If-None-Match` matching the URL-derived `ETag` answers `304` before the
   stat — the ETag is the cache key, a pure function of the URL, so
-  revalidation is pure computation. And a HEAD runs the full check chain
-  including the stat but ends bodiless after it, with no subprocess. Both sit
-  after the signature plug by pipeline order, so neither is an existence
-  oracle for unsigned probes.
+  revalidation is pure computation. A cache key already in the variant store
+  is served from it by `AudioProxy.VariantCache`, which owns everything about
+  a HIT and is the reason this module's streaming loop only ever reports
+  `MISS` or `COALESCED`. And a HEAD runs the full check chain including the
+  stat but ends bodiless after it, with no subprocess. All three sit after the
+  signature plug by pipeline order, so none is an existence oracle for
+  unsigned probes.
 
   Two consequences worth stating, because both look like bugs and are not:
 
@@ -51,7 +54,7 @@ defmodule AudioProxy.Plugs.RenderAction do
   request is already rendering this exact variant, and the backlog is
   everything it has produced so far — written as the first chunk, before the
   live ones. Those are the two `X-Audio-Proxy` values §5 defines for a render;
-  `HIT` arrives with the variant cache.
+  `HIT` belongs to the request that never got this far.
 
   Nothing else in this module knows about it. The coordinator broadcasts the
   pipeline's own message contract with itself as the handle, so the loop below
@@ -129,7 +132,17 @@ defmodule AudioProxy.Plugs.RenderAction do
 
   require Logger
 
-  alias AudioProxy.{CacheKey, Config, ErrorJSON, RenderCoordinator, Semaphore, Source, Telemetry}
+  alias AudioProxy.{
+    CacheKey,
+    Config,
+    ErrorJSON,
+    RenderCoordinator,
+    Semaphore,
+    Source,
+    Telemetry,
+    VariantCache
+  }
+
   alias AudioProxy.Ffmpeg.Command
 
   # §5: the URL encodes the variant, so a rendered variant is immutable.
@@ -179,7 +192,37 @@ defmodule AudioProxy.Plugs.RenderAction do
     if revalidated?(conn) do
       not_modified(conn)
     else
-      respond(conn, source, opts)
+      cached_or_rendered(conn, source, opts)
+    end
+  end
+
+  # The cache check sits here — after the cheap URL-only 304, before the stat,
+  # the semaphore and the coalescing registry — so the order a request meets
+  # is: validator, cache, registry, new render. Before the stat for the reason
+  # the 304 is: a stored variant is immutable bytes that owe nothing to a
+  # source which may since have been deleted, and a stat per HIT is exactly
+  # the I/O a cache exists to avoid.
+  #
+  # HEAD deliberately does not consult the cache. It answers what the check
+  # chain can determine, and the divergence that buys is the same shape as the
+  # 415 one below: a HEAD reports the render path's framing even where the GET
+  # would answer a HIT's, or a 302. Consulting the store would make HEAD the
+  # one request whose answer depends on cache state, which is the property §5
+  # tells clients not to build on.
+  defp cached_or_rendered(%Plug.Conn{method: "HEAD"} = conn, source, opts) do
+    respond(conn, source, opts)
+  end
+
+  defp cached_or_rendered(conn, source, opts) do
+    key = conn.assigns.cache_key
+
+    with {:ok, entry} <- VariantCache.lookup(key),
+         {:ok, hit} <- VariantCache.serve(conn, key, entry) do
+      hit
+    else
+      # Nothing stored, or evicted between the head and the read — either way
+      # no byte has been sent and this is an ordinary render.
+      :miss -> respond(conn, source, opts)
     end
   end
 
@@ -473,6 +516,12 @@ defmodule AudioProxy.Plugs.RenderAction do
 
   # ETag and Cache-Control travel with the 304 so the revalidating cache can
   # refresh its own metadata; a body would be a protocol error.
+  #
+  # The Cache-Control here is this module's constant, while a cache HIT sends
+  # the one the write-back stored. They are the same value in production —
+  # the stored one *is* this constant, saved at render time — so this is a
+  # latent divergence rather than a live one, and worth knowing about before
+  # anything makes the stored policy vary per variant.
   defp not_modified(conn) do
     conn
     |> put_resp_header("cache-control", @cache_control)
@@ -506,8 +555,9 @@ defmodule AudioProxy.Plugs.RenderAction do
 
   defp etag(conn), do: ~s("#{conn.assigns.cache_key}")
 
-  # §5's two render statuses. `HIT` is not one of them: it is a 302 to storage
-  # and never reaches this module, which is why the variant cache owns it.
+  # §5's two render statuses. `HIT` is not one of them: a request served from
+  # the store never reaches this function, because `AudioProxy.VariantCache`
+  # has already sent its response.
   defp cache_status(%{assigns: %{render_status: :coalesced}}), do: "COALESCED"
   defp cache_status(_conn), do: "MISS"
 

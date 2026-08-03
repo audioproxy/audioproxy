@@ -48,7 +48,7 @@ To hear it rather than download it, save this as `player.html` and open it in a 
 
 Playback starts before the render finishes, which is the point. `f:mp3` because every browser plays it; Safari will not play Ogg or Opus. For something to poke at rather than a single tag, [`examples/player.html`](examples/player.html) has presets for every format and shows what the browser makes of the response.
 
-**While it renders, the duration reads as unknown and you cannot seek**, because a render in progress has no length and nothing to seek into: it is delivered chunked, with no `Content-Length` and no `Accept-Ranges`. Once the whole thing has arrived the browser can scrub within what it holds, so on a short file this is barely visible. What you cannot do, at any point, is jump to a position that has not been received — without `Accept-Ranges` the browser has to fetch everything up to that point first, which on a long file is the difference between seeking and waiting. Range requests need a *cached* variant with a known size; see the [Roadmap](#roadmap).
+**While it renders, the duration reads as unknown and you cannot seek**, because a render in progress has no length and nothing to seek into: it is delivered chunked, with no `Content-Length` and no `Accept-Ranges`. Once the whole thing has arrived the browser can scrub within what it holds, so on a short file this is barely visible. What you cannot do, at any point, is jump to a position that has not been received — without `Accept-Ranges` the browser has to fetch everything up to that point first, which on a long file is the difference between seeking and waiting. Range requests need a *cached* variant with a known size, so with a [variant store](#variant-store) configured this describes the first play only: every request after it declares a length and seeks normally. See [Cache semantics](#cache-semantics).
 
 Two things that matter beyond a first try:
 
@@ -101,12 +101,12 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 - Transcoding to MP3, AAC/M4A, Opus, Vorbis, FLAC and WAV, with trimming, fades, loudness normalisation, channel and sample-rate control
 - Renders stream while they encode, from files in a mounted directory
 - Concurrent requests for the same variant share one render, with mid-render joiners catching up from the start
+- A variant cache: completed renders persist to a store (a local directory today, object storage when the S3 backend lands) and are served back without rendering, with `Range` support
 - A cap on simultaneous renders with a bounded wait queue, so a burst queues (and then sheds, with `Retry-After`) instead of thrashing the machine
 - A single container, published per release
 
 **Next: what makes it production-shaped**
 
-- **A variant cache.** The write-back half exists: completed renders persist to a configurable store (a local directory today, object storage when the S3 backend lands), atomically and with the headers they were served with. What remains is serving from it — cache hits answered from the store, with `Range` support and byte-serving, instead of rendering again.
 - **S3 sources**, so the audio itself can live in object storage.
 
 **After that**
@@ -247,9 +247,9 @@ etag: "6f1c…"
 x-audio-proxy: MISS
 ```
 
-The first bytes leave before ffmpeg has finished, so a long transcode starts playing immediately rather than after it completes. There is no `Content-Length` and no `Accept-Ranges` on this response: the length is not known when the head goes out, and ranges arrive with the variant cache, whose `HIT` redirects to storage that serves them natively.
+The first bytes leave before ffmpeg has finished, so a long transcode starts playing immediately rather than after it completes. There is no `Content-Length` and no `Accept-Ranges` on this response: the length is not known when the head goes out. A request for the same variant once it is cached is framed differently, and that difference is worth reading before you write a client against either shape ([Cache semantics](#cache-semantics)).
 
-`x-audio-proxy` says where the bytes came from. `MISS` is this request's own render. `COALESCED` means another request was already rendering exactly this variant and this one attached to it: the same bytes, no second ffmpeg. `HIT` arrives with the variant cache, which does not exist yet, so today every response is one of the first two. `etag` is the variant's cache key, which is a pure function of the normalized options and the source, so the same variant requested with its options in a different order carries the same one.
+`x-audio-proxy` says where the bytes came from. `MISS` is this request's own render. `COALESCED` means another request was already rendering exactly this variant and this one attached to it: the same bytes, no second ffmpeg. `HIT` means it came from the variant store and nothing was rendered at all. `etag` is the variant's cache key, which is a pure function of the normalized options and the source, so the same variant requested with its options in a different order carries the same one.
 
 Requests for the same variant share a render, so a burst — a page that loads the same preview for fifty visitors at once — costs one encode rather than fifty. A request arriving mid-render is sent everything encoded so far, then the rest as it comes, so it gets the whole file and not the tail. A shared render is held in memory for as long as it runs, and output past `AP_MAX_SRC_BYTES` fails rather than growing without limit — so that variable bounds variant size as well as source size.
 
@@ -407,7 +407,8 @@ Note that the variables below are the full configuration surface for the design,
 | `AP_QUEUE_SIZE` | non-negative integer | `32` | Requests that may wait for a slot before the next one is answered `429` with `Retry-After`. `0` means no waiting at all |
 | `AP_MAX_SRC_BYTES` | positive integer | `2000000000` | Reject larger sources with `413`; also caps the bytes a render may hold in memory |
 | `AP_RENDER_TIMEOUT` | positive integer | `300` | Seconds a render may take before ffmpeg is killed and the request answered `504`. Raise it for full-length transcodes of long masters; the default suits previews. See [docs/rendering.md](docs/rendering.md) |
-| `AP_SERVE_MODE` | `redirect` \| `proxy` | `redirect` | Serve cache hits by redirect or proxied |
+| `AP_SERVE_MODE` | `redirect` \| `proxy` | `redirect` | Serve cache hits by redirect or proxied. See [Choosing a serve mode](#choosing-a-serve-mode) |
+| `AP_PRESIGN_TTL` | positive integer | `300` | Seconds a cache hit's presigned URL stays valid. Redirect mode only |
 | `AP_LOG_LEVEL` | `debug` \| `info` \| `warning` \| `error` | `info` | Lowest level written to stdout. See [Logs](#logs) |
 
 Booleans accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`, case-insensitively. An empty value counts as unset.
@@ -424,7 +425,7 @@ AP_VARIANT_STORE=file:///var/cache/audio_proxy AP_SERVE_MODE=proxy …
 
 The scheme picks the backend. `file://` stores variants in a local directory, which must exist and be writable at boot; `s3://` arrives with the S3 backend. Unset means no cache: every request renders.
 
-With a store configured, every successful render is written back under its cache key, together with the headers it was served with — atomically, so a failed or cancelled render leaves nothing behind. It also changes what a disconnect means: the render of a variant nobody is waiting for anymore is completed into the store rather than cancelled. Serving cache hits *from* the store is the next slice; until it lands, the store fills but requests still render.
+With a store configured, every successful render is written back under its cache key, together with the headers it was served with — atomically, so a failed or cancelled render leaves nothing behind. It also changes what a disconnect means: the render of a variant nobody is waiting for anymore is completed into the store rather than cancelled, so the next request for it is a hit.
 
 Two things about a `file://` store are yours to own:
 
@@ -433,7 +434,30 @@ Two things about a `file://` store are yours to own:
 
 A `file://` store is also per-node: two nodes with separate directories each render a variant once. That is the intended trade — shared caches are what `s3://` is for.
 
-`AP_SERVE_MODE=redirect` (the default) serves cache hits as a redirect to a presigned URL, which is a capability of the store's backend — a `file://` store has no URLs to sign, so `redirect` against it is refused at boot, naming both variables. Use `AP_SERVE_MODE=proxy` with a `file://` store.
+### Cache semantics
+
+A request for a variant that is not stored renders it (`MISS`), or attaches to a render already running for it (`COALESCED`). A request for one that is renders nothing (`HIT`), and the two answer in different shapes:
+
+| | `MISS` / `COALESCED` | `HIT` |
+|---|---|---|
+| Status | `200` | `200`, or `302` in redirect mode |
+| Framing | `transfer-encoding: chunked` | `content-length` |
+| `accept-ranges` | absent | `bytes` |
+| A `Range` request | ignored, answered in full | `206` with the slice |
+
+`content-type`, `cache-control` and `etag` are the same either way; so are the bytes. Both shapes start delivering before the variant is complete or fully read, so neither makes a client wait.
+
+The one thing to take from this table: **the same URL can answer in either shape**, because which one you get depends on whether the variant happens to be cached at that moment. A client that assumes a length, or assumes a range will be honored, will be wrong on a cold cache; one that assumes chunked framing will be wrong on a warm one. Browsers handle both natively, which is why this is a note for anything else you write against the endpoint.
+
+Two ways to make a first play seekable, if you need one: request the URL once and discard the response before setting `src`, or warm the cache after upload. Both leave the player facing a hit.
+
+### Choosing a serve mode
+
+`AP_SERVE_MODE=proxy` serves hits from the store through the proxy. It works with every backend, keeps one hostname in front of clients, and means the proxy stays in the path for the bytes.
+
+`AP_SERVE_MODE=redirect` (the default) answers a hit with a `302` to a presigned URL valid for `AP_PRESIGN_TTL` seconds, and storage serves the bytes. The proxy leaves the hot path entirely, which is the point of it. Presigning is a capability of the store's backend, so `redirect` against a `file://` store (which has no URLs to sign) is refused at boot, naming both variables; use `proxy` there.
+
+Behind a CDN, prefer `proxy`. It is the mode that collaborates with an edge: one origin, cacheable immutable responses, `Range` served through the same URL the CDN already holds. `redirect` routes the media bytes around the edge to storage, so the CDN caches a `302` it must not keep (the response says `no-store` for exactly that reason: a stored redirect hands out expired URLs) and none of the audio.
 
 ## Caching and CDNs
 
@@ -445,6 +469,8 @@ The proxy is built to sit behind a CDN without special configuration on either s
 | `404` | `max-age=10` | Sources appear — a file uploaded moments after the miss is served within seconds |
 | `413`, `415` | `max-age=10` | Verdicts about the current source bytes, which a re-upload changes |
 | `401`, `422` | `max-age=60` | Pure functions of the URL: a bad signature never becomes good, invalid options never become valid — only a deploy changes that |
+| `302` (cache hit, redirect mode) | `no-store` | The `Location` is a credential with an expiry; a cached redirect hands out URLs that no longer work |
+| `416` | `no-store` | The only response whose body depends on a request header, and nothing here sends `Vary: Range` |
 | `429`, `500`, `504` | `no-store` | Transient — caching a transient failure amplifies it (`429` carries `Retry-After`) |
 | `/health` | `no-store` | Liveness is only worth anything fresh |
 
@@ -453,8 +479,8 @@ The error rows are a deliberate relaxation, worth knowing if you operate a share
 Three behaviors round out the CDN-facing surface:
 
 - **Revalidation costs no render.** A request whose `If-None-Match` matches the variant's `ETag` answers `304` before the proxy touches storage or spawns anything — the ETag derives from the URL alone. The signature still gates: an unsigned request is `401`, matching validator or not.
-- **HEAD works.** `HEAD` on a signed URL runs every check a `GET` runs — signature, options, source authorization and stat — with an empty body and no render. Errors answer as `GET` does, bodiless. `HEAD /health` works too. One caveat if you use it to validate URLs: because it does not decode, it cannot report a source ffmpeg would reject, so a `HEAD` can answer `200` where the `GET` answers `415`. Everything decidable without decoding (`401`, `404`, `413`, `422`) matches the `GET` exactly.
-- **`Range` on an uncached variant is ignored.** A `Range` header on a variant that has to be rendered gets the full `200` chunked stream (RFC 9110 permits this), with no `Accept-Ranges` and no `206`. Range serving belongs to cached variants: once the variant cache lands, a `HIT` redirects to storage, which serves `206` natively — that discipline arrives with that slice.
+- **HEAD works.** `HEAD` on a signed URL runs every check a `GET` runs — signature, options, source authorization and stat — with an empty body and no render. Errors answer as `GET` does, bodiless. `HEAD /health` works too. Two caveats if you use it to validate URLs. Because it does not decode, it cannot report a source ffmpeg would reject, so a `HEAD` can answer `200` where the `GET` answers `415`; everything decidable without decoding (`401`, `404`, `413`, `422`) matches the `GET` exactly. And it does not consult the variant cache, so it reports the render path's framing, never a hit's `content-length` or its `302`.
+- **`Range` on an uncached variant is ignored.** A `Range` header on a variant that has to be rendered gets the full `200` chunked stream (RFC 9110 permits this), with no `Accept-Ranges` and no `206`. Range serving belongs to cached variants: a hit answers `206` in proxy mode, or redirects to storage that serves it natively. A range no byte of a cached variant can satisfy is a `416`; one this proxy does not implement (several ranges at once, a unit other than `bytes`) is ignored, and answers the whole variant rather than failing. See [Cache semantics](#cache-semantics).
 
 ## Logs
 

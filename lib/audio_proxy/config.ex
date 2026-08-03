@@ -26,6 +26,7 @@ defmodule AudioProxy.Config do
   | `AP_MAX_SRC_BYTES` | positive integer | `2_000_000_000` |
   | `AP_RENDER_TIMEOUT` | positive integer (seconds) | `300` |
   | `AP_SERVE_MODE` | `redirect` \\| `proxy` | `:redirect` |
+  | `AP_PRESIGN_TTL` | positive integer (seconds) | `300` |
   | `AP_LOG_LEVEL` | `debug` \\| `info` \\| `warning` \\| `error` | `:info` |
 
   The listener port is read from `AP_PORT`, falling back to `PORT` (which the
@@ -50,6 +51,11 @@ defmodule AudioProxy.Config do
   @default_render_timeout 300
   @serve_modes [:redirect, :proxy]
 
+  # How long a HIT's presigned URL stays valid. Short on purpose: the URL is
+  # handed to one client for one playback, and the response carrying it is
+  # `no-store`, so nothing needs it to outlive the redirect it arrived in.
+  @default_presign_ttl 300
+
   # Logger's own levels, narrowed to the four an operator has a reason to pick.
   # `:notice` and friends exist in OTP's scale but nothing here emits them, so
   # offering them would only be a way to configure a level with no meaning.
@@ -72,6 +78,7 @@ defmodule AudioProxy.Config do
           max_src_bytes: pos_integer(),
           render_timeout: pos_integer(),
           serve_mode: :redirect | :proxy,
+          presign_ttl: pos_integer(),
           log_level: :debug | :info | :warning | :error
         }
 
@@ -109,6 +116,7 @@ defmodule AudioProxy.Config do
       max_src_bytes: integer(env, "AP_MAX_SRC_BYTES", @default_max_src_bytes, :positive),
       render_timeout: integer(env, "AP_RENDER_TIMEOUT", @default_render_timeout, :positive),
       serve_mode: enum(env, "AP_SERVE_MODE", @serve_modes, :redirect),
+      presign_ttl: integer(env, "AP_PRESIGN_TTL", @default_presign_ttl, :positive),
       log_level: enum(env, "AP_LOG_LEVEL", @log_levels, @default_log_level)
     })
   end
