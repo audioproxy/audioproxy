@@ -505,6 +505,16 @@ defmodule AudioProxy.RenderCoordinator do
 
     Process.demonitor(state.render_monitor, [:flush])
 
+    # Here, not in `terminate/2`. A slot caps *encoders*, and this one's is
+    # gone: `{:done, _, _}` arrives after the subprocess has exited and every
+    # byte it wrote has been forwarded. What the linger below keeps alive is a
+    # buffer being served from memory, which costs no CPU and must not cost a
+    # slot — holding one across it would shrink effective concurrency by the
+    # linger over the render's own duration, which for the preview-sized
+    # renders v1 targets is most of it. `terminate/2` still releases, for the
+    # paths that never get here; the second call is a no-op.
+    Semaphore.release()
+
     {:noreply,
      %{
        state

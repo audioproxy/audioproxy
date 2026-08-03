@@ -48,6 +48,7 @@ defmodule AudioProxy.RenderSemaphoreTest do
     # `fake_ffmpeg.sh` keys its behaviour off the basename: this one renders
     # nothing, ever. See its header.
     File.write!(Path.join(tmp_dir, "hang.wav"), "RIFF-fake-wav-bytes")
+    File.write!(Path.join(tmp_dir, "other.wav"), "RIFF-fake-wav-bytes")
 
     put_config(%{
       key: @key,
@@ -79,6 +80,20 @@ defmodule AudioProxy.RenderSemaphoreTest do
       # subscriber cannot tell the difference, which is the design.
       assert Enum.count(coordinators, &(phase(&1) == :rendering)) == 2
       assert Enum.count(coordinators, &(phase(&1) == :queued)) == 2
+    end
+
+    test "a finished render gives its slot back before the linger, not after" do
+      put_config(%{max_concurrency: 1, queue_size: 4})
+
+      key = unique_key()
+      assert subscribe_and_collect(key, ["emit", "63"]).outcome == :ok
+
+      # The coordinator is still registered — it lingers about a second so a
+      # straggler gets the finished bytes — but ffmpeg is gone, so the slot must
+      # be back. Held across the linger, a 200 ms render would occupy its slot
+      # for 1.2 s and `AP_MAX_CONCURRENCY` would buy a sixth of what it says.
+      assert registered(key) != nil
+      assert %{held: 0} = Semaphore.stats()
     end
 
     test "everyone coalescing on one key shares its single slot" do
@@ -162,6 +177,33 @@ defmodule AudioProxy.RenderSemaphoreTest do
       # thing to prove is that starting it late loses nothing: the store holds
       # the whole stream, not the tail after the grant.
       wait_until(fn -> stored(key) == @paced_bytes end)
+    end
+
+    test "a cache hit is served with every slot busy and the queue full" do
+      put_config(%{
+        max_concurrency: 1,
+        queue_size: 4,
+        serve_mode: :proxy,
+        variant_store: {:file, store_root()}
+      })
+
+      # Render it once, so the store holds it.
+      assert render("/f:mp3/plain/local://piece.wav").status == 200
+      wait_until(fn -> render("/f:mp3/plain/local://piece.wav") |> hit?() end)
+
+      # Now take the only slot and leave nowhere to wait, so anything needing a
+      # render would be refused outright.
+      put_config(%{max_concurrency: 1, queue_size: 0})
+      hold_a_slot()
+      assert render("/f:mp3/plain/local://other.wav").status == 429
+
+      # A hit needs no encoder, so it must not queue behind one. This is where
+      # the cap earns most of its keep: a saturated box still serves everything
+      # it has already rendered, at full speed.
+      conn = render("/f:mp3/plain/local://piece.wav")
+
+      assert conn.status == 200
+      assert get_resp_header(conn, "x-audio-proxy") == ["HIT"]
     end
 
     test "a queued render every client abandoned stops instead of rendering for the cache" do
@@ -345,6 +387,8 @@ defmodule AudioProxy.RenderSemaphoreTest do
   end
 
   defp stored?(key), do: stored(key) != nil
+
+  defp hit?(conn), do: get_resp_header(conn, "x-audio-proxy") == ["HIT"]
 
   # A subscriber that exists and does nothing else, so the render it started
   # stays up until this test says otherwise. Returns the coordinator.
