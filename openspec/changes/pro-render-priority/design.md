@@ -1,6 +1,6 @@
 ## Context
 
-Third `pro-` slice. The one that touches core — deliberately confined to a single contract: the semaphore's queue-ordering rule (a delta on `render-concurrency`). Everything user-facing rides the already-PRO warm surface.
+Third `pro-` slice, now a pure consumer: the queue-ordering contract it needs lives in the OSS change `add-semaphore-classes` (extracted so the semaphore's core contract is reviewed in the package that owns it). Everything user-facing rides the already-PRO warm surface.
 
 ## Goals / Non-Goals
 

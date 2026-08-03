@@ -5,9 +5,8 @@ Prospective-customer request, verbatim in spirit: new episodes from top-tier pod
 ## What Changes
 
 - Warm batch entries (and whole batches) accept a `priority` field: `high` | `normal` (default) | `low`.
-- The render semaphore's wait queue becomes class-aware: `interactive` (any live GET render — always first) > `high` > `normal` > `low`; FIFO within a class. Strict ordering, no aging in v1 (a starved `low` backfill is the *point* of the feature; correctness is unaffected — lazy render remains the safety net).
-- Overflow policy becomes priority-aware: when the queue is full and a higher-class entry arrives, the newest lowest-class *warm* entry is evicted (reported `rejected`, retryable) rather than the arrival being refused; interactive entries are never evicted.
-- Telemetry: queue-depth measurements gain a class dimension (the metrics slice picks the label up for free).
+- Warm entries speak the admission classes `add-semaphore-classes` provides (`high`/`normal`/`low`; `interactive` remains unspellable — live renders always outrank warms). Strict ordering, no aging (a starved `low` backfill is the *point*; lazy render remains the safety net).
+- Displaced warm entries (the semaphore's class-aware overflow) surface in the batch report as `rejected`, retryable.
 
 ## Capabilities
 
@@ -17,12 +16,12 @@ Prospective-customer request, verbatim in spirit: new episodes from top-tier pod
 
 ### Modified Capabilities
 
-- `render-concurrency`: the semaphore's queue SHALL support ordered admission classes with FIFO inside each class (delta on `add-render-semaphore`'s spec — the one place this feature touches core, kept to the queue-ordering contract).
+<!-- none — the queue-classes contract moved to the OSS change `add-semaphore-classes`; this slice is a pure consumer -->
 
 ## Impact
 
-- New: priority parsing in the warm payload, class-aware queue in the semaphore, per-class telemetry measurements.
-- Modified capability: `render-concurrency` (above). No other change or spec is amended.
-- Depends on: `add-render-semaphore` (the queue), `pro-warm-endpoint` (the signed surface priorities ride on).
+- New: priority parsing in the warm payload; class plumbed into the coordinator's acquire.
+- No other change or spec is amended.
+- Depends on: `add-semaphore-classes` (OSS — the admission classes it speaks), `pro-warm-endpoint` (the signed surface priorities ride on).
 - Explicitly not in scope: a priority URL option on interactive renders (would either pollute cache keys or require a cache-key-exempt option class — recorded as an open question in design.md); priority on `/{sig}/uploaded` policy triggers (arrives with upload policies, which will pass a policy-configured priority through this machinery).
 - Position: PRO track, after `pro-warm-endpoint`.
