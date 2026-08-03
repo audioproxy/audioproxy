@@ -89,7 +89,12 @@ defmodule AudioProxy.Ffmpeg.RenderLifecycleTest do
 
       {elapsed, :ok} = :timer.tc(fn -> Render.cancel(render) end, :millisecond)
 
-      refute alive?(os_pid), "a TERM-ignoring subprocess survived cancel/1"
+      # `gone_within?` rather than a bare `alive?`, for the reason every other
+      # death assertion in this file uses it: SIGKILL delivery and reaping are
+      # the kernel's business, and on a loaded machine they can outlast the
+      # reap grace `cancel/1` waits out. What is under test is that the process
+      # dies and that the escalation ran, not that the kernel is prompt.
+      assert gone_within?(os_pid, @deadline), "a TERM-ignoring subprocess survived cancel/1"
 
       # The elapsed time is the assertion that matters, and it is why this test
       # is not merely a slower copy of the one above: a process that died on
@@ -137,15 +142,20 @@ defmodule AudioProxy.Ffmpeg.RenderLifecycleTest do
       # been answered 504.
       #
       # `AP_RENDER_TIMEOUT` bounds how long ffmpeg may run. ffmpeg has stopped.
+      #
+      # The two numbers are a ratio, not magic: the timeout has to be long
+      # enough that writing 4 MB and exiting comfortably beats it on a loaded
+      # machine — at 300 ms it did not, and the suite flaked as this test's own
+      # regression — and the wait has to be several times the timeout, so that
+      # a timer still armed would certainly have fired by the assertion.
       {:ok, render} =
         Render.start_link(
           executable: fake_cmd,
           args: ["emit", "#{4 * 1_048_576}"],
-          timeout: 300
+          timeout: 500
         )
 
-      # Long enough for the subprocess to exit and the old timer to have fired.
-      Process.sleep(600)
+      Process.sleep(1_500)
 
       refute_received {:error, ^render, %{class: :timeout}}
 
