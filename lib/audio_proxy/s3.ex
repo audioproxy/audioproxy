@@ -34,6 +34,18 @@ defmodule AudioProxy.S3 do
   limitation (README), not an oversight, and the place to change it is
   `config/0` here.
 
+  ## Addressing is configured, not inferred
+
+  A request names its bucket in the host (`bucket.host/key`, virtual-hosted)
+  or in the path (`host/bucket/key`, path-style). `AP_S3_ADDRESSING` picks,
+  defaulting to virtual-hosted with no custom endpoint and path-style with
+  one — AWS requires the former in regions launched after 2019, and every
+  S3-compatible store this project documents is deployed on the latter.
+
+  It is threaded into both places `ex_aws` reads it, which are not the same
+  place: the request path takes it from the config map, `presigned_url/5`
+  from its own options. See `sign_get/3`.
+
   ## Errors are data
 
   Every function returns `{:ok, _}` or `{:error, t:error/0}`. `:not_found`
@@ -119,11 +131,20 @@ defmodule AudioProxy.S3 do
   defp sign_get(bucket, key, opts) do
     expires_in = Keyword.get(opts, :expires_in, Config.get(:presign_ttl))
 
+    overrides = config()
+
     # `presigned_url/5` signs locally rather than issuing a request, so it
     # wants a built `%ExAws.Config{}` where the request path takes overrides.
-    signing_config = ExAws.Config.new(:s3, config())
+    signing_config = ExAws.Config.new(:s3, overrides)
 
-    case ExAws.S3.presigned_url(signing_config, :get, bucket, key, expires_in: expires_in) do
+    # Addressing is read from the *options* here and from the *config map* on
+    # the request path — two separate readers inside `ex_aws`. Both are
+    # threaded from the one keyword list so they cannot drift: the host is
+    # covered by the SigV4 signature, so a presigned URL addressed differently
+    # from the request that signed it is not merely wrong, it is unverifiable.
+    signing_opts = [expires_in: expires_in, virtual_host: overrides[:virtual_host]]
+
+    case ExAws.S3.presigned_url(signing_config, :get, bucket, key, signing_opts) do
       {:ok, url} -> {:ok, url}
       {:error, reason} -> {:error, {:transport, reason}}
     end
@@ -436,30 +457,48 @@ defmodule AudioProxy.S3 do
   # minimum, so handing it the raw stream produces a hundred undersized parts
   # and `EntityTooSmall` at completion. Grouping is therefore ours to do.
   #
+  # Every part but the last is *exactly* `@part_size`, not merely at least it.
+  # Flushing whatever the buffer held when it crossed the threshold would make
+  # a part's size depend on where chunk boundaries happen to fall, and some
+  # stores — Cloudflare R2 among them — reject a multipart upload whose parts
+  # are not all the same size. A chunk straddling the boundary is split, and
+  # its tail carried into the next part.
+  #
   # Memory stays bounded at one part plus one chunk, which is the same bound
-  # the buffering above already establishes.
+  # the buffering above already establishes: the accumulator is iodata and is
+  # flattened once per part, not once per chunk.
   defp into_parts(stream) do
-    Stream.chunk_while(
+    Stream.transform(
       stream,
-      {[], 0},
+      fn -> {[], 0} end,
       fn chunk, {buffered, size} ->
         buffered = [buffered, chunk]
         size = size + byte_size(chunk)
 
         if size >= @part_size do
-          {:cont, IO.iodata_to_binary(buffered), {[], 0}}
+          split_parts(IO.iodata_to_binary(buffered), [])
         else
-          {:cont, {buffered, size}}
+          {[], {buffered, size}}
         end
       end,
       fn
-        # A zero-length tail is not emitted: S3 rejects an empty part, and
-        # the parts already sent are the whole object.
-        {_buffered, 0} -> {:cont, {[], 0}}
-        {buffered, _size} -> {:cont, IO.iodata_to_binary(buffered), {[], 0}}
-      end
+        # A zero-length tail is not emitted: S3 rejects an empty part, and the
+        # parts already sent are the whole object.
+        {_buffered, 0} -> {[], {[], 0}}
+        {buffered, _size} -> {[IO.iodata_to_binary(buffered)], {[], 0}}
+      end,
+      fn _acc -> :ok end
     )
   end
+
+  # Peels whole parts off the front of the buffer — more than one when a
+  # single chunk is larger than a part — and hands the remainder back as the
+  # accumulator for the next chunk.
+  defp split_parts(<<part::binary-size(@part_size), rest::binary>>, parts) do
+    split_parts(rest, [part | parts])
+  end
+
+  defp split_parts(rest, parts), do: {Enum.reverse(parts), {[rest], byte_size(rest)}}
 
   # Resuming with `{:halt, _}` is what lets the *source* clean up: a suspended
   # `Enumerable.reduce/3` leaves the enumerable open, and a
@@ -681,7 +720,11 @@ defmodule AudioProxy.S3 do
       json_codec: JSON,
       # Ours rather than `ex_aws`'s bundled hackney adapter, which cannot
       # read hackney 4.0's bodyless responses. See `AudioProxy.S3.HttpClient`.
-      http_client: AudioProxy.S3.HttpClient
+      http_client: AudioProxy.S3.HttpClient,
+      # Read by `ExAws.Operation.S3`'s `add_bucket_to_path/2` on the request
+      # path, and passed to `presigned_url/5` by `sign_get/3` — see there for
+      # why the two must agree.
+      virtual_host: s3.addressing == :virtual
     ] ++ security_token(s3.session_token) ++ endpoint(s3.endpoint)
   end
 
@@ -692,10 +735,8 @@ defmodule AudioProxy.S3 do
   defp security_token(nil), do: []
   defp security_token(token), do: [security_token: token]
 
-  # Virtual-hosted against AWS (path-style is deprecated there), path-style
-  # against a custom endpoint — MinIO, localstack and the rest are reached by
-  # hostname and port, and inventing `bucket.minio` would need DNS nobody
-  # configured. `ex_aws` wants the scheme with its `://` attached.
+  # The origin only; addressing is `virtual_host` above and independent of it.
+  # `ex_aws` wants the scheme with its `://` attached.
   defp endpoint(nil), do: []
 
   defp endpoint(%URI{scheme: scheme, host: host, port: port}) do

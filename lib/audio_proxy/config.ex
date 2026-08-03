@@ -82,6 +82,13 @@ defmodule AudioProxy.Config do
   @log_levels [:debug, :info, :warning, :error]
   @default_log_level :info
 
+  # The two ways an S3 request can name its bucket. `:virtual` puts it in the
+  # host (`bucket.host/key`), `:path` in the path (`host/bucket/key`). No
+  # third style exists today, but the enum leaves room for one — and reads
+  # better in a config table than a boolean whose default depends on another
+  # variable.
+  @s3_addressing_styles [:virtual, :path]
+
   @truthy ~w(1 true yes on)
   @falsy ~w(0 false no off)
 
@@ -109,13 +116,18 @@ defmodule AudioProxy.Config do
   All of `region`, `access_key_id` and `secret_access_key` are `nil` together
   when S3 is not configured — the partial set is refused at boot, so anything
   that finds one of them finds all three.
+
+  `addressing` and `ca_bundle` are independent of the credentials: both have a
+  usable value whether or not S3 is configured at all.
   """
   @type s3 :: %{
           region: String.t() | nil,
           access_key_id: String.t() | nil,
           secret_access_key: String.t() | nil,
           session_token: String.t() | nil,
-          endpoint: URI.t() | nil
+          endpoint: URI.t() | nil,
+          addressing: :virtual | :path,
+          ca_bundle: String.t() | nil
         }
 
   @doc """
@@ -185,6 +197,10 @@ defmodule AudioProxy.Config do
   @doc "The levels `AP_LOG_LEVEL` accepts."
   @spec log_levels() :: [atom()]
   def log_levels, do: @log_levels
+
+  @doc "The addressing styles `AP_S3_ADDRESSING` accepts."
+  @spec s3_addressing_styles() :: [atom()]
+  def s3_addressing_styles, do: @s3_addressing_styles
 
   ## Parsers
 
@@ -296,14 +312,28 @@ defmodule AudioProxy.Config do
 
     credentials!(id, secret, region)
 
+    endpoint = s3_endpoint(env, "AP_S3_ENDPOINT")
+
     %{
       region: region,
       access_key_id: id,
       secret_access_key: secret,
       session_token: fetch(env, "AWS_SESSION_TOKEN"),
-      endpoint: s3_endpoint(env, "AP_S3_ENDPOINT")
+      endpoint: endpoint,
+      addressing:
+        enum(env, "AP_S3_ADDRESSING", @s3_addressing_styles, default_addressing(endpoint)),
+      ca_bundle: readable_file(env, "AP_S3_CA_BUNDLE")
     }
   end
+
+  # The asymmetry is the point. No endpoint means AWS, where virtual-hosted is
+  # what regions launched after 2019 accept at all. An endpoint means an
+  # S3-compatible store, and every one this project documents — MinIO, Ceph,
+  # B2, DigitalOcean, Scaleway, Hetzner — is working today on path-style.
+  # Defaulting a custom endpoint to virtual-hosted would break every existing
+  # deployment to fix one that does not exist yet.
+  defp default_addressing(nil), do: :virtual
+  defp default_addressing(%URI{}), do: :path
 
   defp credentials!(nil, nil, _region), do: :ok
 
@@ -427,6 +457,26 @@ defmodule AudioProxy.Config do
 
         true ->
           expanded
+      end
+    end
+  end
+
+  # Readability is proved by reading, not by mode bits — which say nothing
+  # about a secret mounted for another user or a path that is a directory. The
+  # contents are discarded; `:ssl` reads the file itself on the first
+  # handshake, and the point here is that a bad path fails at boot rather than
+  # on the first upload, the same posture as `AP_LOCAL_ROOT`.
+  defp readable_file(env, var) do
+    with value when is_binary(value) <- fetch(env, var) do
+      expanded = Path.expand(value)
+
+      case File.read(expanded) do
+        {:ok, _contents} ->
+          expanded
+
+        {:error, reason} ->
+          raise Error,
+                "#{var} must name a readable file, got: #{inspect(value)} (#{inspect(reason)})"
       end
     end
   end
