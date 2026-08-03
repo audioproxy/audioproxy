@@ -32,7 +32,7 @@ defmodule AudioProxy.S3 do
   effect worth naming: **there is no IMDS lookup**, so an EC2 instance role
   does not work and credentials must be supplied. That is a documented
   limitation (README), not an oversight, and the place to change it is
-  `config/1` here.
+  `config/0` here.
 
   ## Errors are data
 
@@ -44,6 +44,8 @@ defmodule AudioProxy.S3 do
   """
 
   alias AudioProxy.Config
+
+  require Logger
 
   @typedoc "A bucket name."
   @type bucket :: String.t()
@@ -74,10 +76,18 @@ defmodule AudioProxy.S3 do
       `:not_found` on purpose; see the moduledoc.
     * `{:http, status, body}` — any other status.
     * `{:transport, reason}` — nothing came back.
+    * `:not_configured` — no credentials. Refused here rather than passed to
+      `ex_aws` as nils, which it reads as "not provided" and answers by
+      walking its own provider chain — ending at an instance-role lookup
+      against 169.254.169.254 that, on a host where that address is not
+      routed, hangs rather than failing.
+    * `:invalid_range` — `get_stream/3` only.
   """
   @type error ::
           :not_found
           | :access_denied
+          | :not_configured
+          | :invalid_range
           | {:http, non_neg_integer(), binary()}
           | {:transport, term()}
 
@@ -92,6 +102,10 @@ defmodule AudioProxy.S3 do
   # one `PutObject` instead — see `buffer_first_part/1`.
   @part_size 5 * 1024 * 1024
 
+  # Set when the chunk source unwinds itself, so its cleanup is not run twice.
+  # See `resume_next/1`.
+  @source_unwound :audio_proxy_s3_source_unwound
+
   @doc """
   A presigned GET URL for an object.
 
@@ -99,6 +113,10 @@ defmodule AudioProxy.S3 do
   """
   @spec presign_get(bucket(), key(), keyword()) :: {:ok, String.t()} | {:error, error()}
   def presign_get(bucket, key, opts \\ []) do
+    if configured?(), do: sign_get(bucket, key, opts), else: {:error, :not_configured}
+  end
+
+  defp sign_get(bucket, key, opts) do
     expires_in = Keyword.get(opts, :expires_in, Config.get(:presign_ttl))
 
     # `presigned_url/5` signs locally rather than issuing a request, so it
@@ -114,6 +132,10 @@ defmodule AudioProxy.S3 do
   @doc "Object existence, size, ETag and metadata."
   @spec head(bucket(), key()) :: {:ok, object()} | {:error, error()}
   def head(bucket, key) do
+    if configured?(), do: head_object(bucket, key), else: {:error, :not_configured}
+  end
+
+  defp head_object(bucket, key) do
     bucket
     |> ExAws.S3.head_object(key)
     |> request()
@@ -129,28 +151,74 @@ defmodule AudioProxy.S3 do
   Options: `:content_type`, `:cache_control`, and `:metadata` (a map written
   as `x-amz-meta-*`).
 
-  `ExAws.S3.upload/4` runs the multipart protocol, including
-  `AbortMultipartUpload` when a part fails, so a failed write leaves neither
-  a partial object nor billable orphan parts. A stream that raises — which is
-  how `AudioProxy.VariantStore.Tee` signals a cancelled render — is caught
-  here and reported, after the abort has run.
+  A stream that ends inside one part is a single `PutObject`; anything longer
+  is a multipart upload, **aborted** on every failure path so a failed write
+  leaves neither a partial object nor billable orphan parts.
+
+  ## Why the multipart protocol is driven here rather than by `ExAws.S3.upload/4`
+
+  Because `upload/4` does not abort. `ExAws.S3.Upload.perform/2` initiates,
+  uploads its parts, and on a part error simply returns that error — the
+  upload id goes out of scope and the initiated upload, with every part
+  already sent, stays in the bucket. `ex_aws_s3` defines
+  `abort_multipart_upload/3` and never calls it. Incomplete multipart uploads
+  do not appear in a bucket listing and are billed until a lifecycle rule
+  removes them, which makes this the one place in the S3 surface where
+  trusting the library costs money quietly.
+
+  `upload/4` has a second problem on the same path: it collects task results
+  with `Enum.map(fn {:ok, val} -> val end)`, which has no clause for the
+  `{:exit, reason}` a part-level timeout produces, so a slow part raises
+  `FunctionClauseError` from inside the dependency instead of returning an
+  error.
+
+  So the four operations are sequenced here. Everything underneath —
+  signing, request building, XML parsing, retries — is still `ex_aws`; what
+  is ours is the guarantee that an upload which does not complete is aborted. Parts go up one at a time, which keeps the memory
+  bound honest at one part plus one chunk and costs nothing worth having:
+  the render produces bytes far slower than S3 accepts them.
+
+  Operators should still set a lifecycle rule expiring incomplete multipart
+  uploads. This code aborts on every path it can see; a hard kill of the VM
+  is not one of them.
   """
   @spec put_stream(bucket(), key(), Enumerable.t(), keyword()) :: :ok | {:error, error() | term()}
   def put_stream(bucket, key, chunks, opts \\ []) do
+    if configured?() do
+      write(bucket, key, chunks, opts)
+    else
+      {:error, :not_configured}
+    end
+  end
+
+  defp write(bucket, key, chunks, opts) do
     case buffer_first_part(chunks) do
-      {:whole, iodata} -> put_object(bucket, key, IO.iodata_to_binary(iodata), opts)
-      {:streamed, stream} -> upload(bucket, key, stream, opts)
+      {:whole, iodata} ->
+        put_object(bucket, key, IO.iodata_to_binary(iodata), opts)
+
+      # The upload is initiated *before* the stream is composed, so there is
+      # exactly one path on which the suspended source is abandoned without
+      # ever being enumerated — and it halts it explicitly. Compose first and
+      # a failed initiate would drop the continuation on the floor, leaving
+      # the source's `after_fun` unrun and whatever it holds open leaked.
+      {:streamed, buffered, continuation} ->
+        case initiate(bucket, key, opts) do
+          {:ok, upload_id} ->
+            buffered
+            |> Stream.concat(resume(continuation))
+            |> into_parts()
+            |> multipart(bucket, key, upload_id)
+
+          {:error, reason} ->
+            halt(continuation)
+            {:error, reason}
+        end
     end
   rescue
-    # The chunk stream raising is the tee's abort signal. `ExAws.S3.Upload`
-    # aborts the multipart upload on its way out, so by the time this is
-    # reached there is nothing left in the bucket to clean up.
+    # The chunk stream raising is the tee's signal that a render failed or was
+    # cancelled. Reached only for a raise *before* the upload is initiated —
+    # once it is, `multipart/4` owns the abort.
     exception -> {:error, exception}
-  catch
-    # `throw` and `exit` unwind past `rescue`. Re-raised rather than turned
-    # into a return value: the point is not to swallow a shutdown something
-    # else initiated.
-    kind, reason -> :erlang.raise(kind, reason, __STACKTRACE__)
   end
 
   @doc """
@@ -167,17 +235,34 @@ defmodule AudioProxy.S3 do
   @spec get_stream(bucket(), key(), {non_neg_integer(), non_neg_integer()} | nil) ::
           {:ok, Enumerable.t()} | {:error, error()}
   def get_stream(bucket, key, range \\ nil) do
-    with {:ok, %{size: size}} <- head(bucket, key) do
-      # A zero-length object has no satisfiable range at all: `bytes=0-0`
-      # asks for a byte that is not there, and S3 answers 416 rather than an
-      # empty body. It is a legitimate variant — a render can produce no
-      # bytes — so it streams as nothing rather than failing.
-      case range || {0, size - 1} do
-        {_first, last} when last < 0 -> {:ok, []}
-        {first, last} -> {:ok, ranged_stream(bucket, key, first, last)}
-      end
+    with true <- configured?() or {:error, :not_configured},
+         {:ok, %{size: size}} <- head(bucket, key),
+         {:ok, slice} <- slice(range, size) do
+      {:ok, stream_slice(bucket, key, slice)}
     end
   end
+
+  # The range is resolved against the object's actual size *before* any read,
+  # because getting this wrong is not a clean failure: an unclamped `last`
+  # past the end means the first GET returns fewer bytes than asked for, the
+  # offset advances short of `last`, and the *second* GET starts past the end
+  # and draws a 416 — raised from inside a stream whose caller has already
+  # begun sending a 200.
+  #
+  # Semantics match `AudioProxy.VariantStore.Local`, which is what makes the
+  # two backends interchangeable: a `last` past the end is truncated (RFC 9110
+  # §14), a `first` at or past the end is invalid, and an inverted range is
+  # invalid rather than silently empty.
+  defp slice(nil, 0), do: {:ok, :empty}
+  defp slice(nil, size), do: {:ok, {0, size - 1}}
+
+  defp slice({first, last}, size)
+       when is_integer(first) and is_integer(last) and
+              first >= 0 and first <= last and first < size do
+    {:ok, {first, min(last, size - 1)}}
+  end
+
+  defp slice(_range, _size), do: {:error, :invalid_range}
 
   ## Writing
 
@@ -191,13 +276,118 @@ defmodule AudioProxy.S3 do
     end
   end
 
-  defp upload(bucket, key, stream, opts) do
+  # Initiate, then parts, then complete — and abort on anything that is not a
+  # completion, including an exception, a `throw` or an `exit` from the chunk
+  # stream. See the `put_stream/4` doc for why this is not `ExAws.S3.upload/4`.
+  defp multipart(stream, bucket, key, upload_id) do
+    try do
+      with {:ok, parts} <- upload_parts(bucket, key, upload_id, stream),
+           :ok <- complete(bucket, key, upload_id, parts) do
+        :ok
+      else
+        {:error, reason} ->
+          abort(bucket, key, upload_id)
+          {:error, reason}
+      end
+    rescue
+      # The chunk stream raising mid-upload: a render that failed or was
+      # cancelled. This is the path that leaves orphaned parts if nobody
+      # aborts, which is exactly what `ExAws.S3.upload/4` does not do.
+      exception ->
+        abort(bucket, key, upload_id)
+        {:error, exception}
+    catch
+      # `throw` and `exit` unwind past `rescue`, and `exit` is the realistic
+      # one — a task timeout or a linked crash inside the chunk stream.
+      # Aborted, then re-raised: the point is the cleanup, not swallowing a
+      # shutdown something else initiated.
+      kind, reason ->
+        abort(bucket, key, upload_id)
+        :erlang.raise(kind, reason, __STACKTRACE__)
+    end
+  end
+
+  defp initiate(bucket, key, opts) do
+    bucket
+    |> ExAws.S3.initiate_multipart_upload(key, upload_opts(opts))
+    |> request()
+    |> case do
+      {:ok, %{body: %{upload_id: upload_id}}} when is_binary(upload_id) and upload_id != "" ->
+        {:ok, upload_id}
+
+      {:ok, _response} ->
+        {:error, {:http, 200, "InitiateMultipartUpload response carried no UploadId"}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # Sequential on purpose: one part in flight keeps the memory bound at one
+  # part plus one chunk, and a render never produces bytes faster than S3
+  # accepts them.
+  defp upload_parts(bucket, key, upload_id, stream) do
     stream
-    |> ExAws.S3.upload(bucket, key, upload_opts(opts))
+    |> Stream.with_index(1)
+    |> Enum.reduce_while({:ok, []}, fn {part, number}, {:ok, parts} ->
+      case upload_part(bucket, key, upload_id, number, part) do
+        {:ok, etag} -> {:cont, {:ok, [{number, etag} | parts]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, parts} -> {:ok, Enum.reverse(parts)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp upload_part(bucket, key, upload_id, number, body) do
+    bucket
+    |> ExAws.S3.upload_part(key, upload_id, number, body)
+    |> request()
+    |> case do
+      {:ok, %{headers: headers}} ->
+        case Enum.find(headers, fn {name, _value} -> String.downcase(name) == "etag" end) do
+          {_name, etag} -> {:ok, etag}
+          # Completing without the ETag S3 gave us would be rejected, so this
+          # fails here rather than building a completion body with a nil in it.
+          nil -> {:error, {:http, 200, "UploadPart response carried no ETag"}}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp complete(bucket, key, upload_id, parts) do
+    bucket
+    |> ExAws.S3.complete_multipart_upload(key, upload_id, parts)
     |> request()
     |> case do
       {:ok, _response} -> :ok
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Best-effort by necessity: if the abort itself fails there is nothing left
+  # to try, and the caller is already reporting a failure. Logged at warning
+  # so an operator can find the orphan, since a bucket listing will not show
+  # it.
+  defp abort(bucket, key, upload_id) do
+    bucket
+    |> ExAws.S3.abort_multipart_upload(key, upload_id)
+    |> request()
+    |> case do
+      {:ok, _response} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "s3: could not abort multipart upload, parts may be orphaned and billed " <>
+            "(bucket=#{bucket} key=#{key} upload_id=#{upload_id} reason=#{inspect(reason)})"
+        )
+
+        :ok
     end
   end
 
@@ -219,14 +409,11 @@ defmodule AudioProxy.S3 do
       {:done, {buffered, _size}} ->
         {:whole, Enum.reverse(buffered)}
 
-      # There is more, so it is a genuine multipart upload. The buffered
-      # prefix is replayed ahead of the rest, which resumes from exactly
-      # where the peek stopped.
+      # There is more, so it is a genuine multipart upload. The pieces are
+      # handed back uncomposed: the caller initiates first, and must halt the
+      # continuation if it decides not to stream after all.
       {:suspended, {buffered, _size}, continuation} ->
-        {:streamed,
-         Enum.reverse(buffered)
-         |> Stream.concat(resume(continuation))
-         |> into_parts()}
+        {:streamed, Enum.reverse(buffered), continuation}
 
       {:halted, {buffered, _size}} ->
         {:whole, Enum.reverse(buffered)}
@@ -274,32 +461,80 @@ defmodule AudioProxy.S3 do
     )
   end
 
+  # Resuming with `{:halt, _}` is what lets the *source* clean up: a suspended
+  # `Enumerable.reduce/3` leaves the enumerable open, and a
+  # `Stream.resource/3` — which is what a render tee is — runs its `after_fun`
+  # only when its own reduce finishes or is halted.
+  defp halt(continuation), do: continuation.({:halt, {[], 0}})
+
   # One chunk per resumption. `into_parts/1` regroups them.
+  #
+  # The state is `{:live, continuation}` until the source reports it is
+  # finished, then `{:done, nil}` — which is what tells `after_fun` whether
+  # there is still something suspended to halt.
   defp resume(continuation) do
     Stream.resource(
-      fn -> continuation end,
-      fn
-        nil ->
-          {:halt, nil}
-
-        continuation ->
-          case continuation.({:cont, {[], 0}}) do
-            {:suspended, {buffered, _size}, next} -> {Enum.reverse(buffered), next}
-            {:done, {buffered, _size}} -> {Enum.reverse(buffered), nil}
-            {:halted, {buffered, _size}} -> {Enum.reverse(buffered), nil}
-          end
+      fn ->
+        Process.delete(@source_unwound)
+        {:live, continuation}
       end,
-      fn _continuation -> :ok end
+      &resume_next/1,
+      &resume_cleanup/1
     )
+  end
+
+  defp resume_next({:done, _finished}), do: {:halt, {:done, nil}}
+
+  defp resume_next({:live, continuation}) do
+    case continuation.({:cont, {[], 0}}) do
+      {:suspended, {buffered, _size}, next} -> {Enum.reverse(buffered), {:live, next}}
+      {:done, {buffered, _size}} -> {Enum.reverse(buffered), {:done, nil}}
+      {:halted, {buffered, _size}} -> {Enum.reverse(buffered), {:done, nil}}
+    end
+  catch
+    # An exception, `throw` or `exit` raised *by the source* unwinds the
+    # source's own `Stream.resource`, which means its `after_fun` has already
+    # run. Recorded so `resume_cleanup/1` does not then halt it a second time
+    # and run that cleanup twice — a double `Port.close/1` raises, and doing
+    # it here would raise *during* unwinding and mask the original error.
+    #
+    # The process dictionary is the one place a flag can survive an unwind
+    # without threading state the `Stream.resource` contract has nowhere to
+    # put. This is single-process, single-upload scope, which is the narrow
+    # case it is actually good for.
+    kind, reason ->
+      Process.put(@source_unwound, true)
+      :erlang.raise(kind, reason, __STACKTRACE__)
+  end
+
+  # Reached whether the stream ran out, was abandoned mid-upload, or the
+  # reduction raised — `Stream.resource/3` guarantees the `after_fun` on all
+  # three. The source is halted only when it is still suspended *and* did not
+  # unwind itself, so its own cleanup runs exactly once on every path.
+  defp resume_cleanup({:done, _finished}) do
+    Process.delete(@source_unwound)
+    :ok
+  end
+
+  defp resume_cleanup({:live, continuation}) do
+    unwound? = Process.get(@source_unwound, false)
+    Process.delete(@source_unwound)
+
+    unless unwound?, do: halt(continuation)
+
+    :ok
   end
 
   ## Reading
 
+  # A zero-length object is a legitimate variant — a render can produce no
+  # bytes — and has no satisfiable range, so it streams as nothing rather
+  # than asking S3 for a byte that is not there.
+  defp stream_slice(_bucket, _key, :empty), do: []
+
   # One ranged GET per chunk. `Stream.resource/3` is not needed — there is no
   # resource to release, only arithmetic — so this is a plain unfold.
-  defp ranged_stream(_bucket, _key, first, last) when first > last, do: []
-
-  defp ranged_stream(bucket, key, first, last) do
+  defp stream_slice(bucket, key, {first, last}) do
     Stream.unfold(first, fn
       offset when offset > last ->
         nil
@@ -308,10 +543,21 @@ defmodule AudioProxy.S3 do
         chunk_last = min(offset + @read_chunk - 1, last)
 
         case get_range(bucket, key, offset, chunk_last) do
-          {:ok, body} -> {body, offset + byte_size(body)}
-          # Mid-stream, with a response already going out to the client,
-          # there is nothing to return an error value *to*.
-          {:error, reason} -> raise "s3: read failed at byte #{offset}: #{inspect(reason)}"
+          # A conforming store cannot answer a satisfiable range with nothing,
+          # and `slice/2` has already established the range is satisfiable —
+          # but advancing by zero would spin this unfold forever, so it ends
+          # instead.
+          {:ok, ""} ->
+            nil
+
+          {:ok, body} ->
+            {body, offset + byte_size(body)}
+
+          # Mid-stream, with a response already going out to the client, there
+          # is nothing to return an error value *to*. Reachable only if the
+          # object changed between the `head/2` above and this read.
+          {:error, reason} ->
+            raise "s3: read failed at byte #{offset}: #{inspect(reason)}"
         end
     end)
   end
@@ -405,11 +651,21 @@ defmodule AudioProxy.S3 do
   ## Configuration
 
   @doc """
+  Reports whether credentials are configured.
+
+  Checked before every operation, because `ex_aws` treats a nil credential as
+  "not provided" rather than as an error — see `t:error/0`.
+  """
+  @spec configured?() :: boolean()
+  def configured?, do: Config.get(:s3).access_key_id != nil
+
+  @doc """
   The `ex_aws` config overrides for this deployment.
 
   Public so a test can assert on the addressing decision without issuing a
   request.
   """
+
   @spec config() :: keyword()
   def config do
     s3 = Config.get(:s3)

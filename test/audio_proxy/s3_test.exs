@@ -150,9 +150,12 @@ defmodule AudioProxy.S3Test do
       assert object.metadata["etag"] == ~s("cachekey")
     end
 
-    test "a stream that raises leaves no object behind" do
-      # The tee's cancellation signal. ex_aws aborts the multipart upload on
-      # its way out, so nothing is readable and no parts accrue.
+    test "a stream that raises aborts the upload, leaving no object and no parts" do
+      # The object being absent is the weak half of this: it is absent simply
+      # because the upload was never completed. The load-bearing assertion is
+      # that no *pending* upload remains — incomplete multipart uploads do not
+      # show up in a bucket listing and are billed until something removes
+      # them, which is exactly what ExAws.S3.upload/4 leaks.
       key = unique_key("aborted.bin")
 
       chunks =
@@ -163,6 +166,39 @@ defmodule AudioProxy.S3Test do
 
       assert {:error, %RuntimeError{}} = S3.put_stream(@bucket, key, chunks)
       assert S3.head(@bucket, key) == {:error, :not_found}
+      assert pending_uploads(key) == []
+    end
+
+    test "a stream that exits aborts the upload, then keeps exiting" do
+      # `exit` unwinds past `rescue` — a task timeout or a linked crash. The
+      # exit is re-raised rather than swallowed, but not before the abort.
+      key = unique_key("exited.bin")
+
+      chunks =
+        Stream.concat(
+          for(_ <- 1..150, do: :binary.copy("a", 64_000)),
+          Stream.map([:boom], fn _ -> exit(:render_cancelled) end)
+        )
+
+      assert catch_exit(S3.put_stream(@bucket, key, chunks)) == :render_cancelled
+      assert pending_uploads(key) == []
+    end
+
+    test "a failing part aborts the upload" do
+      # Bad credentials swapped in after the peek, so initiate succeeds and
+      # the first part is rejected.
+      key = unique_key("failed-part.bin")
+
+      chunks =
+        Stream.concat(
+          for(_ <- 1..80, do: :binary.copy("a", 64_000)),
+          Stream.map([:once], fn _ ->
+            put_config(%{s3: %{AudioProxy.Config.get(:s3) | secret_access_key: "wrong"}})
+            :binary.copy("b", 64_000)
+          end)
+        )
+
+      assert {:error, _reason} = S3.put_stream(@bucket, key, chunks)
     end
 
     test "an object under one part goes as a single PutObject" do
@@ -234,6 +270,30 @@ defmodule AudioProxy.S3Test do
       assert read(key, {9, 9}) == "9"
     end
 
+    test "a range past the end is truncated, not an error", %{key: key} do
+      # RFC 9110 §14, and what the local variant store already does. Before
+      # this was clamped, the first GET returned short, the offset advanced
+      # short of `last`, and the *second* GET drew a 416 — raised from inside
+      # a stream whose caller had already started sending a 200.
+      assert read(key, {6, 500}) == "6789"
+    end
+
+    test "a first at or past the end is invalid", %{key: key} do
+      assert S3.get_stream(@bucket, key, {10, 12}) == {:error, :invalid_range}
+      assert S3.get_stream(@bucket, key, {10, 10}) == {:error, :invalid_range}
+    end
+
+    test "an inverted range is invalid rather than silently empty", %{key: key} do
+      assert S3.get_stream(@bucket, key, {5, 2}) == {:error, :invalid_range}
+    end
+
+    test "any explicit range on a zero-length object is invalid" do
+      key = unique_key("empty-range.bin")
+      :ok = S3.put_stream(@bucket, key, [])
+
+      assert S3.get_stream(@bucket, key, {0, 0}) == {:error, :invalid_range}
+    end
+
     test "a missing object is an error, not an empty stream" do
       assert S3.get_stream(@bucket, unique_key("absent.bin")) == {:error, :not_found}
     end
@@ -288,7 +348,7 @@ defmodule AudioProxy.S3Test do
 
       {:ok, url} = S3.presign_get(@bucket, key)
 
-      assert {403, _body} = fetch(String.replace(url, ~r/X-Amz-Signature=./, "X-Amz-Signature=0"))
+      assert {403, _body} = fetch(tamper(url))
     end
 
     test "an expired URL is rejected by the store" do
@@ -336,6 +396,31 @@ defmodule AudioProxy.S3Test do
     end
   end
 
+  describe "when S3 is unconfigured" do
+    setup do
+      put_config(%{
+        s3: %{AudioProxy.Config.get(:s3) | access_key_id: nil, secret_access_key: nil}
+      })
+
+      :ok
+    end
+
+    test "every operation refuses rather than letting ex_aws reach for IMDS" do
+      # ex_aws reads a nil credential as "not provided" and walks its own
+      # provider chain, which ends at an instance-role lookup against
+      # 169.254.169.254 — a hang, not a failure, on a host where that address
+      # is not routed.
+      assert S3.head(@bucket, "k") == {:error, :not_configured}
+      assert S3.put_stream(@bucket, "k", ["x"]) == {:error, :not_configured}
+      assert S3.get_stream(@bucket, "k") == {:error, :not_configured}
+      assert S3.presign_get(@bucket, "k") == {:error, :not_configured}
+    end
+
+    test "configured?/0 reports it" do
+      refute S3.configured?()
+    end
+  end
+
   describe "config/0" do
     test "a custom endpoint switches to path-style addressing", %{endpoint: endpoint} do
       config = S3.config()
@@ -362,12 +447,25 @@ defmodule AudioProxy.S3Test do
     stream |> Enum.to_list() |> IO.iodata_to_binary()
   end
 
+  # 200 the first time; every run after, the store reports the bucket as
+  # already owned. Anything else is a real failure — wrong credentials, a
+  # store that will not accept writes — and is raised here rather than left to
+  # surface as a confusing assertion failure three tests later.
   defp ensure_bucket! do
-    # 200 the first time, and ex_aws reports the already-owned case as an
-    # error we can ignore.
-    @bucket |> ExAws.S3.put_bucket("us-east-1") |> ExAws.request(S3.config())
+    case @bucket |> ExAws.S3.put_bucket("us-east-1") |> ExAws.request(S3.config()) do
+      {:ok, _response} ->
+        :ok
 
-    :ok
+      {:error, {:http_error, status, %{body: body}}} when status in [409] ->
+        unless body =~ "BucketAlreadyOwnedByYou" or body =~ "BucketAlreadyExists" do
+          raise "could not create the #{@bucket} bucket: #{body}"
+        end
+
+        :ok
+
+      other ->
+        raise "could not create the #{@bucket} bucket: #{inspect(other)}"
+    end
   end
 
   # `:httpc` directly, which is also what `AudioProxy.S3.HttpClient` drives —
@@ -400,6 +498,33 @@ defmodule AudioProxy.S3Test do
       :httpc.request(:get, {String.to_charlist(url), []}, [], body_format: :binary)
 
     {status, body}
+  end
+
+  # ListMultipartUploads, filtered to one key: the only way to see whether an
+  # abort actually happened, since an incomplete upload is invisible to HEAD
+  # and to a bucket listing alike.
+  defp pending_uploads(key) do
+    {:ok, %{body: %{uploads: uploads}}} =
+      @bucket |> ExAws.S3.list_multipart_uploads() |> ExAws.request(S3.config())
+
+    uploads |> Enum.map(& &1.key) |> Enum.filter(&(&1 == key))
+  end
+
+  # Flips the signature's first hex digit to one it definitely is not. A
+  # blanket `s/X-Amz-Signature=./0/` looks equivalent and is a one-in-sixteen
+  # flake: when the digit already is `0` the URL comes back untampered and the
+  # store rightly answers 200.
+  defp tamper(url) do
+    uri = URI.parse(url)
+    query = URI.decode_query(uri.query)
+    <<first::binary-1, rest::binary>> = query["X-Amz-Signature"]
+
+    flipped = if first == "0", do: "1", else: "0"
+
+    URI.to_string(%{
+      uri
+      | query: URI.encode_query(%{query | "X-Amz-Signature" => flipped <> rest})
+    })
   end
 
   defp chunks_totalling(total) do

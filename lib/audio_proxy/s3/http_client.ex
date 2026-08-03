@@ -33,13 +33,48 @@ defmodule AudioProxy.S3.HttpClient do
   @behaviour ExAws.Request.HttpClient
 
   @default_timeout :timer.seconds(30)
-  @connect_timeout :timer.seconds(5)
+  @default_connect_timeout :timer.seconds(5)
+
+  # A profile of our own, not `:httpc`'s default. Two reasons: the default is
+  # shared with anything else in the VM that uses `:httpc`, so its settings
+  # are not ours to set; and it allows only two sessions per host, which would
+  # throttle concurrent renders on the connection pool rather than on
+  # `AP_MAX_CONCURRENCY`, the knob that is supposed to govern them.
+  @profile :audio_proxy_s3
+
+  @doc """
+  Starts the dedicated `:httpc` profile and sizes its connection pool.
+
+  Called once from `AudioProxy.Application.start/2`. Idempotent, so a restart
+  of the supervision tree does not fail on an already-started profile.
+  """
+  @spec setup!(pos_integer()) :: :ok
+  def setup!(max_sessions) do
+    case :inets.start(:httpc, profile: @profile) do
+      {:ok, _pid} -> :ok
+      {:error, {:already_started, _pid}} -> :ok
+    end
+
+    # Enough sessions for every render to have one in flight, plus headroom
+    # for the HEADs that precede a read.
+    :ok =
+      :httpc.set_options(
+        [max_sessions: max_sessions * 2, max_keep_alive_length: max_sessions * 2],
+        @profile
+      )
+  end
 
   @impl true
   def request(method, url, body \\ "", headers \\ [], http_opts \\ []) do
     request = build(method, String.to_charlist(url), body, headers)
 
-    case :httpc.request(method, request, options(url, http_opts), body_format: :binary) do
+    case :httpc.request(
+           method,
+           request,
+           options(url, http_opts),
+           [body_format: :binary],
+           @profile
+         ) do
       {:ok, {{_version, status, _reason}, response_headers, response_body}} ->
         {:ok,
          %{
@@ -84,7 +119,7 @@ defmodule AudioProxy.S3.HttpClient do
   defp options(url, http_opts) do
     base = [
       timeout: Keyword.get(http_opts, :recv_timeout, @default_timeout),
-      connect_timeout: @connect_timeout,
+      connect_timeout: Keyword.get(http_opts, :connect_timeout, @default_connect_timeout),
       # A redirect would be followed without the signature covering the new
       # target, and S3 answers 307 for a bucket in another region — which is
       # a misconfiguration to report, not to paper over.
@@ -100,7 +135,10 @@ defmodule AudioProxy.S3.HttpClient do
     [
       verify: :verify_peer,
       cacerts: :public_key.cacerts_get(),
-      depth: 3,
+      # Deeper than the three a private CA usually needs: an AWS chain can be
+      # longer, and a depth that is too small fails the handshake with an
+      # error that looks nothing like "raise this number".
+      depth: 5,
       server_name_indication: host,
       customize_hostname_check: [
         match_fun: :public_key.pkix_verify_hostname_match_fun(:https)

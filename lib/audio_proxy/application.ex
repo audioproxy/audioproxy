@@ -28,8 +28,17 @@ defmodule AudioProxy.Application do
     # accumulate forever. Before the tree starts, nothing can be staging.
     case config.variant_store do
       {:file, root} -> AudioProxy.VariantStore.Local.sweep_staging(root)
-      nil -> :ok
+      _other -> :ok
     end
+
+    # S3's HTTP client gets a `:httpc` profile of its own, sized against
+    # AP_MAX_CONCURRENCY — the default profile is shared with the rest of the
+    # VM and allows two sessions per host, which would throttle concurrent
+    # renders on the connection pool instead of on the semaphore meant to
+    # govern them. Started unconditionally: it costs one idle process, and
+    # making it conditional would mean a deployment that gains S3 config
+    # without a restart finds no profile.
+    AudioProxy.S3.HttpClient.setup!(config.max_concurrency)
 
     if config.allow_insecure do
       Logger.warning(
