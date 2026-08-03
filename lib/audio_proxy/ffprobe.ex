@@ -281,10 +281,17 @@ defmodule AudioProxy.Ffprobe do
     end
   end
 
+  # Said out loud rather than folded into the 500: an image built without
+  # ffprobe answers every `/info` request identically and with nothing in the
+  # log to explain it, which is a long afternoon for whoever is holding it.
   defp executable(nil) do
     case System.find_executable("ffprobe") do
-      nil -> {:error, :probe_failed}
-      path -> {:ok, path}
+      nil ->
+        Logger.error("no `ffprobe` on PATH; /info cannot answer")
+        {:error, :probe_failed}
+
+      path ->
+        {:ok, path}
     end
   end
 
@@ -294,22 +301,28 @@ defmodule AudioProxy.Ffprobe do
 
   ## Contract mapping
 
-  # The containers whose ffprobe name is not the token §3.1 spells. Everything
-  # else falls through to the first name in the comma-separated list, which is
-  # already the right answer for `wav`, `mp3`, `flac` and `ogg`.
-  @containers %{
-    "mov,mp4,m4a,3gp,3g2,mj2" => "m4a",
-    "matroska,webm" => "matroska"
-  }
+  # The container tokens §3.1 spells. ffprobe names a container with a
+  # comma-separated list of every format its demuxer answers to, and both the
+  # membership and the order of that list are its own business — the MP4 family
+  # is `mov,mp4,m4a,3gp,3g2,mj2` today. Preferring whichever name in the list
+  # the API itself spells survives a reordering and a version bump; matching the
+  # whole string, which is what this did first, did not.
+  #
+  # A container the API has no token for falls through to the first name, which
+  # is the right answer for `matroska,webm` and for anything unlisted: `format`
+  # describes the *source*, and a source may well be in a container this proxy
+  # cannot emit.
+  @api_containers ~w(mp3 ogg aac m4a flac wav)
 
   # Where one container carries two of the API's formats, the codec decides.
-  # Ogg is the case that matters: `f:opus` and `f:ogg` are different variants
-  # and ffprobe calls both containers `ogg`.
-  @by_codec %{{"ogg", "opus"} => "opus", {"m4a", "alac"} => "m4a"}
+  # Ogg is the only such case: `f:opus` and `f:ogg` are different variants and
+  # ffprobe calls both containers `ogg`.
+  @by_codec %{{"ogg", "opus"} => "opus"}
 
   defp container(format, stream) do
     with name when is_binary(name) and name != "" <- format["format_name"] do
-      base = Map.get(@containers, name) || name |> String.split(",") |> List.first()
+      names = String.split(name, ",")
+      base = Enum.find(names, hd(names), &(&1 in @api_containers))
 
       Map.get(@by_codec, {base, stream["codec_name"]}, base)
     else
@@ -356,9 +369,20 @@ defmodule AudioProxy.Ffprobe do
 
   defp audio_stream(_absent), do: nil
 
+  # `String.valid?/1` on both halves, and it is not belt-and-braces. Tag bytes
+  # come from a file the operator may not control, and `String.downcase/1` and
+  # `String.slice/3` both pass invalid UTF-8 through without complaint — so
+  # without this guard the bad bytes would reach `JSON.encode!`, which raises.
+  # `JSON.decode/1` refuses invalid UTF-8 in both its spellings (raw bytes and
+  # escaped lone surrogates), so nothing that comes through `probe/2` can be
+  # caught here; this function is public and doctested with hand-built maps,
+  # which is exactly where an invariant enforced in another module stops
+  # holding.
   defp tags(tags) when is_map(tags) do
     tags
-    |> Enum.filter(fn {key, value} -> is_binary(key) and is_binary(value) end)
+    |> Enum.filter(fn {key, value} ->
+      is_binary(key) and is_binary(value) and String.valid?(key) and String.valid?(value)
+    end)
     # Sorted before the cap so which tags survive a capped block is a property
     # of the source, not of ffprobe's iteration order.
     |> Enum.sort()

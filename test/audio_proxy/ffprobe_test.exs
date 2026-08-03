@@ -120,6 +120,28 @@ defmodule AudioProxy.FfprobeTest do
       assert {:ok, %{format: "aiff"}} = Ffprobe.contract(probe)
     end
 
+    test "a container the API has no token for is named plainly, not forced" do
+      probe = probe(%{"codec_name" => "flac"}, %{"format_name" => "matroska,webm"})
+
+      assert {:ok, %{format: "matroska"}} = Ffprobe.contract(probe)
+    end
+
+    test "the mp4 family survives ffprobe reordering its demuxer list" do
+      # The match is on membership, not on the whole string: the list's contents
+      # and order are ffprobe's business and have changed between versions.
+      for name <- [
+            "mov,mp4,m4a,3gp,3g2,mj2",
+            "mp4,m4a,mov",
+            "m4a",
+            "mov,mp4,m4a,3gp,3g2,mj2,avif"
+          ] do
+        probe = probe(%{"codec_name" => "aac"}, %{"format_name" => name})
+
+        assert {:ok, %{format: "m4a"}} = Ffprobe.contract(probe),
+               "expected #{name} to report m4a"
+      end
+    end
+
     test "a container ffprobe did not name is omitted rather than guessed" do
       probe = probe(%{}, %{"format_name" => nil})
 
@@ -169,6 +191,26 @@ defmodule AudioProxy.FfprobeTest do
 
       assert {:ok, %{tags: %{"title" => "Sea Change", "artist" => "Test Artist"}}} =
                Ffprobe.contract(probe)
+    end
+
+    test "invalid UTF-8 is dropped rather than carried to the encoder" do
+      # JSON.decode refuses these before contract/2 could ever see them, so this
+      # guards the public seam rather than the request path: String.downcase and
+      # String.slice both pass invalid bytes through, and JSON.encode! raises on
+      # them.
+      bad = <<"Sea Ch", 0xFF, 0xFE, "ange">>
+      probe = probe(%{}, %{"tags" => %{"title" => bad, "artist" => "fine"}})
+
+      assert {:ok, %{tags: tags}} = Ffprobe.contract(probe)
+      assert tags == %{"artist" => "fine"}
+      assert JSON.encode!(tags)
+    end
+
+    test "a tag key that is not valid UTF-8 is dropped too" do
+      probe = probe(%{}, %{"tags" => %{<<0xFF, 0xFE>> => "value"}})
+
+      assert {:ok, info} = Ffprobe.contract(probe)
+      refute Map.has_key?(info, :tags)
     end
 
     test "non-string values are dropped" do
