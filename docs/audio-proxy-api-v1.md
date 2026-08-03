@@ -207,6 +207,12 @@ Mid-stream render failure after `200` is signaled by abnormal termination of the
 | `AP_MAX_SRC_BYTES`, `AP_RENDER_TIMEOUT` | Abuse limits |
 | `AP_SERVE_MODE` | `redirect` \| `proxy` |
 | `AP_PRESIGN_TTL` | Seconds a HIT's presigned URL stays valid (default: 300); redirect mode only |
+| `AP_LOG_LEVEL` | `debug` \| `info` \| `warning` \| `error` (default: `info`) |
+| `AP_S3_ENDPOINT` | Origin URL of an S3-compatible store (`http://minio:9000`); unset = AWS proper. An origin and nothing else — a path, query, fragment or embedded credentials are refused at boot |
+| `AP_S3_ADDRESSING` | `virtual` \| `path`: whether a request names its bucket in the host or in the path. Default: `virtual` with no `AP_S3_ENDPOINT`, `path` with one. Signed requests and presigned URLs always use the same style, since the host is inside the signature |
+| `AP_S3_CA_BUNDLE` | PEM bundle to verify the store's certificate against, replacing the system trust store; a readable file at boot. There is no way to disable verification |
+
+S3 credentials are the exception to the `AP_` rule and keep the standard AWS names — `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` and `AWS_REGION` (or `AWS_DEFAULT_REGION`) — validated as a group at boot: all of key, secret and region, or none. There is no IMDS or STS lookup, so credentials come from the environment or not at all.
 
 Redirect serving is a *capability of the store's backend*: `redirect` answers a HIT with a 302 to a presigned variant URL, which only a backend that can presign (`s3://`) can produce. `AP_SERVE_MODE=redirect` against a store without that capability (`file://`) is refused at boot, with an error naming both variables — never per request.
 

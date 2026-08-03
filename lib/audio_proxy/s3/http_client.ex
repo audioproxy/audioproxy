@@ -129,12 +129,17 @@ defmodule AudioProxy.S3.HttpClient do
     if String.starts_with?(url, "https://"), do: [{:ssl, ssl_options(url)} | base], else: base
   end
 
-  defp ssl_options(url) do
+  @doc """
+  The `:ssl` options for a request to `url`.
+
+  Public so a test can assert on the trust store without a TLS handshake.
+  """
+  @spec ssl_options(String.t()) :: keyword()
+  def ssl_options(url) do
     host = url |> URI.parse() |> Map.fetch!(:host) |> String.to_charlist()
 
     [
       verify: :verify_peer,
-      cacerts: :public_key.cacerts_get(),
       # Deeper than the three a private CA usually needs: an AWS chain can be
       # longer, and a depth that is too small fails the handshake with an
       # error that looks nothing like "raise this number".
@@ -144,6 +149,18 @@ defmodule AudioProxy.S3.HttpClient do
         match_fun: :public_key.pkix_verify_hostname_match_fun(:https)
       ],
       versions: [:"tlsv1.2", :"tlsv1.3"]
-    ]
+    ] ++ trust_store()
+  end
+
+  # `cacertfile` and `cacerts` are mutually exclusive in `:ssl` — passing both
+  # is an error, not a merge — so exactly one is emitted. `AP_S3_CA_BUNDLE` is
+  # validated as a readable file at boot; there is deliberately no way to turn
+  # verification off, since a flag for that ends up set in production because
+  # it made a staging error go away.
+  defp trust_store do
+    case AudioProxy.Config.get(:s3).ca_bundle do
+      nil -> [cacerts: :public_key.cacerts_get()]
+      path -> [cacertfile: String.to_charlist(path)]
+    end
   end
 end

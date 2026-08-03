@@ -43,7 +43,12 @@ defmodule AudioProxy.S3Test do
         access_key_id: "minioadmin",
         secret_access_key: "minioadmin",
         session_token: nil,
-        endpoint: endpoint
+        endpoint: endpoint,
+        # MinIO is reached by hostname and port; `bucket.minio` would need DNS
+        # nobody configured. Which is also why this file cannot cover
+        # virtual-hosted addressing — see `AudioProxy.S3AddressingTest`.
+        addressing: :path,
+        ca_bundle: nil
       }
     })
 
@@ -214,6 +219,60 @@ defmodule AudioProxy.S3Test do
 
       assert {:ok, %{etag: etag}} = S3.head(@bucket, key)
       assert etag == ~s("#{Base.encode16(:crypto.hash(:md5, body), case: :lower)}")
+    end
+
+    test "every part but the last is exactly the part size" do
+      # Chunk boundaries deliberately misaligned with the 5 MiB part size:
+      # 64,000 does not divide 5,242,880, so a chunk straddles every boundary.
+      # Flushing on "at least a part" would make parts of 5,248,000 — the
+      # first size the accumulating buffer reaches — and R2 rejects a
+      # multipart upload whose parts are not all equal.
+      #
+      # The totals are chosen so the two behaviours differ in *part count*
+      # too: 164 × 64,000 is exactly two overshooting parts but three exact
+      # ones, so the ETag suffix alone tells them apart.
+      key = unique_key("exact-parts.bin")
+      chunks = for index <- 1..164, do: :binary.copy(<<rem(index, 256)>>, 64_000)
+      expected = IO.iodata_to_binary(chunks)
+
+      assert byte_size(expected) == 10_496_000
+      assert :ok = S3.put_stream(@bucket, key, chunks)
+
+      assert part_sizes(key) == [5_242_880, 5_242_880, 10_240]
+      assert read(key) == expected
+    end
+
+    test "a chunk larger than a part is split across parts rather than sent whole" do
+      # The carry-forward has to run more than once for a single chunk. Render
+      # chunks are far smaller than this, but a part size is a property of the
+      # protocol and a chunk size is a property of whoever is feeding us.
+      key = unique_key("big-chunk.bin")
+      chunks = [:binary.copy("a", 11 * 1024 * 1024), :binary.copy("b", 1024)]
+
+      assert :ok = S3.put_stream(@bucket, key, chunks)
+
+      assert part_sizes(key) == [5_242_880, 5_242_880, 1_049_600]
+      assert read(key) == IO.iodata_to_binary(chunks)
+    end
+
+    test "a stream of exactly one part size is one part" do
+      # The boundary case in both directions: the buffer reaches the part size
+      # exactly, so nothing is carried forward and no empty tail part is
+      # emitted — S3 rejects a zero-length part.
+      key = unique_key("exactly-one-part.bin")
+      body = :binary.copy("a", 5 * 1024 * 1024)
+
+      assert :ok = S3.put_stream(@bucket, key, [body])
+
+      assert part_sizes(key) == [5_242_880]
+      assert read(key) == body
+
+      # `part_sizes/1` defaults the parts count to 1 when the header is absent,
+      # so the assertion above holds for a single `PutObject` too. The ETag is
+      # what separates them: a multipart ETag is a digest-of-digests carrying
+      # the part count, so `-1` is the proof this took the multipart route.
+      assert {:ok, %{etag: etag}} = S3.head(@bucket, key)
+      assert etag =~ ~r/-1"?$/
     end
 
     test "an object over one part goes multipart" do
@@ -498,6 +557,38 @@ defmodule AudioProxy.S3Test do
       :httpc.request(:get, {String.to_charlist(url), []}, [], body_format: :binary)
 
     {status, body}
+  end
+
+  # The sizes of a completed object's parts, which no ordinary HEAD reports:
+  # a `partNumber` on a HEAD answers for that part alone and carries
+  # `x-amz-mp-parts-count`. It is built by hand because `ExAws.S3.head_object`
+  # passes only `versionId` through as a query parameter.
+  #
+  # Reading them back from the store, rather than instrumenting `into_parts/1`,
+  # is the point: what has to be uniform is what the store received.
+  defp part_sizes(key) do
+    {size, count} = part_head(key, 1)
+
+    [
+      size
+      | Enum.map(2..count//1, fn number -> number |> then(&part_head(key, &1)) |> elem(0) end)
+    ]
+  end
+
+  defp part_head(key, number) do
+    operation = %ExAws.Operation.S3{
+      bucket: @bucket,
+      path: key,
+      http_method: :head,
+      params: %{"partNumber" => Integer.to_string(number)}
+    }
+
+    assert {:ok, %{headers: headers}} = ExAws.request(operation, S3.config())
+
+    headers = Map.new(headers, fn {name, value} -> {String.downcase(name), value} end)
+
+    {String.to_integer(headers["content-length"]),
+     headers |> Map.get("x-amz-mp-parts-count", "1") |> String.to_integer()}
   end
 
   # ListMultipartUploads, filtered to one key: the only way to see whether an

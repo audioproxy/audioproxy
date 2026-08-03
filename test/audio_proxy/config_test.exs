@@ -28,7 +28,9 @@ defmodule AudioProxy.ConfigTest do
                  access_key_id: nil,
                  secret_access_key: nil,
                  session_token: nil,
-                 endpoint: nil
+                 endpoint: nil,
+                 addressing: :virtual,
+                 ca_bundle: nil
                }
              }
     end
@@ -378,6 +380,92 @@ defmodule AudioProxy.ConfigTest do
 
     test "a bare username with no password is refused too" do
       assert_raise Error, fn -> Config.build!(%{"AP_S3_ENDPOINT" => "http://key@minio:9000"}) end
+    end
+  end
+
+  describe "AP_S3_ADDRESSING" do
+    test "defaults to virtual-hosted when no endpoint is set" do
+      # AWS: path-style is deprecated there and regions launched after 2019
+      # never supported it.
+      assert Config.build!(%{}).s3.addressing == :virtual
+    end
+
+    test "defaults to path-style when an endpoint is set" do
+      # Every S3-compatible provider this project documents is deployed on
+      # path-style today; defaulting them to virtual-hosted would break all of
+      # them to fix one deployment that does not exist yet.
+      assert Config.build!(%{"AP_S3_ENDPOINT" => "http://minio:9000"}).s3.addressing == :path
+    end
+
+    test "the endpoint decides the default, not the absence of other variables" do
+      # Pins the asymmetry itself: the same environment, differing only in
+      # AP_S3_ENDPOINT, must yield the two different defaults. Without this a
+      # default of :virtual everywhere would pass the test above.
+      env = %{
+        "AWS_ACCESS_KEY_ID" => "id",
+        "AWS_SECRET_ACCESS_KEY" => "secret",
+        "AWS_REGION" => "us-east-1"
+      }
+
+      assert Config.build!(env).s3.addressing == :virtual
+
+      assert Config.build!(Map.put(env, "AP_S3_ENDPOINT", "https://s3.example")).s3.addressing ==
+               :path
+    end
+
+    test "an explicit value overrides either default" do
+      assert Config.build!(%{"AP_S3_ADDRESSING" => "path"}).s3.addressing == :path
+
+      assert Config.build!(%{
+               "AP_S3_ENDPOINT" => "http://minio:9000",
+               "AP_S3_ADDRESSING" => "virtual"
+             }).s3.addressing == :virtual
+    end
+
+    test "anything else is refused at boot" do
+      error =
+        assert_raise Error, fn -> Config.build!(%{"AP_S3_ADDRESSING" => "vhost"}) end
+
+      assert error.message =~ "AP_S3_ADDRESSING"
+      assert error.message =~ "virtual"
+      assert error.message =~ "path"
+    end
+
+    test "the accepted styles are published for the docs and the router" do
+      assert Config.s3_addressing_styles() == [:virtual, :path]
+    end
+  end
+
+  describe "AP_S3_CA_BUNDLE" do
+    @describetag :tmp_dir
+
+    test "defaults to unset, meaning the system trust store", %{tmp_dir: _tmp_dir} do
+      assert Config.build!(%{}).s3.ca_bundle == nil
+    end
+
+    test "a readable file is expanded and kept", %{tmp_dir: tmp_dir} do
+      bundle = Path.join(tmp_dir, "ca.pem")
+      File.write!(bundle, "-----BEGIN CERTIFICATE-----\n")
+
+      assert Config.build!(%{"AP_S3_CA_BUNDLE" => bundle}).s3.ca_bundle == Path.expand(bundle)
+    end
+
+    test "a path that is not there is refused at boot", %{tmp_dir: tmp_dir} do
+      # Rather than on the first upload, which is a TLS error naming a file
+      # nobody would think to check.
+      missing = Path.join(tmp_dir, "absent.pem")
+
+      error = assert_raise Error, fn -> Config.build!(%{"AP_S3_CA_BUNDLE" => missing}) end
+
+      assert error.message =~ "AP_S3_CA_BUNDLE"
+      assert error.message =~ "readable file"
+    end
+
+    test "a directory is refused too", %{tmp_dir: tmp_dir} do
+      # `File.read/1` on a directory answers :eisdir, which is exactly the
+      # accident this catches: a bundle path pointing at the mount rather than
+      # at the file inside it.
+      assert_raise Error, fn -> Config.build!(%{"AP_S3_CA_BUNDLE" => tmp_dir}) end
     end
   end
 
