@@ -25,6 +25,7 @@ defmodule AudioProxy.Config do
   | `AP_QUEUE_SIZE` | non-negative integer | `32` |
   | `AP_MAX_SRC_BYTES` | positive integer | `2_000_000_000` |
   | `AP_RENDER_TIMEOUT` | positive integer (seconds) | `300` |
+  | `AP_PROBE_TIMEOUT` | positive integer (seconds) | `10` |
   | `AP_SERVE_MODE` | `redirect` \\| `proxy` | `:redirect` |
   | `AP_PRESIGN_TTL` | positive integer (seconds) | `300` |
   | `AP_LOG_LEVEL` | `debug` \\| `info` \\| `warning` \\| `error` | `:info` |
@@ -50,6 +51,12 @@ defmodule AudioProxy.Config do
   @default_max_src_bytes 2_000_000_000
   @default_render_timeout 300
   @serve_modes [:redirect, :proxy]
+
+  # A probe reads container headers and stops; it never decodes a stream, so it
+  # has no reason to share the render budget. Short on purpose: `/info` sits in
+  # front of a player deciding what to request, and a source that cannot answer
+  # in ten seconds is one the client should hear about rather than wait on.
+  @default_probe_timeout 10
 
   # How long a HIT's presigned URL stays valid. Short on purpose: the URL is
   # handed to one client for one playback, and the response carrying it is
@@ -77,6 +84,7 @@ defmodule AudioProxy.Config do
           queue_size: non_neg_integer(),
           max_src_bytes: pos_integer(),
           render_timeout: pos_integer(),
+          probe_timeout: pos_integer(),
           serve_mode: :redirect | :proxy,
           presign_ttl: pos_integer(),
           log_level: :debug | :info | :warning | :error
@@ -115,6 +123,7 @@ defmodule AudioProxy.Config do
       queue_size: integer(env, "AP_QUEUE_SIZE", @default_queue_size, :non_negative),
       max_src_bytes: integer(env, "AP_MAX_SRC_BYTES", @default_max_src_bytes, :positive),
       render_timeout: integer(env, "AP_RENDER_TIMEOUT", @default_render_timeout, :positive),
+      probe_timeout: integer(env, "AP_PROBE_TIMEOUT", @default_probe_timeout, :positive),
       serve_mode: enum(env, "AP_SERVE_MODE", @serve_modes, :redirect),
       presign_ttl: integer(env, "AP_PRESIGN_TTL", @default_presign_ttl, :positive),
       log_level: enum(env, "AP_LOG_LEVEL", @log_levels, @default_log_level)
