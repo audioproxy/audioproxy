@@ -44,8 +44,16 @@ defmodule AudioProxy.Application do
     # spawns into — which reverse-order shutdown gives for free. The tee
     # supervisor sits first for the same reason: coordinators spawn tees too,
     # and a coordinator stopping is what tells its tee to abort.
+    #
+    # The semaphore is ahead of both, for that reason read the other way round:
+    # a coordinator releases its slot from `terminate/2`, so the thing it
+    # releases into has to still be there when the last coordinator stops.
     children =
-      [AudioProxy.VariantStore.Tee.supervisor(), AudioProxy.Ffmpeg.RenderSupervisor] ++
+      [
+        AudioProxy.Semaphore,
+        AudioProxy.VariantStore.Tee.supervisor(),
+        AudioProxy.Ffmpeg.RenderSupervisor
+      ] ++
         AudioProxy.RenderCoordinator.children() ++ listener(config)
 
     Logger.info("audio_proxy #{vsn()} starting (serve_mode: #{config.serve_mode})")

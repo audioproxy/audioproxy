@@ -20,6 +20,8 @@ defmodule AudioProxy.ErrorJSON do
       {:range_not_satisfiable, size} 416     range_not_satisfiable  Content-Range
       %OptionError{}                 422     invalid_options
       {:queue_full, retry_after}     429     queue_full          Retry-After
+                                             (queue full, or a wait for a
+                                             slot that ran out of budget)
       :render_failed                 500     render_failed
       :render_timeout                504     render_timeout
 
