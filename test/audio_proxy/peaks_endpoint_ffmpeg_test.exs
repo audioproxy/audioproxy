@@ -252,6 +252,44 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
       assert response.head =~ "http/1.1 415"
       assert JSON.decode!(response.body)["error"] == "undecodable_source"
     end
+
+    # ffprobe reads this one happily and reports no audio stream, so the 415 is
+    # this module's own classification rather than something ffmpeg's stderr
+    # produced.
+    #
+    # The audio path answers 500 for the same file, and that is deliberately
+    # *not* asserted here as correct: ffmpeg says "Output file does not contain
+    # any stream", which `AudioProxy.Ffmpeg.Render`'s classifiers do not match,
+    # so it falls through to `:render_failed`. That gap predates this change
+    # and belongs to the audio-only-policy slice; peaks are not the place to
+    # widen it. Recorded so the divergence is known rather than surprising.
+    test "a source with no audio stream is a 415, not a server error",
+         %{port: port, root: root} do
+      cover = Path.join(root, "cover.png")
+
+      {_output, 0} =
+        System.cmd(
+          "ffmpeg",
+          [
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:s=16x16:d=1",
+            "-frames:v",
+            "1",
+            cover
+          ],
+          stderr_to_stdout: true
+        )
+
+      peaks = render("/f:peaks/plain/local://cover.png", port)
+
+      assert peaks.head =~ "http/1.1 415"
+      assert JSON.decode!(peaks.body)["error"] == "undecodable_source"
+    end
   end
 
   ## Helpers

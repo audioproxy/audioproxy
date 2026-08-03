@@ -100,6 +100,15 @@ defmodule AudioProxy.Plugs.RenderAction do
   restarts on every message, so the pipeline's own timeout is what a client
   normally sees, with its classification intact.
 
+  That claim holds for every format that streams, which is every format but
+  one. `f:peaks` produces a single chunk at the end of its render (see
+  `AudioProxy.Peaks.Render`), so nothing resets the deadline while it works and
+  the budget below is a *total* rather than an idle one — and the peaks
+  pipeline runs two subprocesses in sequence, each with a timer of its own. A
+  peaks render slower than this deadline is ended here, by the request loop,
+  rather than by the pipeline whose timer was supposed to fire first. It takes
+  a five-minute peaks render at the default to happen.
+
   The same budget is spent twice, on two different things, and which one ran out
   decides the status. A request may wait for a render *slot* before any render
   exists; the coordinator's `{:rendering, _}` is what says that wait is over,

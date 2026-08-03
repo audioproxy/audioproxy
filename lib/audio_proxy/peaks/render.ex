@@ -43,10 +43,43 @@ defmodule AudioProxy.Peaks.Render do
   ## Failure
 
   Anything the two renders report is forwarded verbatim, so the classes the
-  HTTP layer maps are the pipeline's own. What this module adds is one class
-  of its own: a source whose duration ffprobe could not determine cannot be
-  bucketed, and that is a `:render_failed` naming the reason rather than a
-  guess at a duration.
+  HTTP layer maps are the pipeline's own. What this module classifies itself is
+  the probe's *output*, which ffprobe can write successfully while still
+  describing something no waveform can be drawn from: a file with no audio
+  stream, or one whose duration nothing can determine. Both are `:undecodable`,
+  so both are a 415 — the source cannot yield this variant, permanently, and
+  that is the client's business rather than a server fault to retry.
+
+  Note what this is *not* claiming: `f:mp3` on the same file currently answers
+  500, because ffmpeg's diagnostic there is "Output file does not contain any
+  stream" and `AudioProxy.Ffmpeg.Render`'s classifiers do not match it. That
+  gap is the audio path's and predates peaks; peaks answering 500 as well would
+  have been consistency with a bug rather than with a contract.
+
+  A probe this proxy could not *read* is different again and stays
+  `:render_failed`: ffprobe exited cleanly and wrote something unparseable,
+  which says nothing about the source and everything about the install.
+
+  ## The request-side deadline is tighter here than for audio
+
+  Worth knowing before tuning `AP_RENDER_TIMEOUT`.
+  `AudioProxy.Plugs.RenderAction` bounds a render by a mailbox deadline of
+  `AP_RENDER_TIMEOUT + 1s` that **restarts on every message**. For an audio
+  render that is an idle timeout, because chunks arrive continuously, and the
+  pipeline's own timer always fires first — which is what that module's
+  moduledoc claims.
+
+  Peaks send exactly one chunk, at the end, so nothing resets that clock
+  between `{:rendering, _}` and completion: it is a *total* budget. Meanwhile
+  each inner render gets a timer of its own, so the pipeline would tolerate up
+  to twice the configured timeout across probe and decode. A peaks render
+  taking longer than `AP_RENDER_TIMEOUT + 1s` is therefore ended by the request
+  loop as a 504 with no ffmpeg diagnostic behind it, while neither subprocess
+  considers itself late.
+
+  At the 300 s default this needs a five-minute peaks render and no realistic
+  source reaches it, which is why it is documented rather than designed around.
+  Giving the two subprocesses one shared budget is the fix if it ever bites.
   """
 
   use GenServer
@@ -263,13 +296,25 @@ defmodule AudioProxy.Peaks.Render do
       {:error, reason} ->
         {:error,
          %{
-           class: :render_failed,
+           class: probe_class(reason),
            exit_status: nil,
            stderr: "",
            detail: "could not probe the source for peaks: #{inspect(reason)}"
          }}
     end
   end
+
+  # A source with no audio stream, or one whose duration nothing can determine,
+  # is a source peaks cannot be drawn from — permanently, and because of the
+  # file rather than the server. That is a 415. See the moduledoc for why this
+  # deliberately does not match what `f:mp3` currently answers for such a file.
+  #
+  # `:unreadable_probe` stays a server failure: ffprobe exited cleanly and
+  # wrote something this proxy could not read, which says nothing about the
+  # source and everything about the install.
+  defp probe_class(:no_audio_stream), do: :undecodable
+  defp probe_class(:unknown_duration), do: :undecodable
+  defp probe_class(_reason), do: :render_failed
 
   defp required_duration(%{duration: nil}), do: {:error, :unknown_duration}
   defp required_duration(%{duration: duration}), do: {:ok, duration}
