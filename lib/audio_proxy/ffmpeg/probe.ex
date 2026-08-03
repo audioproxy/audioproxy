@@ -87,8 +87,14 @@ defmodule AudioProxy.Ffmpeg.Probe do
   """
   @spec parse(binary()) :: {:ok, info()} | {:error, term()}
   def parse(output) when is_binary(output) do
-    with {:ok, %{"streams" => streams} = decoded} <- decode(output),
-         [stream | _rest] <- streams,
+    # Every step answers a tagged tuple, so there is no `else` and no shape
+    # that falls through it. An earlier version matched the stream list inside
+    # the `with` and listed the failures it expected; `{"streams": {}}` was not
+    # one of them and raised a `WithClauseError` — which on this path is a
+    # crash inside `AudioProxy.Peaks.Render` rather than a classified failure,
+    # and errors here are data.
+    with {:ok, decoded} <- decode(output),
+         {:ok, stream} <- audio_stream(decoded),
          {:ok, sample_rate} <- integer(stream["sample_rate"]),
          {:ok, channels} <- integer(stream["channels"]) do
       {:ok,
@@ -97,12 +103,18 @@ defmodule AudioProxy.Ffmpeg.Probe do
          sample_rate: sample_rate,
          channels: channels
        }}
-    else
-      [] -> {:error, :no_audio_stream}
-      {:ok, _decoded} -> {:error, :no_audio_stream}
-      {:error, _reason} = error -> error
     end
   end
+
+  defp audio_stream(%{"streams" => [stream | _rest]}) when is_map(stream), do: {:ok, stream}
+
+  # A `streams` entry that is not an object at all: ffprobe does not write
+  # this, so something other than ffprobe produced these bytes.
+  defp audio_stream(%{"streams" => [_malformed | _rest]}), do: {:error, :unreadable_probe}
+
+  # No `streams` key, an empty list, or a `streams` that is not a list —
+  # all of which mean the same thing to a caller: nothing here to measure.
+  defp audio_stream(_decoded), do: {:error, :no_audio_stream}
 
   defp decode(output) do
     case JSON.decode(output) do

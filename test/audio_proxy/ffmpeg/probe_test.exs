@@ -68,6 +68,23 @@ defmodule AudioProxy.Ffmpeg.ProbeTest do
       assert Probe.parse(~s({"streams": [{"sample_rate": "0", "channels": 1}]})) ==
                {:error, :unreadable_probe}
     end
+
+    # Every one of these raised before: the `with` matched the stream list and
+    # enumerated the failures it expected, and none of these was among them.
+    # ffprobe writes none of them either, which is exactly why the catch-all
+    # matters — the module's contract is that it turns *bytes* into a tuple.
+    test "a streams value of the wrong shape is an error, not a raise" do
+      for output <- [
+            ~s({"streams": {}}),
+            ~s({"streams": "nope"}),
+            ~s({"streams": null}),
+            ~s({"streams": [42]}),
+            ~s({"streams": ["a string"]})
+          ] do
+        assert {:error, reason} = Probe.parse(output)
+        assert reason in [:no_audio_stream, :unreadable_probe]
+      end
+    end
   end
 
   describe "executable/1" do
