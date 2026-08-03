@@ -165,6 +165,44 @@ defmodule AudioProxy.S3Test do
       assert S3.head(@bucket, key) == {:error, :not_found}
     end
 
+    test "an object under one part goes as a single PutObject" do
+      # S3's own ETag is the observable difference, which is what makes this
+      # a test rather than a restatement of the code: a PutObject ETag is the
+      # MD5 of the body, while a multipart ETag is a digest-of-digests with a
+      # `-<parts>` suffix. Without the fast path this write would not merely
+      # be slower — S3 rejects a sub-5-MiB multipart with EntityTooSmall.
+      key = unique_key("under-one-part.bin")
+      body = :binary.copy("a", 4 * 1024 * 1024)
+
+      :ok = S3.put_stream(@bucket, key, [body])
+
+      assert {:ok, %{etag: etag}} = S3.head(@bucket, key)
+      assert etag == ~s("#{Base.encode16(:crypto.hash(:md5, body), case: :lower)}")
+    end
+
+    test "an object over one part goes multipart" do
+      key = unique_key("over-one-part.bin")
+
+      :ok = S3.put_stream(@bucket, key, chunks_totalling(6 * 1024 * 1024))
+
+      assert {:ok, %{etag: etag}} = S3.head(@bucket, key)
+      assert etag =~ ~r/-\d+"?$/
+    end
+
+    test "the buffered prefix and the resumed tail join without losing bytes" do
+      # The seam the suspension creates: everything before it was consumed by
+      # the peek, everything after comes from the continuation. An off-by-one
+      # there would duplicate or drop a chunk, which byte-equality catches
+      # and a size check would not.
+      key = unique_key("seam.bin")
+      chunks = for index <- 1..120, do: :binary.copy(<<rem(index, 256)>>, 64_000)
+      expected = IO.iodata_to_binary(chunks)
+
+      :ok = S3.put_stream(@bucket, key, chunks)
+
+      assert read(key) == expected
+    end
+
     test "an empty stream still writes an object" do
       key = unique_key("empty.bin")
 
@@ -362,6 +400,14 @@ defmodule AudioProxy.S3Test do
       :httpc.request(:get, {String.to_charlist(url), []}, [], body_format: :binary)
 
     {status, body}
+  end
+
+  defp chunks_totalling(total) do
+    whole = div(total, 64_000)
+    remainder = rem(total, 64_000)
+
+    List.duplicate(:binary.copy("a", 64_000), whole) ++
+      if remainder > 0, do: [:binary.copy("b", remainder)], else: []
   end
 
   # Unique per run, so a rerun never reads an object a previous one wrote and
