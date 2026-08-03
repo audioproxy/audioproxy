@@ -32,12 +32,13 @@ verify it yourself with the borrowed suite below.
 
 Two things that used to be listed here as limitations no longer are. Every part
 of a multipart upload except the last is now exactly 5 MiB, which is what
-Cloudflare R2 requires and every other store here already tolerated — R2 is
-absent from this page because nobody has written a verified configuration for
-it, not because of a known incompatibility. And a store behind a private
-certificate authority can be reached over `https://` by pointing
-`AP_S3_CA_BUNDLE` at a PEM bundle, which matters for self-hosted MinIO or Ceph;
-every provider below uses publicly trusted certificates and needs nothing.
+Cloudflare R2 requires and every other store here already tolerated — that
+removes the *known* blocker for R2, though nobody has run this against R2 to
+find out whether anything else stands in the way, which is why it still has no
+section below. And a store behind a private certificate authority can be
+reached over `https://` by pointing `AP_S3_CA_BUNDLE` at a PEM bundle, which
+matters for self-hosted MinIO or Ceph; every provider below uses publicly
+trusted certificates and needs nothing.
 
 If you want certainty for your provider, you can borrow the suite. It takes an
 endpoint from the environment, creates its own bucket, and cleans up after
@@ -179,6 +180,15 @@ sources from AWS while caching variants to Hetzner is not expressible today.
 global, so sources and variants are addressed the same way. Since the endpoint
 is global too, this only matters if a single store wants different styles for
 different buckets, which none of these do.
+
+**Virtual-hosted addressing constrains bucket names.** The bucket becomes a
+DNS label, so a name with dots (`my.audio.masters`) fails certificate matching
+against a wildcard like `*.s3.eu-central-1.amazonaws.com`, and one with
+underscores or capitals does not resolve at all. Bucket names are not validated
+against the addressing style — the failure surfaces as a TLS or DNS error on
+the first request, not at boot. `AP_S3_ADDRESSING=path` is the answer where the
+store still accepts it, and Tigris does not, so a Tigris bucket has to be named
+DNS-safely from the start.
 
 **Incomplete multipart uploads.** The proxy aborts an upload on every failure
 path it can see, but not on a hard kill of the VM. Set a lifecycle rule

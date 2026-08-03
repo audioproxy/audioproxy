@@ -454,6 +454,10 @@ Setting it also switches the **addressing** default from virtual-hosted (`bucket
 AP_S3_ENDPOINT=https://fly.storage.tigris.dev AP_S3_ADDRESSING=virtual AWS_REGION=auto …
 ```
 
+Set `AP_S3_ADDRESSING=path` if your bucket name is not a valid DNS label — one containing dots breaks certificate matching against `*.s3.region.amazonaws.com`, and underscores or capitals are not resolvable at all. Virtual-hosted addressing puts the bucket name in the hostname, so those names only work path-style.
+
+> **Upgrading from `v0.2.0` against AWS:** requests were path-style before this variable existed and are now virtual-hosted, which is what AWS requires in regions launched after 2019. Buckets predating that, and the names described above, need `AP_S3_ADDRESSING=path`. Nothing changes for a deployment with `AP_S3_ENDPOINT` set.
+
 A store behind a private certificate authority is reached over `https://` by pointing `AP_S3_CA_BUNDLE` at a PEM bundle; it replaces the system trust store rather than adding to it. There is deliberately no way to switch certificate verification off.
 
 **[docs/s3-providers.md](docs/s3-providers.md) has working configurations** for Backblaze B2, DigitalOcean Spaces, Hetzner, Scaleway and Tigris: each one's endpoint, region and addressing conventions, which kind of credential to create, and the limitations to weigh before committing to a provider. It is also the honest account of what is tested — MinIO is, and nothing else is, AWS included.
