@@ -303,9 +303,12 @@ defmodule AudioProxy.Plugs.RenderAction do
       etag: ~s("#{conn.assigns.cache_key}")
     }
 
+    options = conn.assigns.options
+
     spec =
-      [args: Command.build(conn.assigns.options, input), metadata: metadata] ++
-        Keyword.take(opts, [:executable])
+      [args: Command.build(options, input), metadata: metadata] ++
+        Keyword.take(opts, [:executable]) ++
+        peaks_spec(options, input, opts)
 
     case RenderCoordinator.subscribe(conn.assigns.cache_key, spec) do
       {:ok, status, render, backlog} ->
@@ -329,6 +332,17 @@ defmodule AudioProxy.Plugs.RenderAction do
         {:error, :render_failed}
     end
   end
+
+  # The one branch in this module that knows peaks exist, and it only decides
+  # *which* pipeline runs: `AudioProxy.Ffmpeg.RenderSupervisor` reads this key,
+  # and everything from the coordinator down treats the result as a render like
+  # any other. The reduction needs what the argv alone cannot carry — the `pts`
+  # and `ch` the reducer buckets by, and the input the leading probe reads.
+  defp peaks_spec(%{format: :peaks} = options, input, opts) do
+    [peaks: [options: options, input: input] ++ Keyword.take(opts, [:probe_executable])]
+  end
+
+  defp peaks_spec(_options, _input, _opts), do: []
 
   ## Before the first byte
 
