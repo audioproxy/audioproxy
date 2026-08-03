@@ -217,9 +217,9 @@ jobs:
 
       # And the guard is itself guarded, because one whose tolerance has quietly
       # swallowed everything passes forever while saying nothing. This runs the
-      # same workload against a deliberate 4x under-prediction — the arithmetic a
-      # model that had lost track of a retention term would produce — and
-      # requires the guard to reject it.
+      # same workload against a model carrying no retention term at all — the
+      # arithmetic a change that dropped or uncapped the backlog would produce —
+      # and requires the guard to reject it.
       - name: Check that the guard can still fail
         run: SKIP_BUILD=1 IMAGE=audio_proxy:capacity bin/check-capacity --self-test
 

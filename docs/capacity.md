@@ -74,8 +74,19 @@ containers exercising more of the codec surface, against a hard ceiling of the
 195 MB on disk. Budget **150 MiB** and treat a deployment using every format as
 the upper end. It is reclaimable — under pressure the kernel drops clean file
 pages and re-reads them rather than OOM-killing — so it is headroom, not a
-working set. `bin/check-capacity` measures it live rather than trusting this
-paragraph.
+working set.
+
+This is the one term in the model that is a judgement rather than a reading, and
+it is worth knowing why it cannot be measured on demand. What any single
+measurement captures is not the size of the library working set but *how much of
+it that particular container had to fault in*, which depends entirely on what ran
+before it. The same probe returns 47–93 MiB on a developer machine with a cold
+cache and 2.8 MiB on a CI runner where an earlier container had already warmed
+the same libraries — a thirty-fold spread with nothing behind it but cache
+history. A long-lived proxy container is the cold-cache case that keeps its pages,
+so 150 MiB is the figure to size against. `bin/check-capacity` predicts from that
+budget and prints what its host happened to charge beside it, precisely so the
+two can be seen to disagree.
 
 Getting this wrong in either direction is the most expensive mistake available
 here: multiplying it inflates a 16-slot estimate by two gigabytes of memory
@@ -367,12 +378,18 @@ to be wrong about — and asserts that the container's cgroup `memory.peak`, min
 reclaimable page cache, stays under the prediction this page's formula makes for
 that configuration.
 
-On the reference run — four concurrent two-hour MP3 renders plus eight short
-ones, `AP_MAX_CONCURRENCY=4` — the model predicted 855 MiB and the container
-peaked at 790 MiB adjusted, **92 % of the prediction**. That is the number worth
-knowing before trusting any of the arithmetic above: the formula is accurate to
-within about ten per cent on a real workload, and the tolerance below is not
-covering a large gap.
+On the reference workload — four concurrent two-hour MP3 renders plus eight short
+ones, `AP_MAX_CONCURRENCY=4` — the model predicted 955 MiB and the container
+peaked at 748 MiB adjusted: **78 % of the prediction**, on arm64.
+
+Read that as the model being deliberately conservative rather than merely
+approximate, and the conservatism is almost entirely one term. Sizing `T_ffmpeg`
+at its 150 MiB budget when a given host charges 47 MiB accounts for most of the
+gap; strike that difference out and the remaining terms land within about ten per
+cent of the observation. Which is the property that matters — the formula is
+right about `B_backlog`, the term that decides whether a long-form deployment
+fits, and it errs high on the flat term where erring high costs a reader nothing
+but a slightly larger container.
 
 The guard's tolerance is a stated **1.5× headroom factor** on the prediction, and
 the factor is written down here rather than buried so that nobody mistakes it for
@@ -403,7 +420,7 @@ SKIP_BUILD=1 bin/measure-ffmpeg-rss --write docs/capacity.md
 # Run the workload guard the way CI does.
 SKIP_BUILD=1 bin/check-capacity
 
-# Prove the guard still has teeth (asserts a deliberate under-prediction fails).
+# Prove the guard still has teeth (asserts a retention-blind model is rejected).
 SKIP_BUILD=1 bin/check-capacity --self-test
 ```
 

@@ -91,6 +91,13 @@ LINGER_BACKLOGS = 1
 # `@high_water` in AudioProxy.Ffmpeg.Render.
 HIGH_WATER = 1 * 1024 * 1024
 
+# `T_ffmpeg` as docs/capacity.md publishes it: the library working set a
+# long-lived container holds resident once every format has been exercised.
+# Kept in step with that document's "budget 150 MiB" by hand — it is the one
+# constant here that is a judgement rather than a reading, which is exactly why
+# it is written down in both places rather than derived in one.
+T_FFMPEG_BUDGET = 150 * 1024 * 1024
+
 MIB = 1_048_576.0
 
 @containers = []
@@ -166,15 +173,22 @@ def published_rss
   rows.to_h
 end
 
-# `T_ffmpeg`: the shared library text one ffmpeg makes resident. Measured rather
-# than carried as a constant, and measured as the gap between what a container
-# running one ffmpeg peaks at and the anonymous memory that ffmpeg privately
-# held — which is exactly the file-backed residency the model pays once.
+# `T_ffmpeg`: the shared library text a render makes resident, as a *diagnostic
+# only*. The prediction uses `T_FFMPEG_BUDGET` — see below for why measuring it
+# here does not work.
 #
-# It has to be in the prediction because it is unavoidably in the observation:
-# `BEAM_base` is read from an idle container that has never run a render, and
-# `R_ffmpeg` is anonymous-only by construction, so without this term the
-# prediction is short by the whole of libavcodec.
+# The gap between a one-ffmpeg container's peak and the anonymous memory that
+# ffmpeg privately held is, in principle, exactly the file-backed residency the
+# model pays once. In practice it measures whatever *this cgroup happened to
+# fault in*, which depends entirely on what ran before it: 47-93 MiB on a
+# developer machine with a cold cache, and 2.8 MiB on a CI runner where the
+# fixture-generation containers had already warmed ffmpeg's libraries into the
+# host page cache. Same code, same libraries, a thirty-fold spread — the same
+# page-cache artifact that `bin/measure-ffmpeg-rss` documents at length,
+# resurfacing on the other side of the fence.
+#
+# It is still printed, because the spread is worth seeing and because a reader
+# comparing this line against the document deserves to know the two disagree.
 def measure_ffmpeg_text
   probe = <<~SH
     : > /tmp/anon
@@ -207,6 +221,14 @@ end
 # `B_backlog` is the *largest* variant the workload produces, and every slot is
 # assumed to hold one: a worst case is what belongs in a memory limit, and the
 # whole point of the guard is to check the worst case rather than the average.
+#
+# `ffmpeg_text` is the **documented budget**, not the live measurement above.
+# The guard's job is to check the model an operator reads, and what an operator
+# reads is "budget 150 MiB" — so predicting from a number that swings between
+# 3 MiB and 93 MiB with the host's cache state would test something nobody was
+# told. It also has to be in the prediction at all, because it is unavoidably in
+# the observation: `BEAM_base` is read from an idle container that has never run
+# a render, and `R_ffmpeg` is anonymous-only by construction.
 def predict(beam_base:, ffmpeg_text:, rss_table:, backlog_bytes:, concurrency:)
   r_ffmpeg = rss_table.values.max
   per_render = r_ffmpeg + backlog_bytes + HIGH_WATER
@@ -356,8 +378,9 @@ def run_guard(self_test:)
   rss_table = published_rss
   log "published R_ffmpeg: #{rss_table.map { |k, v| "#{k} #{mib(v)}" }.join(", ")} MiB"
 
-  ffmpeg_text = measure_ffmpeg_text
-  log "measured T_ffmpeg: #{mib(ffmpeg_text)} MiB of shared library text"
+  observed_text = measure_ffmpeg_text
+  log "T_ffmpeg: predicting from the documented #{mib(T_FFMPEG_BUDGET)} MiB budget; " \
+      "this host happened to charge #{mib(observed_text)} MiB (see measure_ffmpeg_text)"
 
   Dir.mktmpdir("audio-proxy-capacity") do |fixtures|
     step("fixtures") { generate_fixtures(fixtures) }
@@ -396,17 +419,23 @@ def run_guard(self_test:)
       statuses.all? { |s| s == "200" }
     end
 
-    # The prediction. In self-test mode it is built for a single slot while the
-    # container really ran four — a deliberate under-prediction standing in for
-    # a retention path the model does not know about, which the guard has to
-    # notice. See --self-test.
-    concurrency = self_test ? 1 : MAX_CONCURRENCY
+    # The prediction. In self-test mode `B_backlog` is zeroed while the container
+    # really retains a full variant per render — a model blind to retention
+    # altogether, which is the drift this guard exists to catch and which it must
+    # therefore be unable to miss. See --self-test.
+    #
+    # An earlier version injected the error as one slot instead of four, and that
+    # stopped being large enough the moment `T_ffmpeg` became a flat 150 MiB
+    # term: the inflated prediction covered the observation and the self-test
+    # started reporting that the guard had no teeth. It was right. Injecting into
+    # the term the guard is actually about, rather than into a multiplier, is
+    # both a bigger error and a more honest rehearsal of the real failure.
     prediction = predict(
       beam_base: beam_base,
-      ffmpeg_text: ffmpeg_text,
+      ffmpeg_text: T_FFMPEG_BUDGET,
       rss_table: rss_table,
-      backlog_bytes: largest_variant_bytes,
-      concurrency: concurrency
+      backlog_bytes: self_test ? 0 : largest_variant_bytes,
+      concurrency: MAX_CONCURRENCY
     )
 
     adjusted = observed[:peak] - observed[:inactive_file]
@@ -414,7 +443,7 @@ def run_guard(self_test:)
 
     puts
     log "BEAM_base (measured)   #{mib(prediction[:beam_base]).to_s.rjust(8)} MiB"
-    log "T_ffmpeg (measured)    #{mib(prediction[:ffmpeg_text]).to_s.rjust(8)} MiB, once"
+    log "T_ffmpeg (documented)  #{mib(prediction[:ffmpeg_text]).to_s.rjust(8)} MiB, once"
     log "R_ffmpeg (published)   #{mib(prediction[:r_ffmpeg]).to_s.rjust(8)} MiB × #{prediction[:renders]} renders"
     log "B_backlog              #{mib(prediction[:backlog]).to_s.rjust(8)} MiB × #{prediction[:renders]} renders"
     log "H_pipeline             #{mib(HIGH_WATER).to_s.rjust(8)} MiB × #{prediction[:renders]} renders"
@@ -448,7 +477,7 @@ end
 self_test = false
 OptionParser.new do |o|
   o.banner = "usage: bin/check-capacity [--self-test]"
-  o.on("--self-test", "assert the guard fails against a deliberate under-prediction") do
+  o.on("--self-test", "assert the guard fails against a model blind to retention") do
     self_test = true
   end
 end.parse!
@@ -465,16 +494,17 @@ end
 
 puts
 if self_test
-  # The red path. The same workload is measured against a prediction built for
-  # one concurrent render instead of four — the arithmetic a model that had lost
-  # track of a retention term would produce. If the guard still passes, its
-  # tolerance has swallowed a 4× error and it would not catch a real one either.
+  # The red path. The same workload is measured against a model carrying no
+  # retention term at all — the arithmetic a change that dropped or uncapped the
+  # backlog would produce. If the guard still passes, its tolerance has swallowed
+  # the largest term in the model and would not catch a real drift either.
   if within
-    puts "capacity self-test: FAILED — a 4× under-prediction still passed; the guard has no teeth"
+    puts "capacity self-test: FAILED — a model with no retention term still " \
+         "passed; the guard has no teeth"
     exit 1
   end
 
-  puts "capacity self-test: passed (the guard rejects a 4× under-prediction)"
+  puts "capacity self-test: passed (the guard rejects a model blind to retention)"
   exit 0
 end
 
