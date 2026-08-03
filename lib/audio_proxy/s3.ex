@@ -498,7 +498,15 @@ defmodule AudioProxy.S3 do
     split_parts(rest, [part | parts])
   end
 
-  defp split_parts(rest, parts), do: {Enum.reverse(parts), {[rest], byte_size(rest)}}
+  # The remainder is copied rather than carried as a sub-binary. Pattern
+  # matching a binary yields a reference into the original, so holding the
+  # 10 KiB tail of a 5 MiB buffer holds the whole 5 MiB until the next part
+  # flushes — which would make the bound above two parts rather than one. One
+  # memcpy of at most a chunk's worth of bytes buys the buffer back.
+  defp split_parts(rest, parts) do
+    rest = :binary.copy(rest)
+    {Enum.reverse(parts), {[rest], byte_size(rest)}}
+  end
 
   # Resuming with `{:halt, _}` is what lets the *source* clean up: a suspended
   # `Enumerable.reduce/3` leaves the enumerable open, and a
