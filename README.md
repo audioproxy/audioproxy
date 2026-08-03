@@ -89,7 +89,7 @@ curl "$BASE/insecure/info/$SRC"
 
 Each URL describes its output completely, so the same URL always means the same bytes. The first request for a variant renders it and streams it while it encodes; later requests are served from the variant bucket with `Range` support.
 
-> **Which of these work today?** The first six return audio. `f:peaks` and `info` do not yet; see the [Roadmap](#roadmap). Every option string above is checked against the parser by the test suite, so none of them are aspirational spellings.
+> **Which of these work today?** The first six return audio and the last returns metadata. `f:peaks` does not yet; see the [Roadmap](#roadmap). Every option string above is checked against the parser by the test suite, so none of them are aspirational spellings.
 
 ## Roadmap
 
@@ -103,6 +103,7 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 - Concurrent requests for the same variant share one render, with mid-render joiners catching up from the start
 - A variant cache: completed renders persist to a store (a local directory today, object storage when the S3 backend lands) and are served back without rendering, with `Range` support
 - A cap on simultaneous renders with a bounded wait queue, so a burst queues (and then sheds, with `Retry-After`) instead of thrashing the machine
+- `GET /info`, giving duration, sample rate, channels and tags, so clients can size their variant URLs to the source
 - A single container, published per release
 
 **Next: what makes it production-shaped**
@@ -111,7 +112,6 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 
 **After that**
 
-- `GET /info`, giving duration, sample rate and channels, so clients can build sensible variant URLs
 - `f:peaks`, waveform min/max data for drawing player UIs without decoding audio in the browser
 - HTTPS sources, for stores that are not S3
 - A Prometheus `/metrics` endpoint reporting queue depth, render durations and hit ratio
@@ -262,6 +262,44 @@ At most `AP_MAX_CONCURRENCY` renders run at once. A request that needs one when 
 
 For what happens behind that (the subprocess, coalescing, slots, buffering, the timeout and the kill discipline) see [docs/rendering.md](docs/rendering.md).
 
+## Asking what a source is
+
+`info` sits where the options go and answers with the source's own metadata, so a client can size a request to the file before making it — a preview URL that trims past the end of a track is an easy mistake to make blind.
+
+```bash
+REST='/info/plain/local://piece.wav'
+curl -D - "localhost:4000/$SIG$REST"
+```
+
+```
+HTTP/1.1 200 OK
+content-type: application/json
+cache-control: public, max-age=3600
+etag: "a1f3…"
+
+{"format":"wav","duration":184.32,"sample_rate":48000,"channels":2,
+ "bit_depth":16,"bitrate":1536000,"size":35389532,
+ "tags":{"title":"Sea Change","artist":"…"}}
+```
+
+| Field | Meaning |
+|---|---|
+| `format` | The `f:` token this source would be, not the container's internal name: an MP4 is `m4a`, and Ogg is `opus` or `ogg` depending on what is inside it |
+| `duration` | Seconds, as a float |
+| `sample_rate`, `channels` | The source's own, which is what a variant inherits when you leave `sr` or `ch` off |
+| `bit_depth` | Lossless sources only |
+| `bitrate` | Bits per second |
+| `size` | Bytes, from storage |
+| `tags` | Whatever the file carries — title, artist and the rest — as strings |
+
+**A field the source cannot answer is left out, never `null`.** A lossy source has no `bit_depth`, so the key is simply absent; an untagged file has no `tags`. Test for the key, not for a value.
+
+`info` takes no processing options: it describes the source, not a variant, so `/info/br:128/…` is a `422`. A source with no audio in it at all — a video-only MP4, a text file — is a `415`.
+
+Responses carry an `ETag` derived from the source object, so a client or CDN that has seen this metadata before revalidates for the price of a `304`. `Cache-Control` is one hour rather than the year a rendered variant gets, and deliberately not `immutable`: a variant's URL describes its bytes exactly and can never go stale, while this describes a file somebody may re-upload tomorrow.
+
+Probing is cheap — it reads the file's header and stops — so it does not queue behind renders and has its own, shorter, `AP_PROBE_TIMEOUT`.
+
 ## Processing options
 
 The options segments describe the variant completely, and their normalized form *is* the cache key. `AudioProxy.Options` parses, validates, and normalizes them; `AudioProxy.CacheKey` hashes the result. Invalid or conflicting options are rejected with an `AudioProxy.OptionError` naming the offending segment, which the HTTP layer will render as a `422`.
@@ -384,11 +422,13 @@ Failures are JSON, one shape everywhere: `{"error": "…", "message": "…"}`.
 | `401` | `invalid_signature` | Missing or invalid signature |
 | `404` | `not_found` | The source is missing, unreadable, unparseable, or not one this proxy may serve, deliberately indistinguishable, so a `404` tells you nothing about what exists on disk |
 | `413` | `source_too_large` | The source exceeds `AP_MAX_SRC_BYTES` |
-| `415` | `undecodable_source` | The source format is not decodable |
+| `415` | `undecodable_source` | The source format is not decodable, or — on `/info` — carries no audio at all |
 | `422` | `invalid_options` | Invalid or conflicting options; the message names the offending segment |
 | `429` | `queue_full` | The render queue is full, or this request waited longer than `AP_RENDER_TIMEOUT` for a slot; `Retry-After` is set |
 | `500` | `render_failed` | The render failed for a reason that is not yours: no encoder on the host, no disk space, a failure the proxy could not classify. Worth retrying |
+| `500` | `probe_failed` | The `/info` probe failed for a reason that is not yours. Worth retrying |
 | `504` | `render_timeout` | A render started and then exceeded `AP_RENDER_TIMEOUT`. Time spent waiting for a slot is a `429`, not this |
+| `504` | `probe_timeout` | An `/info` probe exceeded `AP_PROBE_TIMEOUT` |
 
 A failure *after* the response has begun is not in this table and cannot be: see [Rendering a variant](#rendering-a-variant).
 
@@ -410,6 +450,7 @@ Note that the variables below are the full configuration surface for the design,
 | `AP_QUEUE_SIZE` | non-negative integer | `32` | Requests that may wait for a slot before the next one is answered `429` with `Retry-After`. `0` means no waiting at all |
 | `AP_MAX_SRC_BYTES` | positive integer | `2000000000` | Reject larger sources with `413`; also caps the bytes a render may hold in memory |
 | `AP_RENDER_TIMEOUT` | positive integer | `300` | Seconds a render may take before ffmpeg is killed and the request answered `504`. Raise it for full-length transcodes of long masters; the default suits previews. See [docs/rendering.md](docs/rendering.md) |
+| `AP_PROBE_TIMEOUT` | positive integer | `10` | Seconds an `/info` probe may take before ffprobe is killed and the request answered `504`. Separate from `AP_RENDER_TIMEOUT`, and much shorter: a probe reads the file's header rather than decoding it. See [Asking what a source is](#asking-what-a-source-is) |
 | `AP_SERVE_MODE` | `redirect` \| `proxy` | `redirect` | Serve cache hits by redirect or proxied. See [Choosing a serve mode](#choosing-a-serve-mode) |
 | `AP_PRESIGN_TTL` | positive integer | `300` | Seconds a cache hit's presigned URL stays valid. Redirect mode only |
 | `AP_LOG_LEVEL` | `debug` \| `info` \| `warning` \| `error` | `info` | Lowest level written to stdout. See [Logs](#logs) |
@@ -475,13 +516,14 @@ The proxy is built to sit behind a CDN without special configuration on either s
 | `302` (cache hit, redirect mode) | `no-store` | The `Location` is a credential with an expiry; a cached redirect hands out URLs that no longer work |
 | `416` | `no-store` | The only response whose body depends on a request header, and nothing here sends `Vary: Range` |
 | `429`, `500`, `504` | `no-store` | Transient — caching a transient failure amplifies it (`429` carries `Retry-After`) |
+| `200` from `/info` | `public, max-age=3600` | Not `immutable`, and not a year: the metadata describes a source somebody may re-upload, so caches must be able to revalidate it. See [Asking what a source is](#asking-what-a-source-is) |
 | `/health` | `no-store` | Liveness is only worth anything fresh |
 
 The error rows are a deliberate relaxation, worth knowing if you operate a shared cache: without them every response would carry Plug's `max-age=0, private, must-revalidate`, so errors were previously not cacheable at all and never shareable. Dropping `private` is safe here because an error body is a pure function of the URL — no cookies, no auth headers, nothing per-user in it. The practical effect is that a hot 404 or a bad-signature storm is absorbed at the edge instead of reaching the origin every time. If you need the old behavior for a specific deployment, an edge rule overriding `Cache-Control` on 4xx is the place to do it; the proxy has no knob for it by design.
 
 Three behaviors round out the CDN-facing surface:
 
-- **Revalidation costs no render.** A request whose `If-None-Match` matches the variant's `ETag` answers `304` before the proxy touches storage or spawns anything — the ETag derives from the URL alone. The signature still gates: an unsigned request is `401`, matching validator or not.
+- **Revalidation costs no render.** A request whose `If-None-Match` matches the variant's `ETag` answers `304` before the proxy touches storage or spawns anything — the ETag derives from the URL alone. The signature still gates: an unsigned request is `401`, matching validator or not. On `/info` the validator comes from the source object rather than the URL, so revalidating there costs one `stat` and still no probe.
 - **HEAD works.** `HEAD` on a signed URL runs every check a `GET` runs — signature, options, source authorization and stat — with an empty body and no render. Errors answer as `GET` does, bodiless. `HEAD /health` works too. Two caveats if you use it to validate URLs. Because it does not decode, it cannot report a source ffmpeg would reject, so a `HEAD` can answer `200` where the `GET` answers `415`; everything decidable without decoding (`401`, `404`, `413`, `422`) matches the `GET` exactly. And it does not consult the variant cache, so it reports the render path's framing, never a hit's `content-length` or its `302`.
 - **`Range` on an uncached variant is ignored.** A `Range` header on a variant that has to be rendered gets the full `200` chunked stream (RFC 9110 permits this), with no `Accept-Ranges` and no `206`. Range serving belongs to cached variants: a hit answers `206` in proxy mode, or redirects to storage that serves it natively. A range no byte of a cached variant can satisfy is a `416`; one this proxy does not implement (several ranges at once, a unit other than `bytes`) is ignored, and answers the whole variant rather than failing. See [Cache semantics](#cache-semantics).
 
