@@ -266,6 +266,13 @@ defmodule AudioProxy.S3Test do
 
       assert part_sizes(key) == [5_242_880]
       assert read(key) == body
+
+      # `part_sizes/1` defaults the parts count to 1 when the header is absent,
+      # so the assertion above holds for a single `PutObject` too. The ETag is
+      # what separates them: a multipart ETag is a digest-of-digests carrying
+      # the part count, so `-1` is the proof this took the multipart route.
+      assert {:ok, %{etag: etag}} = S3.head(@bucket, key)
+      assert etag =~ ~r/-1"?$/
     end
 
     test "an object over one part goes multipart" do

@@ -83,6 +83,27 @@ defmodule AudioProxy.S3AddressingTest do
     end
   end
 
+  describe "a non-default port" do
+    # The port is the one part of the URL the two readers assemble by different
+    # means: the request path takes `config[:port]`, while `presigned_url/5`
+    # goes through `ExAws.S3.Utils.sanitized_port_component/1`, which elides 80
+    # and 443 and appends the rest. Every other fixture here uses 443, so
+    # without this the elision is all that is covered — and the MinIO suite
+    # reaches port 9000 only path-style.
+    setup do: configure(:virtual, URI.parse("http://store.test:9000"))
+
+    test "appears in both the request URL and the presigned URL" do
+      assert request_url() == "http://variants.store.test:9000/abc/def.mp3"
+
+      assert {:ok, url} = S3.presign_get(@bucket, @key)
+      uri = URI.parse(url)
+
+      assert uri.host == "variants.store.test"
+      assert uri.port == 9000
+      assert uri.path == "/abc/def.mp3"
+    end
+  end
+
   describe "config/0" do
     test "carries virtual_host only when addressing is virtual" do
       configure(:virtual)
@@ -95,7 +116,7 @@ defmodule AudioProxy.S3AddressingTest do
 
   ## Fixture
 
-  defp configure(addressing) do
+  defp configure(addressing, endpoint \\ URI.parse("https://example-store.test")) do
     put_config(%{
       presign_ttl: 900,
       s3: %{
@@ -103,7 +124,7 @@ defmodule AudioProxy.S3AddressingTest do
         access_key_id: "AKIAIOSFODNN7EXAMPLE",
         secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
         session_token: nil,
-        endpoint: URI.parse("https://example-store.test"),
+        endpoint: endpoint,
         addressing: addressing,
         ca_bundle: nil
       }
