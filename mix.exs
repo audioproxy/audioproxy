@@ -4,7 +4,7 @@ defmodule AudioProxy.MixProject do
   def project do
     [
       app: :audio_proxy,
-      version: "0.1.0",
+      version: "0.2.0",
       elixir: "~> 1.20",
       start_permanent: Mix.env() == :prod,
       elixirc_paths: elixirc_paths(Mix.env()),
