@@ -125,11 +125,21 @@ defmodule AudioProxy.InfoEndpointTest do
       assert get(signed("/f:mp3/info/f:opus/plain/local://piece.wav")).status == 422
     end
 
-    test "no subprocess runs for a request that fails the options gate" do
+    test "the chain halts before the source is even resolved" do
       conn = get(signed("/info/f:opus/plain/local://piece.wav"))
 
       assert conn.status == 422
-      assert DynamicSupervisor.which_children(AudioProxy.Ffmpeg.RenderSupervisor) == []
+      assert conn.halted
+
+      # Asserted through the assigns rather than by counting children of
+      # `Ffmpeg.RenderSupervisor`: that supervisor is a global shared by every
+      # test in the run, so a render another module started and has not yet
+      # reaped makes an emptiness check fail for reasons that have nothing to
+      # do with this request. An absent `:source` is the local fact, and the
+      # stronger one — the chain stopped at `ParseOptions`, two plugs before
+      # anything could spawn.
+      refute Map.has_key?(conn.assigns, :source)
+      refute Map.has_key?(conn.assigns, :action)
     end
   end
 
