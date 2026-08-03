@@ -6,7 +6,7 @@ Transcode audio on demand, from a URL.
 
 Point it at your audio and ask for a variant by URL: a 30-second preview, a mono file for speech-to-text, a normalised podcast MP3, a 24-bit FLAC excerpt. The options are in the path, so one master can serve all of them and you generate none of them in advance. If you know [imgproxy](https://imgproxy.net), this is that, for audio.
 
-> **Status: early, `v0.1.0`.** Transcoding works end to end from a mounted directory and you can try it in about a minute. Do not put it in front of production traffic yet: nothing is kept once a render finishes, so a variant is encoded again for every request that does not overlap another. See the [Roadmap](#roadmap).
+> **Status: early, `v0.2.0`.** Transcoding works end to end from a mounted directory and you can try it in about a minute — and with a [variant store](#variant-store) configured, completed renders are kept and served back with `Range` support, so a variant is encoded once rather than per request. Sources in S3 are the next slice; until then this is for audio on a mounted directory. See the [Roadmap](#roadmap).
 
 ## Quick start
 
@@ -17,7 +17,7 @@ docker run --rm -p 4000:4000 \
   -e AP_ALLOW_INSECURE=true \
   -e AP_LOCAL_ROOT=/audio \
   -v /path/to/your/audio:/audio:ro \
-  ghcr.io/audioproxy/audioproxy:0.1.0
+  ghcr.io/audioproxy/audioproxy:0.2.0
 ```
 
 > On Apple Silicon, add `--platform linux/amd64`. The image is x86-64 only for now and runs under emulation; arm64 is [its own slice](openspec/changes/add-multi-arch-images).
@@ -29,7 +29,7 @@ BASE=localhost:4000
 SRC='plain/local://track.wav'
 
 curl -s "$BASE/health"
-# {"status":"ok","version":"0.1.0"}
+# {"status":"ok","version":"0.2.0"}
 
 # A 30-second preview: Opus at 96 kbps, fading in and out.
 curl -o preview.opus "$BASE/insecure/f:opus/br:96/t:0:30/fade:1:1/$SRC"
@@ -95,7 +95,7 @@ Each URL describes its output completely, so the same URL always means the same 
 
 No dates. It is built in small releases, each one usable, in roughly this order.
 
-**Working now (`v0.1.0`)**
+**Working now (`v0.2.0`)**
 
 - Signed URLs, the full processing-options grammar, and the cache-key rules
 - Transcoding to MP3, AAC/M4A, Opus, Vorbis, FLAC and WAV, with trimming, fades, loudness normalisation, channel and sample-rate control
@@ -157,13 +157,16 @@ The [Quick start](#quick-start) above runs it unsigned, for a first look. The di
 docker run --rm -p 4000:4000 \
   -e AP_KEY="$AP_KEY" -e AP_SALT="$AP_SALT" \
   -e AP_LOCAL_ROOT=/audio \
+  -e AP_VARIANT_STORE=file:///var/cache/audio_proxy \
+  -e AP_SERVE_MODE=proxy \
   -v /path/to/your/audio:/audio:ro \
-  ghcr.io/audioproxy/audioproxy:0.1.0
+  -v audioproxy-cache:/var/cache/audio_proxy \
+  ghcr.io/audioproxy/audioproxy:0.2.0
 ```
 
-That is the whole configuration for serving files off a mounted directory: no credentials, no bucket, no database.
+That is the whole configuration for serving files off a mounted directory, with completed renders cached on a named volume: no credentials, no bucket, no database. Drop the two `AP_VARIANT_*` lines and it still works — every request just renders. The store is [unbounded](#variant-store); the volume is yours to watch.
 
-**Pin a version.** `:0.1.0` and `:sha-<commit>` name an exact image; `:0.1` follows patch releases; `:latest` and `:edge` move under you, and `:edge` is whatever last landed on `main`. Pinning matters more here than for most services, because a different ffmpeg encodes the same URL to different bytes, which is also why a pin bump always cuts a release. The pinned versions are in [VERSIONS.md](VERSIONS.md).
+**Pin a version.** `:0.2.0` and `:sha-<commit>` name an exact image; `:0.2` follows patch releases; `:latest` and `:edge` move under you, and `:edge` is whatever last landed on `main`. Pinning matters more here than for most services, because a different ffmpeg encodes the same URL to different bytes, which is also why a pin bump always cuts a release. The pinned versions are in [VERSIONS.md](VERSIONS.md).
 
 To run it from a checkout instead, for development or to build your own image:
 
@@ -343,7 +346,7 @@ docker run -p 4000:4000 \
   -e AP_ALLOW_INSECURE=true \
   -e AP_LOCAL_ROOT=/srv/audio \
   -v /path/to/your/audio:/srv/audio:ro \
-  ghcr.io/audioproxy/audioproxy:0.1.0
+  ghcr.io/audioproxy/audioproxy:0.2.0
 
 # …renders /srv/audio/previews/track.wav
 curl "$BASE/insecure/f:mp3/br:128/plain/local://previews/track.wav"
