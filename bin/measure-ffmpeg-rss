@@ -1,0 +1,360 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Measures `R_ffmpeg` — the peak memory one render's ffmpeg subprocess costs —
+# for the ffmpeg the image ships, and prints it as the markdown table
+# docs/capacity.md publishes.
+#
+#   bin/measure-ffmpeg-rss                      # build, measure, print
+#   SKIP_BUILD=1 bin/measure-ffmpeg-rss         # reuse the tagged images
+#   bin/measure-ffmpeg-rss --write docs/capacity.md   # replace the table in place
+#
+# Requires docker, a cgroup v2 host (`memory.peak`, kernel >= 5.19) and nothing
+# else. ffmpeg is NOT required on the host — the point is to measure the binary
+# the image ships, and the argv it is handed comes from
+# `AudioProxy.Ffmpeg.Command`, not from a copy of it maintained here.
+#
+# ## How a number is produced
+#
+# Two containers per row, because the measurement has to exclude the thing
+# measuring it:
+#
+#   1. `audio_proxy:test` runs `Options.parse/1` and `Command.build/3` to print
+#      the real argv for the option string. A BEAM costs tens of megabytes, so
+#      it must not be in the cgroup being read.
+#   2. `audio_proxy:runtime` runs *only* ffmpeg with that argv, then reads its
+#      own `memory.peak`. An empty container of the same image is measured the
+#      same way and subtracted, so the row is ffmpeg's cost and not `sh`'s.
+#
+# Input is lavfi (`sine`), and output goes to `/dev/null`, so no source or
+# variant file is read or written and neither can appear in the accounting.
+#
+# ## Why the figure is peak `anon`, and not `memory.peak`
+#
+# `memory.peak` — the obvious instrument — is not usable here, and the reason is
+# worth stating because it looks like a measurement problem and is really a
+# modelling one.
+#
+# `memory.peak` counts page cache, and ffmpeg's own shared libraries are page
+# cache: libavcodec and friends are around 130 MiB of file-backed pages, charged
+# to whichever cgroup first faults them in. So the same flac encode measured
+# anywhere between 20 MiB and 148 MiB depending on whether its container was the
+# unlucky one paging in libavcodec — an outlier that reads exactly like a finding
+# about flac and is not one.
+#
+# Subtracting the cache resident at exit was the first fix and was worse: it
+# over-corrects (the cache peak and the anonymous peak do not coincide) and
+# produced two-hour rows *cheaper* than sixty-second ones, which is nonsense
+# published as data.
+#
+# The library text is real memory, but it is **shared and counted once** — eight
+# concurrent ffmpegs map one copy — so it belongs with `BEAM_base` in the model
+# and not in a term multiplied by concurrency. What `R_ffmpeg` needs to be is the
+# *private* cost of one more render, which is exactly `anon`. cgroup v2 has no
+# high-water mark for it, so a sampler inside the container polls `memory.stat`
+# while the encode runs and the maximum is taken. The sampler is in the cgroup it
+# samples; the baseline run below carries the same sampler and is subtracted, so
+# it cancels.
+#
+# Repeats remain, because sampling can miss a peak between polls. Here the
+# minimum would be the wrong estimator — a missed sample under-reports — so rows
+# take the **maximum** across runs.
+#
+# The one liberty taken with the built argv: `-f lavfi` is inserted immediately
+# before `-i`, since `Command.build/3` names an input URL and has no
+# vocabulary for a demuxer. Everything after `-i` — filters, channel layout,
+# codec, muxer — is the shipped builder's output verbatim, which is what the
+# encoder-side memory being measured depends on. The demuxer this substitutes
+# for costs a bounded input buffer either way; the end-to-end guard in
+# `bin/check-capacity` measures the real source path.
+
+require "json"
+require "open3"
+require "optparse"
+
+IMAGE = ENV.fetch("IMAGE", "audio_proxy:runtime")
+TEST_IMAGE = ENV.fetch("TEST_IMAGE", "audio_proxy:test")
+REPO_ROOT = File.expand_path("..", __dir__)
+
+BEGIN_MARKER = "<!-- rss-table:begin -->"
+END_MARKER = "<!-- rss-table:end -->"
+
+# Short rows establish the per-format cost; the long rows are the evidence for
+# the claim the document leads with — that RSS does not track source duration,
+# because ffmpeg streams through fixed buffers and accumulates nothing.
+MATRIX_DURATION = Integer(ENV.fetch("DURATION", "60"))
+LONG_DURATION = Integer(ENV.fetch("LONG_DURATION", "7200"))
+
+# Runs per row; the reported figure is the highest sampled peak. See the header.
+REPEATS = Integer(ENV.fetch("REPEATS", "3"))
+
+# Seconds between `anon` samples. Fine enough that even the shortest encode here
+# (a few hundred milliseconds for flac) is sampled tens of times: at 0.1 s it was
+# not, and rows came back at zero because the peak fell between two polls.
+SAMPLE_INTERVAL = ENV.fetch("SAMPLE_INTERVAL", "0.02")
+
+# Below this a row is not a small number, it is a missed peak — every real
+# encoder allocates more than this — so the script says so rather than
+# publishing it.
+MIN_PLAUSIBLE_BYTES = 2 * 1024 * 1024
+
+# `peaks` is absent on purpose: its reduction is not merged (see
+# `AudioProxy.Ffmpeg.Command`'s moduledoc), so what `f:peaks` would measure
+# today is raw s16le on stdout rather than the format the API will ship.
+FORMATS = ENV.fetch("FORMATS", "mp3 opus ogg aac m4a flac wav").split
+
+# One long-form row per encoder family — lossy, Ogg-framed, and lossless PCM —
+# plus the heaviest filter path. Running the whole matrix at two hours would
+# add ten minutes to say the same thing seven more times.
+LONG_ROWS = [
+  ["f:mp3/br:128", "mp3 128k"],
+  ["f:opus/br:96", "opus 96k"],
+  ["f:flac", "flac"],
+  ["f:mp3/br:128/norm:ebu", "mp3 128k + norm"]
+].freeze
+
+def sh(*args)
+  stdout, stderr, status = Open3.capture3(*args)
+  @last_stderr = stderr
+  [stdout, status.success?]
+end
+
+def sh!(*args)
+  out, ok = sh(*args)
+  raise "command failed: #{args.join(" ")}\n#{out}#{@last_stderr}" unless ok
+
+  out
+end
+
+def build_images
+  return warn("  skipped (SKIP_BUILD)") if ENV["SKIP_BUILD"]
+
+  sh!("docker", "build", "--target", "runtime", "-t", IMAGE, REPO_ROOT)
+  sh!("docker", "build", "--target", "test", "-t", TEST_IMAGE, REPO_ROOT)
+  warn "  built #{IMAGE} and #{TEST_IMAGE}"
+end
+
+# The argv the running proxy would use, straight out of the builder. `--no-start`
+# because building an argument vector needs the modules and not the supervision
+# tree — booting would demand an `AP_` configuration this has no business
+# inventing.
+#
+# One argument per line, behind a sentinel: `mix` compiles the app on first run
+# in a fresh container and says so on stdout, so "the output" is the argv plus a
+# build log. Splitting on the sentinel is what makes the read exact rather than
+# heuristic — a `Compiling 42 files (.ex)` line once reached ffmpeg as an output
+# filename. No argv element the builder emits contains a newline (filters are
+# `key=value:key=value`, and a newline in the input URL would be a signature
+# failure long before here).
+SENTINEL = "--argv--"
+
+ELIXIR_SNIPPET = <<~ELIXIR
+  {:ok, opts} = AudioProxy.Options.parse(System.fetch_env!("OPTS"))
+  IO.puts("#{SENTINEL}")
+
+  opts
+  |> AudioProxy.Ffmpeg.Command.build(System.fetch_env!("INPUT"))
+  |> Enum.each(&IO.puts/1)
+ELIXIR
+
+def build_argv(options, input)
+  out = sh!("docker", "run", "--rm",
+            "-e", "OPTS=#{options}", "-e", "INPUT=#{input}",
+            TEST_IMAGE,
+            "mix", "run", "--no-start", "-e", ELIXIR_SNIPPET)
+
+  _log, _, argv = out.partition("#{SENTINEL}\n")
+  raise "no #{SENTINEL} in builder output:\n#{out}" if argv.empty?
+
+  with_lavfi_demuxer(argv.lines.map(&:chomp).reject(&:empty?))
+end
+
+# `-f lavfi` immediately before `-i`, which is where an input-format flag has to
+# sit: `-ss`/`-t` are already before it (input seeking), and anything after `-i`
+# would apply to the output.
+def with_lavfi_demuxer(argv)
+  i = argv.index("-i") or raise "built argv has no -i: #{argv.inspect}"
+  argv.dup.insert(i, "-f", "lavfi")
+end
+
+# Runs one command in a fresh container and returns its cgroup accounting.
+#
+# `--cgroupns=private` is the default on a cgroup v2 host, and stated anyway:
+# with the host namespace the container would read the *host's* memory.peak,
+# which is a plausible-looking number about something else entirely.
+def measure(cmd_argv)
+  probe = <<~SH
+    test -r /sys/fs/cgroup/memory.stat || { echo "cgroup=missing"; exit 0; }
+
+    # One sample synchronously before the loop starts: a command that finishes
+    # in milliseconds (the baseline's `true`) would otherwise be measured
+    # against an empty sample file.
+    : > /tmp/anon
+    awk '$1 == "anon" {print $2}' /sys/fs/cgroup/memory.stat >> /tmp/anon
+
+    while :; do
+      awk '$1 == "anon" {print $2}' /sys/fs/cgroup/memory.stat >> /tmp/anon
+      sleep $SAMPLE_INTERVAL
+    done &
+    sampler=$!
+
+    "$@" > /dev/null 2>/tmp/ffmpeg.err
+    rc=$?
+    kill "$sampler" 2>/dev/null
+
+    echo "rc=$rc"
+    echo "anon=$(sort -n /tmp/anon | tail -1)"
+    echo "samples=$(wc -l < /tmp/anon)"
+    echo "peak=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo 0)"
+    echo "file=$(awk '$1 == "file" {print $2}' /sys/fs/cgroup/memory.stat)"
+    tail -c 400 /tmp/ffmpeg.err | tr '\\n' '~'
+  SH
+
+  out = sh!("docker", "run", "--rm", "--cgroupns=private",
+            "-e", "SAMPLE_INTERVAL=#{SAMPLE_INTERVAL}",
+            "--entrypoint", "sh", IMAGE, "-c", probe, "sh", *cmd_argv)
+
+  fields = out.lines.map(&:chomp)
+  field = ->(name) { fields.find { |l| l.start_with?("#{name}=") }&.delete_prefix("#{name}=") }
+
+  raise "this host exposes no cgroup v2 memory.stat" if field["cgroup"] == "missing"
+  raise "ffmpeg exited #{field["rc"]}:\n#{out}" unless field["rc"] == "0"
+
+  anon = field["anon"].to_s
+  raise "the sampler recorded nothing:\n#{out}" if anon.empty?
+
+  {
+    anon: Integer(anon),
+    samples: Integer(field["samples"]),
+    peak: Integer(field["peak"]),
+    file: Integer(field["file"])
+  }
+end
+
+# The highest sampled `anon` across REPEATS runs. Maximum rather than minimum:
+# the sampler can land either side of a short-lived peak, and a run that missed
+# it under-reports. Nothing inflates `anon` the way page cache inflated
+# `memory.peak`, so there is no contamination to guard against on this side.
+def measure_peak(cmd_argv)
+  Array.new(REPEATS) { measure(cmd_argv) }.max_by { |r| r[:anon] }
+end
+
+# One throwaway container that runs ffmpeg for real, so its libraries are warm
+# before the first measured row. It no longer changes the published figure now
+# that rows are anonymous memory, but a cold first row still reports a confusing
+# `memory.peak` in the diagnostics beside it.
+def warm_up
+  measure(["ffmpeg", "-hide_banner", "-loglevel", "error",
+           "-f", "lavfi", "-i", "sine=duration=1", "-f", "mp3", "pipe:1"])
+end
+
+# What the probe itself costs: `sh`, the sampling loop, and whatever the runtime
+# charges a cgroup for existing. Subtracted from every row, which is also what
+# cancels the sampler out of the result.
+def baseline
+  @baseline ||= measure_peak(["true"]).tap do |b|
+    warn "  probe baseline: #{mib(b[:anon])} MiB anonymous"
+  end
+end
+
+def mib(bytes) = (bytes / 1_048_576.0).round(1)
+
+def row(options, label, duration)
+  input = "sine=frequency=440:duration=#{duration}"
+  argv = build_argv(options, input)
+  started = Time.now
+  result = measure_peak(["ffmpeg", *argv])
+  elapsed = Time.now - started
+
+  net = [result[:anon] - baseline[:anon], 0].max
+  warn format("  %-22s %6.1f MiB  (%d samples, memory.peak %.1f MiB, %.0fs)",
+              "#{label} @#{duration}s", mib(net), result[:samples],
+              mib(result[:peak]), elapsed)
+
+  if net < MIN_PLAUSIBLE_BYTES
+    raise "#{label} measured #{mib(net)} MiB over #{result[:samples]} samples — " \
+          "the peak was missed. Lower SAMPLE_INTERVAL (now #{SAMPLE_INTERVAL}s) " \
+          "or raise DURATION so the encode runs longer."
+  end
+
+  {label: label, options: options, duration: duration, rss: net, file: result[:file]}
+end
+
+def image_facts
+  ffmpeg = sh!("docker", "run", "--rm", "--entrypoint", "ffmpeg", IMAGE, "-version")
+    .lines.find { |l| l.start_with?("ffmpeg version") }.to_s.strip
+  inspected = JSON.parse(sh!("docker", "inspect", IMAGE)).first
+  {
+    ffmpeg: ffmpeg[/ffmpeg version (\S+)/, 1],
+    arch: "#{inspected["Os"]}/#{inspected["Architecture"]}"
+  }
+end
+
+def table(short_rows, long_rows, facts)
+  lines = []
+  lines << "| Variant | Options | Source | Peak RSS |"
+  lines << "|---|---|---|---|"
+  short_rows.each do |r|
+    lines << "| #{r[:label]} | `#{r[:options]}` | #{r[:duration]} s | #{mib(r[:rss])} MiB |"
+  end
+  long_rows.each do |r|
+    hours = (r[:duration] / 3600.0).round(1)
+    lines << "| #{r[:label]} | `#{r[:options]}` | **#{hours} h** | **#{mib(r[:rss])} MiB** |"
+  end
+  lines << ""
+  lines << "Peak **anonymous** memory — the private cost of one more render, which " \
+           "is what the model multiplies by concurrency. Measured on " \
+           "`#{facts[:arch]}` against ffmpeg `#{facts[:ffmpeg]}` from the pinned " \
+           "runtime image: the highest of #{REPEATS} sampled runs per row, probe " \
+           "baseline subtracted. Regenerate with `bin/measure-ffmpeg-rss`."
+  lines.join("\n")
+end
+
+def write_into(path, rendered)
+  doc = File.read(path)
+  unless doc.include?(BEGIN_MARKER) && doc.include?(END_MARKER)
+    raise "#{path} has no #{BEGIN_MARKER} / #{END_MARKER} pair to write between"
+  end
+
+  updated = doc.sub(/#{Regexp.escape(BEGIN_MARKER)}.*#{Regexp.escape(END_MARKER)}/m,
+                    "#{BEGIN_MARKER}\n\n#{rendered}\n\n#{END_MARKER}")
+  File.write(path, updated)
+  warn "  wrote the table into #{path}"
+end
+
+# ---------------------------------------------------------------------------
+
+target = nil
+OptionParser.new do |o|
+  o.banner = "usage: bin/measure-ffmpeg-rss [--write PATH]"
+  o.on("--write PATH", "replace the table between the markers in PATH") { |v| target = v }
+end.parse!
+
+warn "→ images"
+build_images
+
+facts = image_facts
+warn "→ measuring against ffmpeg #{facts[:ffmpeg]} on #{facts[:arch]} " \
+     "(max of #{REPEATS} sampled runs per row)"
+warm_up
+
+short_rows = FORMATS.flat_map do |format|
+  # A bitrate for the lossy encoders only: `br` is refused for the lossless
+  # ones, so asking for it would fail validation rather than measure anything.
+  bitrate = %w[mp3 opus ogg aac m4a].include?(format) ? "/br:128" : ""
+  [
+    row("f:#{format}#{bitrate}", format, MATRIX_DURATION),
+    row("f:#{format}#{bitrate}/norm:ebu", "#{format} + norm", MATRIX_DURATION)
+  ]
+end
+
+long_rows = LONG_ROWS.map { |options, label| row(options, label, LONG_DURATION) }
+
+rendered = table(short_rows, long_rows, facts)
+
+if target
+  write_into(File.expand_path(target, REPO_ROOT), rendered)
+else
+  puts
+  puts rendered
+end
