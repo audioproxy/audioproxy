@@ -70,5 +70,11 @@ bytes for the same URL — so it is a release, not a silent update. The procedur
 3. Update the table above, and `FFMPEG_MAJOR` if the major moved. If it did,
    expect the argv contract to need real work — run the full `:ffmpeg` suite and
    read the failures rather than adjusting the assertion.
-4. Run `bin/smoke-image` locally, then let CI run it again.
-5. Cut a patch release (see [docs/development.md](docs/development.md#releases)).
+4. Regenerate the measured memory table:
+   `bin/measure-ffmpeg-rss --write docs/capacity.md`. A different ffmpeg holds
+   different memory, and [docs/capacity.md](docs/capacity.md) is what an
+   operator sizes a container from — a stale table is a wrong memory limit.
+   Commit the regenerated table with the bump; a bump that moves the numbers
+   noticeably belongs in the release notes.
+5. Run `bin/smoke-image` locally, then let CI run it again.
+6. Cut a patch release (see [docs/development.md](docs/development.md#releases)).

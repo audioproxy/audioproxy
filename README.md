@@ -421,6 +421,8 @@ Booleans accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`, case-insensiti
 
 The listener port is read from `AP_PORT`, then `PORT`, then `4000`.
 
+**Sizing the container.** `AP_MAX_CONCURRENCY` and `AP_MAX_SRC_BYTES` are the two variables that decide how much memory a container needs, and the answer is arithmetic rather than a guess: a render's output is held in memory until the render ends, so a full-length transcode costs its own size while a source of any length costs nothing. [docs/capacity.md](docs/capacity.md) gives the formula, a measured per-format table and worked examples — including why full-length lossless output is refused by design. Read it before serving anything longer than a preview.
+
 ### S3 credentials
 
 S3 access is the one thing configured with **standard AWS variables** rather than `AP_`-prefixed ones, because every tool that produces credentials already writes those names:
@@ -577,4 +579,5 @@ Elixir with Plug and [Bandit](https://github.com/mtrudel/bandit), and no Phoenix
 | [VERSIONS.md](VERSIONS.md) | What the image is built from: Debian, Elixir/OTP and ffmpeg pins, why not Alpine, and how to bump one |
 | [docs/ffmpeg-arguments.md](docs/ffmpeg-arguments.md) | How options become ffmpeg arguments: filter order, per-format flags, known gaps |
 | [docs/rendering.md](docs/rendering.md) | How a render runs: the subprocess, the chunk stream, coalescing, buffering and lifecycle guarantees |
+| [docs/capacity.md](docs/capacity.md) | How much memory a container needs, as a formula over the configuration: measured per-format costs, long-form worked examples, and what the CI guard asserts |
 | `openspec/specs/` | Capability specs for what is built; `openspec/changes/` holds what is planned |

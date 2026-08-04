@@ -147,7 +147,8 @@ README tells operators to use rather than an incidental detail — write access 
 | `test` | — | `mix format --check-formatted`, `mix compile --warnings-as-errors`, starts MinIO, then `mix test --include integration --include minio` | No external *binaries* — the untagged + `:integration` suite must pass on a bare runner |
 | `image-ffmpeg` | `test` | Builds the `test` and `runtime` stages, then `mix test --only ffmpeg` inside the image | Asserts the two stages carry the *same* ffmpeg build, and that its major matches [`VERSIONS.md`](../VERSIONS.md) |
 | `smoke` | `test` | Builds the release image, runs [`bin/smoke-image`](../bin/smoke-image) | Boot, health, an end-to-end render off a read-only mount, a signed percent-escaped URL over h2c, config validation, SIGTERM during a render |
-| `publish` | `smoke`, `image-ffmpeg` | Pushes to GHCR | Never runs for a pull request; see [Releases](#releases) |
+| `capacity` | `test` | Builds the release image, runs [`bin/check-capacity`](../bin/check-capacity) twice | Drives a concurrent workload (two-hour source included) and asserts cgroup `memory.peak` stays inside the model [`docs/capacity.md`](capacity.md) publishes; the second run is the guard's own red-path check |
+| `publish` | `smoke`, `image-ffmpeg`, `capacity` | Pushes to GHCR | Never runs for a pull request; see [Releases](#releases) |
 
 Compilation runs with warnings as errors because the compiler's set-theoretic
 type checker reports through warnings — that flag is what makes the type gate a
