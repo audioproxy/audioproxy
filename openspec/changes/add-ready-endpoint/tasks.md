@@ -5,5 +5,5 @@
 
 ## 2. Scaling doc
 
-- [ ] 2.1 `docs/scaling.md`: shared-store requirement, bounded double-render honesty, URI-hash LB recipes (nginx, Envoy, ingress annotation), least-connections rationale, K8s probes + HPA wiring, Swarm honesty, Fly.io section (`concurrency` soft/hard ↔ `AP_MAX_CONCURRENCY`, autostart/autostop)
+- [ ] 2.1 `docs/scaling.md`: shared-store requirement, bounded double-render honesty, URI-hash LB recipes (nginx, Envoy, ingress annotation), least-connections rationale, K8s probes + HPA wiring, Swarm honesty, Fly.io section (`concurrency` soft/hard ↔ `AP_MAX_CONCURRENCY`, autostart/autostop; state plainly that fly-proxy has no URI-hash mode — the cross-node-coalescing LB recipe does not apply there, per-fleet single-flight is PRO territory — and that a CDN in front collapses same-URL storms at the edge, making the fleet's duplicate-render cost "occasionally k cold renders")
 - [ ] 2.2 README: probe wiring note, config row, scaling doc link
