@@ -1,6 +1,6 @@
 ## 1. Baseline
 
-- [ ] 1.0 Rebase onto `add-capacity-decision-matrix` (#41) first: it rewrote `check-capacity`'s constants and added `bin/capacity_model.rb` beside where this file goes, so extracting against the pre-#41 script would re-create copies it just removed
+- [x] 1.0 Branch from `main` at or after #41 (merged 2026-08-05): it rewrote `check-capacity`'s constants and added `bin/capacity_model.rb` beside where this file goes, so extracting against the pre-#41 script would re-create copies it just removed. Satisfied by any worktree cut from `main` now — kept as a task because the *reason* is what the next reader needs
 - [ ] 1.1 Run `bin/smoke-image`, `bin/check-capacity`, `bin/check-capacity --self-test` and `bin/measure-ffmpeg-rss` against the current image and keep the output — this refactor's only real test is the before/after comparison
 
 ## 2. Extract
