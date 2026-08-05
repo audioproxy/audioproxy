@@ -20,3 +20,7 @@
 
 - [ ] 4.1 README: `s3://` sources work; drop the "next slice" hedging in Sources and the roadmap
 - [ ] 4.2 Note that `AP_PRESIGN_TTL` bounds the URL, not the read: ffmpeg opens within the TTL and the connection outlives it
+
+## Release-gate coverage (added 2026-08-05, from the v0.3.0 post-mortem)
+
+- [ ] R.1 Extend the container smoke suite: an `s3://` source rendered end-to-end through the HTTP endpoint against MinIO — the release gate could not see S3 at all, which is how v0.3.0's notes shipped claims no check demonstrated

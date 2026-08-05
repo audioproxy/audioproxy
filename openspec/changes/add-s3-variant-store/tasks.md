@@ -22,3 +22,7 @@
 - [ ] 4.1 README: `AP_VARIANT_STORE=s3://bucket` in the config table and the Variant store section; redirect mode is reachable, and why it is the default
 - [ ] 4.2 `docs/audio-proxy-api-v1.md` §6: drop the "S3 backend pending" hedge
 - [ ] 4.3 `docs/s3-providers.md`: note any provider whose presigned-URL or metadata behaviour differs for variant serving
+
+## Release-gate coverage (added 2026-08-05, from the v0.3.0 post-mortem)
+
+- [ ] R.1 Extend the container smoke suite: a MISS teed to a MinIO variant store and the same URL served as a HIT (proxy mode) and a `302` (redirect mode) — the release gate could not see S3 at all, which is how v0.3.0's notes shipped claims no check demonstrated
