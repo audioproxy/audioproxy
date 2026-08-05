@@ -21,7 +21,6 @@ first byte is the dividing line — before it, a failure is still an ordinary
 JSON response; after it, the status line is spent and the only signal left is
 an abnormal close. Rows whose producers land in later changes (429,
 `add-render-semaphore`) ship in the table now, unit-tested.
-
 ## Requirements
 ### Requirement: Signed routing
 The system SHALL route `GET /{sig}/{options}/{source}` through signature verification before any other processing; every signed route SHALL answer 401 without a valid signature, and `/health` SHALL remain unsigned.
@@ -50,7 +49,7 @@ The system SHALL authorize and stat the resolved source in the request path: una
 - **THEN** both responses are identical 404s
 
 ### Requirement: Error contract
-The system SHALL map structured errors to §5 JSON responses through one table: 401 invalid signature, 404 source missing/unauthorized, 413 oversized, 415 undecodable, 422 invalid options, 429 queue full with `Retry-After`, 500 render failed, 504 render timeout. The 500 row extends §5's table deliberately: §5 enumerates what a client got wrong, and a render can fail for none of those reasons. Rows whose producers do not exist yet (429: `add-render-semaphore`) SHALL ship in the table, unit-tested.
+The system SHALL map structured errors to §5 JSON responses through one table: 401 invalid signature, 404 source missing/unauthorized, 413 oversized, 415 undecodable, 422 invalid options, 429 queue full with `Retry-After`, 500 render failed, 500 storage misconfigured, 502 upstream storage unavailable, 504 render timeout. The 500 and 502 rows extend §5's table deliberately: §5 enumerates what a client got wrong, and neither a failed render nor an unreachable store is that. 502 SHALL carry `Cache-Control: no-store` and SHALL be distinct from the blind 404 — an outage says nothing about whether the object exists, and answering 404 reports a deletion that did not happen and then caches it. Rows whose producers do not exist yet SHALL ship in the table, unit-tested.
 
 #### Scenario: Reachable errors end-to-end
 - **WHEN** requests carry a bad signature, an unknown option, a disallowed source, a missing file, and an oversized file
@@ -59,6 +58,10 @@ The system SHALL map structured errors to §5 JSON responses through one table: 
 #### Scenario: Every row unit-tested
 - **WHEN** the mapping table is exercised directly
 - **THEN** every status code produces its documented body shape, including `Retry-After` on 429
+
+#### Scenario: Upstream failure is not a source failure
+- **WHEN** the storage backend reports a transport failure or an upstream 5xx
+- **THEN** the response is 502 with `no-store`, distinguishable by the client from the 404 that names a missing object
 
 ### Requirement: Rendered variant streams as chunked 200
 The system SHALL serve a valid signed render request as `200 OK` with `Transfer-Encoding: chunked`, no `Content-Length`, no `Accept-Ranges`, streaming encoder output as it is produced.
@@ -103,3 +106,4 @@ The system SHALL answer 415 for undecodable sources, 504 for renders exceeding `
 #### Scenario: Unclassifiable failure before the first byte
 - **WHEN** a render fails before producing output for a reason that is none of the above — no encoder on the host, a diagnostic no classifier recognises
 - **THEN** the response is 500 `render_failed`
+
