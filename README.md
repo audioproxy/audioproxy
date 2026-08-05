@@ -381,6 +381,8 @@ A source containing video is refused with a `415` (`video_source`), whatever var
 
 The rule covers `/info` as well, so there is no endpoint that will describe a video file for you either. One consequence worth knowing while you are building URLs: a video source answers `415` on a `GET` but `200` on a `HEAD` of the same URL, because deciding costs a probe and `HEAD` does not run one (see [Caching and CDNs](#caching-and-cdns)).
 
+**Upgrading onto this rule:** the check runs before a render, not before a cache hit — a hit is immutable bytes that were already rendered. So a variant store populated *before* this rule existed keeps serving whatever it holds, including audio that was extracted from a video source back when that was allowed, for the full year its `Cache-Control` claims. If that matters to you, purge the variant store (and the CDN in front of it); nothing else reaches those bytes.
+
 ### `local://`: files under a configured root
 
 `local://{path}` serves a path relative to `AP_LOCAL_ROOT`. Mount the directory you want served, read-only, and point the proxy at it:
@@ -433,9 +435,9 @@ Failures are JSON, one shape everywhere: `{"error": "…", "message": "…"}`.
 | `422` | `invalid_options` | Invalid or conflicting options; the message names the offending segment |
 | `429` | `queue_full` | The render queue is full, or this request waited longer than `AP_RENDER_TIMEOUT` for a slot; `Retry-After` is set |
 | `500` | `render_failed` | The render failed for a reason that is not yours: no encoder on the host, no disk space, a failure the proxy could not classify. Worth retrying |
-| `500` | `probe_failed` | The `/info` probe failed for a reason that is not yours. Worth retrying |
+| `500` | `probe_failed` | A probe failed for a reason that is not yours. Worth retrying. Both endpoints probe — `/info` is a probe, and a render runs one first to check the source is audio |
 | `504` | `render_timeout` | A render started and then exceeded `AP_RENDER_TIMEOUT`. Time spent waiting for a slot is a `429`, not this |
-| `504` | `probe_timeout` | An `/info` probe exceeded `AP_PROBE_TIMEOUT` |
+| `504` | `probe_timeout` | A probe exceeded `AP_PROBE_TIMEOUT`. On a render URL this means the audio-only check ran out of time before any encoding started — raise `AP_PROBE_TIMEOUT`, not `AP_RENDER_TIMEOUT` |
 
 A failure *after* the response has begun is not in this table and cannot be: see [Rendering a variant](#rendering-a-variant).
 

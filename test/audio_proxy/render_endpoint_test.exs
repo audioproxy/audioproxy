@@ -339,6 +339,12 @@ defmodule AudioProxy.RenderEndpointTest do
     end
 
     test "a still image with no disposition data renders too" do
+      # Fake-prober only, and it cannot be otherwise: ffmpeg's mp3 and flac
+      # muxers always write `attached_pic`, so a real fixture that omits the
+      # disposition is not constructible with the tools this repo has. That is
+      # exactly why the fallback is codec-based guesswork — it exists for
+      # containers we cannot enumerate, so the containers we *can* produce
+      # cannot exercise it.
       assert render(signed("/f:flac/plain/local://stillcover.flac")).status == 200
     end
 

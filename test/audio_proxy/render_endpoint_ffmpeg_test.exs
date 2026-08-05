@@ -163,7 +163,14 @@ defmodule AudioProxy.RenderEndpointFfmpegTest do
       assert RawHttp.dechunk(second.body) == RawHttp.dechunk(first.body)
     end
 
-    test "a source ffmpeg cannot decode is a 415", %{port: port} do
+    test "a source neither binary can read is a 415", %{port: port} do
+      # Named for what it now proves. Before the audio-only gate this was
+      # ffmpeg's verdict, reached while decoding; with the gate live, real
+      # ffprobe refuses a text file first and ffmpeg never runs. Same status and
+      # same `error`, so the client contract is unchanged — but the encoder's own
+      # classification path is exercised by `AudioProxy.Ffmpeg.RenderTest`
+      # against its stderr patterns, not here, and a test claiming otherwise
+      # would be claiming coverage it does not have.
       response = render("/f:mp3/plain/local://notaudio.txt", port)
 
       assert response.head =~ "http/1.1 415"

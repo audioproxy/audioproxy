@@ -84,10 +84,20 @@ neither. Because the set is derived from the source type, `build/3` requires
 of that boundary a render sits on, and the wrong guess is a hole rather than a
 crash. A source type with no entry in `protocols/1` raises for the same reason.
 
-These are defence in depth. The gate that actually refuses a video source with
-`415` is an `ffprobe` run in `AudioProxy.Plugs.RenderAction`, before the
-semaphore; the flags above are what still holds if that gate is bypassed,
-reordered, or handed a source it cannot see inside. Placement matters for both:
+These are defence in depth, and one concrete case shows why they are not
+redundant. The gate exempts cover art by trusting the `attached_pic`
+disposition, which lives in the container — bytes the requester may control — so
+a crafted file can wear it and pass. What that buys is bounded here rather than
+there: with `-vn -sn -dn` the video stream is never mapped, so the render is an
+audio-only encode of the audio track. The attacker gets audio extraction from a
+video file, which is what the gate exists to refuse, and not a video transcode,
+which is what would actually cost the operator. Layer one is the policy; layer
+two is what makes forging layer one uninteresting.
+
+The gate that actually refuses a video source with `415` is an `ffprobe` run in
+`AudioProxy.Plugs.RenderAction`, before the semaphore; the flags above are what
+still holds if that gate is bypassed, reordered, or handed a source it cannot
+see inside. Placement matters for both:
 `-protocol_whitelist` after `-i` would bind the *output* format context and
 protect nothing, and `-vn` before `-i` would be an input option ffmpeg reads
 differently.

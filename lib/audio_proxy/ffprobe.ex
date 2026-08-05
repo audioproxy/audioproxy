@@ -116,15 +116,19 @@ defmodule AudioProxy.Ffprobe do
 
   Options:
 
+    * `:protocols` — **required.** The `-protocol_whitelist` set, from
+      `AudioProxy.Ffmpeg.Command.protocols/1`. Required rather than defaulted
+      for the same reason `AudioProxy.Ffmpeg.Command.build/3` requires its
+      `type:`: this is a subprocess that *reads the source*, so a caller with
+      no protocol set to offer has no business starting one. There is
+      deliberately no "unrestricted" spelling — an omitted key raises, which
+      fails a refactor's tests rather than silently reopening `file:` and
+      `concat:` to whatever the source redirects to.
     * `:executable` — the binary to run. Defaults to `ffprobe` from `PATH`.
     * `:timeout` — milliseconds. Defaults to `AP_PROBE_TIMEOUT`.
-    * `:protocols` — the `-protocol_whitelist` set, from
-      `AudioProxy.Ffmpeg.Command.protocols/1`. Omitted means unrestricted,
-      which is what a caller with no resolved source type to offer gets;
-      every caller on the request path passes one.
   """
   @spec probe(String.t(), keyword()) :: {:ok, map()} | {:error, error_reason()}
-  def probe(input, opts \\ []) when is_binary(input) do
+  def probe(input, opts) when is_binary(input) do
     with {:ok, executable} <- executable(Keyword.get(opts, :executable)),
          {:ok, output} <- run(executable, input, args(opts), timeout(opts)) do
       decode(output)
@@ -149,6 +153,15 @@ defmodule AudioProxy.Ffprobe do
   deliberate: an unrecognized codec, an absent frame count, a disposition map
   that says nothing all reject. Failing closed here costs a client a 415 on an
   odd file; failing open makes the proxy a video transcoder.
+
+  Two limits worth knowing. The image-codec list is not every still-image
+  decoder ffmpeg carries, only names that cannot also be a video stream — see
+  the list itself for why widening it is the risky direction. And the
+  `attached_pic` exemption trusts a flag that lives in the *container*, i.e. in
+  bytes the requester may control: a crafted file can wear it. What that buys is
+  bounded by the layer underneath rather than by this function — every argv
+  carries `-vn -sn -dn`, so the video stream is never mapped and the render is
+  an audio-only encode either way.
 
       iex> AudioProxy.Ffprobe.has_video?(%{"streams" => [
       ...>   %{"codec_type" => "audio", "codec_name" => "mp3"},
@@ -245,10 +258,7 @@ defmodule AudioProxy.Ffprobe do
   end
 
   defp whitelist(opts) do
-    case Keyword.get(opts, :protocols) do
-      nil -> []
-      protocols when is_binary(protocols) -> ["-protocol_whitelist", protocols]
-    end
+    ["-protocol_whitelist", Keyword.fetch!(opts, :protocols)]
   end
 
   defp run(executable, input, args, timeout) do
@@ -434,10 +444,18 @@ defmodule AudioProxy.Ffprobe do
     positive_integer(stream["bits_per_raw_sample"]) || positive_integer(stream["bits_per_sample"])
   end
 
-  # Codecs that are a picture rather than a moving image. The list is the
-  # exemption's whole width: a codec absent from it, single-frame or not, is
-  # video. See `has_video?/1` for why the direction is this way round.
-  @image_codecs ~w(mjpeg mjpegb png bmp gif tiff webp jpeg2000 jpegls)
+  # Codecs that are a picture rather than a moving image, for the case where no
+  # disposition says so. Deliberately **not** a complete enumeration of every
+  # still-image decoder ffmpeg carries: it is a list of names that can *only*
+  # ever be a still, so a codec missing from it costs a legitimate file a 415
+  # (recoverable, and only when its container also omits the disposition) while
+  # a wrong addition would cost the policy a hole. That asymmetry is why the
+  # names ffmpeg shares between stills and video — `av1` (AVIF), `hevc` (HEIF),
+  # `vp8`/`vp9` (WebP's own codecs are `webp`) — are absent and must stay
+  # absent. Add to this list only names no video stream can wear.
+  @image_codecs ~w(mjpeg mjpegb png apng bmp gif tiff webp jpeg2000 jpegls
+                   ppm pgm pbm pam pgmyuv pnm targa pcx sgi sunrast dpx exr
+                   xwd qdraw fits)
 
   defp video?(stream) when is_map(stream) do
     Map.get(stream, "codec_type") == "video" and

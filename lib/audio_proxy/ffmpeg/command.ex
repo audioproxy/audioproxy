@@ -117,10 +117,20 @@ defmodule AudioProxy.Ffmpeg.Command do
   variant cannot pick a sane default without knowing the source's depth;
   omitting it keeps the documented 16-bit fallback.
 
-  This does not weaken the round-trip invariant. The cache key hashes the
-  normalized options *and* the source, so equal keys already imply the same
-  source — and therefore the same type, the same source metadata, and the same
-  argv.
+  This does not weaken the round-trip invariant, but it is worth stating the
+  invariant precisely. The cache key hashes the normalized options *and* the
+  source, so equal keys imply the same source and therefore the same type, the
+  same source metadata, and — **within one deployment** — the same argv.
+
+  The qualifier is not new to this key: `input_url` is what
+  `AudioProxy.Source.ffmpeg_input/1` produced, and for a remote source that is a
+  presigned URL whose host, scheme and signature all come from deployment
+  configuration. Argv has therefore never been portable across deployments, and
+  `protocols/1`'s `:s3` clause (which reads `AP_S3_ENDPOINT`) adds nothing in
+  kind. What the cache needs is that argv be a deterministic function of the key
+  *on the box serving it*, and it is. Neither the presigned URL nor the protocol
+  set changes a single output byte, so two deployments still render identical
+  variants for identical keys.
   """
   @type source :: [type: source_type(), bit_depth: Options.bit_depth()]
 
@@ -292,6 +302,11 @@ defmodule AudioProxy.Ffmpeg.Command do
   inheriting somebody else's protocol set — the same discipline
   `AudioProxy.ErrorJSON` applies to its own rows, and for the same reason: the
   mistake should crash that slice's tests, not quietly open a protocol.
+
+  One clause is not a pure function of its argument, despite the spec: `:s3`
+  reads `AP_S3_ENDPOINT`, because the presigned URL ffmpeg is handed carries the
+  endpoint's own scheme. See `t:source/0` for why that does not weaken the
+  round-trip invariant — the same endpoint is already in the input URL.
   """
   @spec protocols(source_type()) :: String.t()
   def protocols(:local), do: @local_protocols
