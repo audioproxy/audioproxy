@@ -330,7 +330,7 @@ defmodule AudioProxy.Plugs.RenderAction do
   # that fails open is not a gate.
   defp audio_only(input, type, opts) do
     probe_opts =
-      [streams: :all, protocols: Command.protocols(type)] ++
+      [protocols: Command.protocols(type)] ++
         probe_executable(Keyword.get(opts, :probe_executable))
 
     case Ffprobe.probe(input, probe_opts) do

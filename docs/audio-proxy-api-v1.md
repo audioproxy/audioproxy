@@ -129,7 +129,7 @@ Peaks respect `t` and `ch`, ignore encoding options. Cheap enough to render eage
 }
 ```
 
-Derived from `ffprobe -show_format -show_streams -select_streams a:0`, filtered to the fields above. `info` takes **no** processing options: any option segment alongside it is a `422`.
+Derived from `ffprobe -show_format -show_streams`, filtered to the fields above — the first audio stream is what the object describes. Every stream is requested rather than just `a:0` because the audio-only policy applies here too, and a gate cannot refuse a stream ffprobe was told to hide. `info` takes **no** processing options: any option segment alongside it is a `422`.
 
 ### 4.1 Field rules
 
@@ -148,6 +148,8 @@ The mapping is explicit rather than a passthrough, because ffprobe's output is v
 Each fallback is tried on the *extracted* value: ffprobe writes `"N/A"` rather than omitting a field it cannot answer, so taking the first key that is present would stop at the `"N/A"` and never reach the section that knows.
 
 **A field ffprobe cannot answer is omitted, never `null` and never a zero standing in for "unknown".** `"bit_depth" in info` is therefore a true answer for every source. A source with no audio stream at all — a video-only MP4, a text file — is a `415`, not an object with everything missing.
+
+The audio-only policy (§3.1) covers this endpoint as well: a source carrying a genuine video stream is `415` `video_source` here exactly as it is on a render, so the policy has no endpoint-shaped exception and `/info` is not a metadata-extraction service for arbitrary video. Cover art is not video, so a tagged mp3 with artwork is described normally. The check costs nothing extra — it reads the probe the endpoint had already run.
 
 ### 4.2 Caching
 

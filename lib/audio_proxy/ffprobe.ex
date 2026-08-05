@@ -10,12 +10,11 @@ defmodule AudioProxy.Ffprobe do
   what makes it testable against canned output per container rather than
   against a binary.
 
-  `has_video?/1` is the third, and it is the audio-only policy's gate rather
-  than part of §4: the render action probes on a MISS and refuses a source with
-  video before a render slot is taken. It reads the same JSON `contract/2` does
-  — pure, canned-output-testable, for the same reason — but needs `probe/2` to
-  have been asked for `streams: :all`, since §4's default selection hides the
-  very streams it is looking for.
+  `has_video?/1` is the third, and it is the audio-only policy rather than part
+  of §4: both callers run it on the probe they already paid for and refuse a
+  source carrying video — the render action before it takes a render slot, the
+  info action before it describes anything. It reads the same JSON `contract/2`
+  does, pure and canned-output-testable for the same reason.
 
   ## Collect, not stream
 
@@ -77,13 +76,15 @@ defmodule AudioProxy.Ffprobe do
   # `-show_format` for the container and its tags, `-show_streams` for the
   # stream parameters. No `-i`: ffprobe takes its input positionally, and it is
   # the last element so nothing after it can be read as a flag.
+  #
+  # Every stream, deliberately: this once carried `-select_streams a:0`, because
+  # §4's contract describes one audio stream and a cover-art video stream would
+  # otherwise be in the output. The audio-only policy needs the opposite — a
+  # gate cannot refuse a stream ffprobe was told to hide — and both callers now
+  # gate, so the selection is gone rather than conditional. Nothing about §4
+  # changed with it: `contract/2` finds the first audio stream itself, which is
+  # what `a:0` named.
   @flags ~w(-hide_banner -loglevel error -show_format -show_streams -print_format json)
-
-  # `-select_streams a:0` because §4's contract describes one audio stream and a
-  # cover-art video stream would otherwise be in the output. The audio-only
-  # policy gate needs the opposite — every stream, so it can see the video it
-  # exists to refuse — which is what `streams: :all` asks for.
-  @audio_selection ~w(-select_streams a:0)
 
   # Well past any real probe (a few KB) and well short of a memory hazard.
   @max_output 1_048_576
@@ -117,8 +118,6 @@ defmodule AudioProxy.Ffprobe do
 
     * `:executable` — the binary to run. Defaults to `ffprobe` from `PATH`.
     * `:timeout` — milliseconds. Defaults to `AP_PROBE_TIMEOUT`.
-    * `:streams` — `:audio` (default, §4's one audio stream) or `:all`, which
-      the audio-only gate needs so `has_video?/1` can see what it refuses.
     * `:protocols` — the `-protocol_whitelist` set, from
       `AudioProxy.Ffmpeg.Command.protocols/1`. Omitted means unrestricted,
       which is what a caller with no resolved source type to offer gets;
@@ -242,11 +241,8 @@ defmodule AudioProxy.Ffprobe do
   # The input stays last, after every flag and after the whitelist, so nothing
   # in it can be read as an option.
   defp args(opts) do
-    @flags ++ selection(Keyword.get(opts, :streams, :audio)) ++ whitelist(opts)
+    @flags ++ whitelist(opts)
   end
-
-  defp selection(:audio), do: @audio_selection
-  defp selection(:all), do: []
 
   defp whitelist(opts) do
     case Keyword.get(opts, :protocols) do

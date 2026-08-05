@@ -294,7 +294,7 @@ etag: "a1f3…"
 
 **A field the source cannot answer is left out, never `null`.** A lossy source has no `bit_depth`, so the key is simply absent; an untagged file has no `tags`. Test for the key, not for a value.
 
-`info` takes no processing options: it describes the source, not a variant, so `/info/br:128/…` is a `422`. A source with no audio in it at all — a video-only MP4, a text file — is a `415`.
+`info` takes no processing options: it describes the source, not a variant, so `/info/br:128/…` is a `422`. A source with no audio in it at all — a video-only MP4, a text file — is a `415`, and so is one that has both audio and video: the [audio-only rule](#the-source-must-be-audio) applies here too, so `/info` will not describe a video file for you. Cover art is not video.
 
 Responses carry an `ETag` derived from the source object, so a client or CDN that has seen this metadata before revalidates for the price of a `304`. `Cache-Control` is one hour rather than the year a rendered variant gets, and deliberately not `immutable`: a variant's URL describes its bytes exactly and can never go stale, while this describes a file somebody may re-upload tomorrow.
 
@@ -379,7 +379,7 @@ In the `plain/` form the source is percent-escaped, and it is unescaped exactly 
 
 A source containing video is refused with a `415` (`video_source`), whatever variant was asked for. The audio track is not extracted: this is an audio proxy, and pointing it at a video library gets you an error rather than a slow, expensive render. Embedded cover art is not video — the tagged mp3s, flacs and m4a files in a normal catalogue render exactly as they always did.
 
-Two consequences worth knowing while you are building URLs. A source that is video answers `415` on the render endpoint but `200` on a `HEAD` of the same URL, because deciding costs a probe and `HEAD` does not run one (see [Caching and CDNs](#caching-and-cdns)). And `/info` still describes a source with both audio and video, since describing is not rendering.
+The rule covers `/info` as well, so there is no endpoint that will describe a video file for you either. One consequence worth knowing while you are building URLs: a video source answers `415` on a `GET` but `200` on a `HEAD` of the same URL, because deciding costs a probe and `HEAD` does not run one (see [Caching and CDNs](#caching-and-cdns)).
 
 ### `local://`: files under a configured root
 

@@ -37,6 +37,8 @@ defmodule AudioProxy.InfoEndpointTest do
     File.write!(Path.join(tmp_dir, "silent.mp4"), "fake-mp4-bytes")
     File.write!(Path.join(tmp_dir, "garbage.wav"), "fake-bytes")
     File.write!(Path.join(tmp_dir, "probehang.wav"), "fake-bytes")
+    File.write!(Path.join(tmp_dir, "video.mp4"), "fake-bytes")
+    File.write!(Path.join(tmp_dir, "cover.mp3"), "fake-bytes")
 
     put_config(%{
       key: @key,
@@ -207,6 +209,21 @@ defmodule AudioProxy.InfoEndpointTest do
       assert conn.status == 415
       assert JSON.decode!(conn.resp_body)["error"] == "undecodable_source"
       assert header(conn, "cache-control") == "max-age=10"
+    end
+
+    test "a source carrying video is 415, the same answer a render gets" do
+      conn = info(signed("/info/plain/local://video.mp4"))
+
+      assert conn.status == 415
+      assert JSON.decode!(conn.resp_body)["error"] == "video_source"
+      assert header(conn, "cache-control") == "max-age=10"
+    end
+
+    test "cover art is not video: a tagged mp3 with artwork is described" do
+      conn = info(signed("/info/plain/local://cover.mp3"))
+
+      assert conn.status == 200
+      assert JSON.decode!(conn.resp_body)["format"] == "mp3"
     end
 
     test "a source with no audio stream is 415 too" do

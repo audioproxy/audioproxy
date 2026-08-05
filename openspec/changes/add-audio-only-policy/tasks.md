@@ -8,6 +8,7 @@
 
 - [x] 2.1 Video detection on `Ffprobe` output: genuine video streams vs `attached_pic`/single-frame image codecs; `has_video?/1` with unit tests over canned probe JSON (mp4 a+v, video-only, mp3+cover, flac+cover, ambiguous disposition)
 - [x] 2.2 Render action: probe after HIT-check, before semaphore/coalescing; video → 415 (`ErrorJSON` gains the video-input reason); no slot consumed (assert via semaphore probe in tests)
+- [x] 2.2b `/info` gated on the same rule, resolving "render and info-adjacent" in the requirement: the endpoint reads the probe it had already paid for, so the policy has no endpoint-shaped exception and `/info` is not metadata extraction for arbitrary video. `-select_streams a:0` dropped from the probe flags — a gate cannot refuse a stream ffprobe was told to hide, and §4's object is unaffected because `contract/2` finds the first audio stream itself
 - [x] 2.3 Integration (`@tag :ffmpeg`): lavfi-generated mp4 (testsrc+sine) → 415; mp3 with embedded cover art (real `attached_pic`) → renders, with a tripwire asserting the fixture really carries the disposition. The pivot half is exercised at the argv level in `command_ffmpeg_test.exs` rather than through a redirect: no remote source backend exists yet to redirect *from*, so the reachable assertion is that real ffmpeg refuses `file:` under the remote whitelist, refuses `https:` under the local one, and refuses `concat:` under both
 
 ## 3. Docs
