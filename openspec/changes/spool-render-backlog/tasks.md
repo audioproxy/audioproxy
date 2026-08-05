@@ -1,3 +1,7 @@
+## 0. Decide whether to build this
+
+- [ ] 0.1 **Confirm the workload exists.** The proposal is honest that this is worth building only for full-length *lossless delivery* — long-form sources with lossy outputs are fully served once `split-retention-cap` lands (a 2 h master rendered as previews retains ~480 KB; as opus, ~86 MB). Ask the prospect: full-length FLAC/WAV variants, or lossless in / lossy out? The second answer closes this change with the refusal intact, like `add-sync-render` 0.1. Everything below assumes the first
+
 ## 1. The writer and its lifecycle (slice 1)
 
 - [ ] 1.1 `AP_BACKLOG_MODE` (`memory` | `spool`, default `memory`), `AP_SPOOL_DIR`, `AP_SPOOL_MAX_BYTES` in `Config`; refuse `spool` at boot if the directory is missing or not writable, rather than at the first render
