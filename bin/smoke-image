@@ -49,6 +49,22 @@ EXPECTED_FFMPEG_MAJOR = File.read(File.join(REPO_ROOT, "VERSIONS.md"))
 KEY = SecureRandom.hex(32)
 SALT = SecureRandom.hex(16)
 
+# The store the `s3://` source check runs against. Pinned to the same MinIO
+# release CI starts for the `:minio` suite, so the two levels are not testing
+# against different stores and calling it one guarantee. `mc` is MinIO's own
+# client and is used only to create the bucket and put the fixture — the proxy
+# does its own signing, which is the thing under test.
+MINIO_IMAGE = "minio/minio:RELEASE.2025-04-22T22-12-26Z"
+MC_IMAGE = "minio/mc:RELEASE.2025-04-16T18-13-26Z"
+S3_BUCKET = "masters"
+S3_ACCESS_KEY = "minioadmin"
+S3_SECRET_KEY = "minioadmin"
+# Reached by container alias on a suite-private network, so it is the same
+# hostname inside the proxy container and inside `mc`. Path-style addressing
+# follows from the custom endpoint by default, which is what MinIO needs —
+# `masters.minio` would want DNS nobody configured.
+S3_URL = "http://minio:9000"
+
 FIXTURE_SECONDS = 5
 # ffmpeg's mp3 encoder pads the last frame, so an exact match is the wrong
 # assertion; a tenth of a second is well inside a re-encode and well outside a
@@ -201,7 +217,7 @@ def probe_duration(path)
   Float(out.strip)
 end
 
-def start_server(fixtures, extra_env: {})
+def start_server(fixtures, extra_env: {}, docker_args: [])
   env = {
     "AP_LOCAL_ROOT" => "/fixtures",
     "AP_KEY" => KEY,
@@ -212,6 +228,7 @@ def start_server(fixtures, extra_env: {})
     *env.flat_map { |k, v| ["-e", "#{k}=#{v}"] },
     "-p", "127.0.0.1::#{extra_env["AP_PORT"] || 4000}",
     "-v", "#{fixtures}:/fixtures:ro",
+    *docker_args,
     IMAGE
   )
 end
@@ -308,6 +325,136 @@ def check_render(fixtures)
   end
 
   docker_rm(cid)
+end
+
+# An `s3://` source, rendered end to end through the shipped image against a
+# real store.
+#
+# This exists because the release gate could not see S3 at all: v0.3.0's notes
+# announced S3 rendering while `Source.S3` still answered `no_backend`, and
+# every signal was green because the smoke suite rendered `local://` only. A
+# claim about S3 now has a check to point at, per docs/development.md's
+# "release notes are claims, and claims name their checks".
+#
+# What only this level can show, and the ExUnit `:minio` suite cannot: the
+# ffmpeg *this image ships* opening a presigned URL and ranging it over the
+# network. Everything below the URL — signing, addressing, error translation —
+# is already pinned by `AudioProxy.S3Test` against the same store.
+def check_s3_source(fixtures)
+  network = "audio-proxy-smoke-#{SecureRandom.hex(4)}"
+  sh!("docker", "network", "create", network)
+
+  minio = docker_run(
+    "--network", network, "--network-alias", "minio",
+    "-e", "MINIO_ROOT_USER=#{S3_ACCESS_KEY}",
+    "-e", "MINIO_ROOT_PASSWORD=#{S3_SECRET_KEY}",
+    MINIO_IMAGE, "server", "/data"
+  )
+
+  ready = wait_until(timeout: 60) { mc(network, "mc alias set store #{S3_URL} #{S3_ACCESS_KEY} #{S3_SECRET_KEY}") }
+  check "MinIO becomes reachable" do
+    ready
+  end
+
+  # `mc` rather than a hand-rolled SigV4 PUT: signing is `ex_aws`'s job in this
+  # project and re-implementing it in the smoke suite would be a second
+  # implementation to keep correct, testing itself.
+  uploaded = mc(network, <<~SH, mount: fixtures)
+    mc alias set store #{S3_URL} #{S3_ACCESS_KEY} #{S3_SECRET_KEY} &&
+    mc mb --ignore-existing store/#{S3_BUCKET} &&
+    mc cp "/fixtures/tone one.wav" "store/#{S3_BUCKET}/tone one.wav"
+  SH
+  check "the fixture uploads to the #{S3_BUCKET} bucket" do
+    uploaded
+  end
+
+  cid = start_server(
+    fixtures,
+    extra_env: {
+      "AP_ALLOW_INSECURE" => "true",
+      "AP_S3_ENDPOINT" => S3_URL,
+      "AWS_ACCESS_KEY_ID" => S3_ACCESS_KEY,
+      "AWS_SECRET_ACCESS_KEY" => S3_SECRET_KEY,
+      "AWS_REGION" => "us-east-1"
+    },
+    docker_args: ["--network", network]
+  )
+  port = published_port(cid)
+
+  check "container with S3 credentials reaches /health" do
+    await_health(cid, port)
+  end
+
+  Dir.mktmpdir do |out|
+    rendered = File.join(out, "from-s3.mp3")
+    url = "http://127.0.0.1:#{port}/insecure/f:mp3/br:128/plain/s3://#{S3_BUCKET}/tone%20one.wav"
+    headers, ok = curl(url, rendered)
+
+    check "an s3:// source renders 200" do
+      ok && headers.first.include?("200")
+    end
+    check "the s3:// render is chunked audio/mpeg" do
+      headers.any? { |h| h.downcase.start_with?("content-type: audio/mpeg") } &&
+        headers.any? { |h| h.downcase.start_with?("transfer-encoding: chunked") }
+    end
+
+    # The load-bearing assertion: the bytes came from the object, through a
+    # presigned URL the image's own ffmpeg opened. A 200 carrying nothing
+    # decodable would pass every check above it.
+    duration = probe_duration(rendered)
+    check "the s3:// render decodes to #{FIXTURE_SECONDS}s (got #{duration.round(3)})" do
+      (duration - FIXTURE_SECONDS).abs <= DURATION_TOLERANCE
+    end
+
+    missing = File.join(out, "missing.json")
+    headers, = curl("http://127.0.0.1:#{port}/insecure/f:mp3/plain/s3://#{S3_BUCKET}/absent.wav", missing)
+    check "a missing object is the blind 404" do
+      headers.first.include?("404") && JSON.parse(File.read(missing))["error"] == "not_found"
+    end
+
+    # And the row this slice added, demonstrated rather than asserted: with the
+    # store gone, no source can be reported as missing — including one nothing
+    # has rendered, so nothing in flight can answer it from a linger.
+    docker_rm(minio)
+    minio = nil
+
+    outage = File.join(out, "outage.json")
+    headers, = curl("http://127.0.0.1:#{port}/insecure/f:mp3/plain/s3://#{S3_BUCKET}/unrequested.wav", outage)
+    body = begin
+      JSON.parse(File.read(outage))
+    rescue StandardError
+      {}
+    end
+
+    check "an unreachable store answers 502, not 404" do
+      headers.first.include?("502") && body["error"] == "upstream_unavailable"
+    end
+    check "the 502 is not cached by an edge" do
+      headers.any? { |h| h.downcase.start_with?("cache-control: no-store") }
+    end
+  end
+
+ensure
+  # Both containers come off the network before the network goes, and all of it
+  # runs here rather than on the happy path. `docker network rm` refuses while
+  # anything is still attached, and `sh` swallows that refusal — so removing the
+  # proxy container at the end of the body instead would leak a bridge network
+  # on every raise between `start_server` and here. The outer `ensure` reaps the
+  # container eventually; nothing reaps the network.
+  docker_rm(cid) if cid
+  docker_rm(minio) if minio
+  sh("docker", "network", "rm", network) if network
+end
+
+# One `mc` invocation on the store's network. Returns whether it succeeded, so
+# it doubles as the readiness probe: MinIO answering an `alias set` is a better
+# "up" signal than a health endpoint that returns before the object API does.
+def mc(network, script, mount: nil)
+  args = ["docker", "run", "--rm", "--network", network]
+  args += ["-v", "#{mount}:/fixtures:ro"] if mount
+  args += ["--entrypoint", "sh", MC_IMAGE, "-c", script]
+
+  sh(*args).last
 end
 
 # The `:ro` flag is the documented posture, and it has to be tested by something
@@ -570,6 +717,7 @@ begin
   Dir.mktmpdir("audio-proxy-smoke") do |fixtures|
     step("fixtures") { generate_fixtures(fixtures) }
     step("render (insecure, read-only mount)") { check_render(fixtures) }
+    step("render from an s3:// source") { check_s3_source(fixtures) }
     step("read-only fixture mount") { check_readonly_mount(fixtures) }
     step("signed URL over h2c") { check_signed_h2c(fixtures) }
     step("runtime configuration") { check_config(fixtures) }
