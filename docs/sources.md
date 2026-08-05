@@ -214,17 +214,28 @@ not need a long TTL.
 
 #### Failures classify by cause, not by convenience
 
-`AudioProxy.S3` has six error shapes and every one is mapped explicitly, with
-no catch-all — an unmapped shape raises rather than picking a plausible status.
+`AudioProxy.S3`'s error type is five atoms and one `{:http, status, _}` whose
+status is *unbounded*, and all of it is mapped explicitly, with no catch-all —
+an unmapped shape raises rather than picking a plausible status.
 
 | `AudioProxy.S3` error | Reason | Status |
 |---|---|---|
 | `:not_found` | `:not_found` | `404`, the blind row |
 | `:access_denied` | `:not_found` | `404`, the blind row |
 | `{:http, 4xx, _}` | `:not_found` | `404`, the blind row |
+| `{:http, 3xx, _}` | `:not_configured` | `500` |
 | `:not_configured` | `:not_configured` | `500` |
 | `{:http, 5xx, _}` | `:upstream_unavailable` | `502` |
 | `{:transport, _}` | `:upstream_unavailable` | `502` |
+
+The status *ranges* are the part worth reading twice. An earlier revision
+covered 4xx and 5xx and called that total, which it is not: the HTTP client
+sets `autoredirect: false`, so S3's "your bucket is in another region" arrives
+as `{:http, 301, _}` and raised `FunctionClauseError` — a bare `500`, which is
+the outcome the no-catch-all rule exists to prevent, reached by leaving a hole
+rather than adding a default. A redirect is an operator's misconfiguration, not
+a transient one, so it answers `500` and not the `502` that would invite a
+retry that cannot succeed.
 
 Folding `:access_denied` into the 404 is the deliberate part: a bucket policy
 that denies HEAD is indistinguishable from a missing object *to the client*,

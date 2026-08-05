@@ -477,7 +477,7 @@ Failures are JSON, one shape everywhere: `{"error": "…", "message": "…"}`.
 | `429` | `queue_full` | The render queue is full, or this request waited longer than `AP_RENDER_TIMEOUT` for a slot; `Retry-After` is set |
 | `500` | `render_failed` | The render failed for a reason that is not yours: no encoder on the host, no disk space, a failure the proxy could not classify. Worth retrying |
 | `500` | `probe_failed` | The `/info` probe failed for a reason that is not yours. Worth retrying |
-| `500` | `not_configured` | The storage backend the source names has no credentials configured. An operator has to fix it; retrying will not |
+| `500` | `not_configured` | The storage backend the source names is misconfigured — no credentials, or a region/endpoint that is not the object's, which the store answers with a redirect. An operator has to fix it; retrying will not |
 | `502` | `upstream_unavailable` | The storage backend could not be reached — it answered `5xx`, or nothing at all. Says nothing about whether your object exists, and is `no-store` for that reason. Worth retrying |
 | `504` | `render_timeout` | A render started and then exceeded `AP_RENDER_TIMEOUT`. Time spent waiting for a slot is a `429`, not this |
 | `504` | `probe_timeout` | An `/info` probe exceeded `AP_PROBE_TIMEOUT` |

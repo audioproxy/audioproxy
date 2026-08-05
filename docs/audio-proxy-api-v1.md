@@ -220,7 +220,7 @@ Every response, success or error, carries an explicit `Cache-Control` — no CDN
 | `422` | Invalid or conflicting options |
 | `429` | No render slot: the wait queue was full, or this request waited in it longer than `AP_RENDER_TIMEOUT` without reaching the front (`Retry-After` set) |
 | `500` | The render failed for a reason that is not the client's: no encoder, no space, a diagnostic the classifier does not recognise |
-| `500` | The storage backend a source names is not configured: no credentials, so no client action can resolve it |
+| `500` | The storage backend a source names is misconfigured: no credentials, or a store that answers a redirect because the configured region or endpoint is not the object's. No client action can resolve either |
 | `502` | The storage backend could not be reached: a transport failure, or a `5xx` from the store itself |
 | `504` | A render started and then exceeded `AP_RENDER_TIMEOUT` |
 
