@@ -182,6 +182,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Before the image build, because it needs neither docker nor ffmpeg and
+      # takes under a second: the matrix at the top of docs/capacity.md is the
+      # model inverted, so every published cell has to fit the limit it is
+      # printed under, and one more slot has to not fit. An inversion that has
+      # drifted publishes a memory limit that is too small, which is the failure
+      # mode an operator discovers as an OOM kill.
+      - name: Check the published matrix inverts the model
+        run: bin/capacity-matrix --verify
+
       - uses: docker/setup-buildx-action@v3
 
       - name: Build the release image
