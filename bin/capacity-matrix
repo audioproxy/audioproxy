@@ -1,0 +1,293 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Emits the decision tables docs/capacity.md opens with: maximum safe
+# `AP_MAX_CONCURRENCY` per workload and container memory limit, and the reverse —
+# memory required for a concurrency somebody has already chosen.
+#
+#   bin/capacity-matrix                          # print both tables
+#   bin/capacity-matrix --write docs/capacity.md # replace them in place
+#   bin/capacity-matrix --verify                 # assert every cell inverts the model
+#
+# Needs neither docker nor ffmpeg nor Elixir: every input is either a constant in
+# `bin/capacity_model.rb` or a figure parsed out of the measured table
+# docs/capacity.md already publishes. It is arithmetic over numbers that exist,
+# which is the whole point — a hand-written matrix is a second copy of the model,
+# and the second copy is the one that goes stale.
+#
+# ## What the cells are
+#
+# The published formula, inverted. The bracket gives how many *backlogs* fit:
+#
+#   renders = ⌊(RAM − BEAM_base − T_ffmpeg) / (R_ffmpeg + B_backlog + H_pipeline)⌋
+#
+# and the linger rule turns that into slots — `renders − 1` for a long render,
+# `renders / 2` for one short enough to turn its slot over inside the linger
+# window. The floor and the linger term both make the answer smaller, which is
+# the direction a memory limit wants to be wrong in.
+#
+# `B_backlog` is duration × bitrate, because a variant's size is duration ×
+# bitrate — there is no source-size term in the model, and the measured table is
+# the evidence. A workload whose single render would cross `AP_MAX_SRC_BYTES`
+# gets no number at all: that render is killed partway through, so printing a
+# concurrency for it would describe a deployment that fails on its first request.
+
+require "optparse"
+
+require_relative "capacity_model"
+
+include CapacityModel
+
+BEGIN_MARKER = "<!-- matrix:begin -->"
+END_MARKER = "<!-- matrix:end -->"
+
+# The variables an operator actually controls. Bitrates are the published
+# `B_backlog` figures from docs/capacity.md's variant table; `format` selects the
+# measured `R_ffmpeg` row.
+WORKLOADS = [
+  {label: "`f:mp3/br:128`", format: "mp3", kbps: 128},
+  {label: "`f:opus/br:96`", format: "opus", kbps: 96},
+  {label: "`f:mp3/br:320`", format: "mp3", kbps: 320},
+  {label: "`f:flac` (44.1/16)", format: "flac", kbps: 850},
+  {label: "`f:wav` (44.1/16)", format: "wav", kbps: 1411},
+  {label: "`f:wav/bd:24` (48/24)", format: "wav", kbps: 2304}
+].freeze
+
+# Output length, not source length. A `t:` window makes a two-hour source a
+# thirty-second workload, and it is the output that is retained.
+LENGTHS = [["30 s", 30], ["10 min", 600], ["1 h", 3600], ["2 h", 7200]].freeze
+
+# Container memory limits, in GiB — the cgroup's limit, not the machine's.
+MEMORY_LIMITS = [1, 2, 4, 8, 16, 32].freeze
+
+# Concurrencies somebody arrives with already chosen, for the reverse table.
+CONCURRENCIES = [1, 2, 4, 8, 16, 32].freeze
+
+REFUSED = "refused".freeze
+NONE = "—".freeze
+
+# Past this many slots the answer stops being useful and starts being
+# misleading: memory has ceased to be the binding constraint, and a cell reading
+# `1024` invites somebody to configure a thousand encoders on an eight-core
+# host. The matrix is a memory bound; above the ceiling it says so instead.
+CONCURRENCY_CEILING = 64
+
+def backlog_bytes(kbps, seconds) = kbps * 1000 * seconds / 8
+
+def human(bytes)
+  mibs = (bytes / MIB).round
+  return "#{mibs} MiB" if mibs < 1024
+
+  "#{(bytes.to_f / GIB).round(1)} GiB"
+end
+
+# Every (length × workload) pair, with its two model inputs resolved once.
+def workload_rows(rss_table)
+  LENGTHS.flat_map do |length_label, seconds|
+    WORKLOADS.map do |w|
+      {
+        length: length_label,
+        seconds: seconds,
+        label: w[:label],
+        r_ffmpeg: rss_for(w[:format], rss_table),
+        backlog: backlog_bytes(w[:kbps], seconds)
+      }
+    end
+  end
+end
+
+# A markdown table whose first two columns are the workload and whose remaining
+# cells come from `cell`. Rows are grouped by length, and the length is printed
+# only on the first row of its group — the column is a heading, not data, and
+# repeating it six times reads as six different lengths.
+def render_table(rows, header, &cell)
+  lines = ["| Output | Variant | #{header.join(" | ")} |",
+           "|---|---|#{"---|" * header.length}"]
+
+  rows.each_slice(WORKLOADS.length) do |group|
+    group.each_with_index do |row, i|
+      length = i.zero? ? "**#{row[:length]}**" : ""
+      lines << "| #{length} | #{row[:label]} | #{cell.call(row).join(" | ")} |"
+    end
+  end
+
+  lines.join("\n")
+end
+
+def concurrency_table(rows)
+  render_table(rows, MEMORY_LIMITS.map { |g| "#{g} GiB" }) do |row|
+    next Array.new(MEMORY_LIMITS.length, "**#{REFUSED}**") if refused?(row[:backlog])
+
+    MEMORY_LIMITS.map do |gib|
+      c = max_concurrency(
+        ram_budget: gib * GIB,
+        output_seconds: row[:seconds],
+        r_ffmpeg: row[:r_ffmpeg],
+        backlog_bytes: row[:backlog]
+      )
+      next NONE if c.zero?
+
+      c > CONCURRENCY_CEILING ? "> #{CONCURRENCY_CEILING}" : c.to_s
+    end
+  end
+end
+
+def memory_table(rows)
+  render_table(rows, CONCURRENCIES.map { |c| "C = #{c}" }) do |row|
+    next Array.new(CONCURRENCIES.length, "**#{REFUSED}**") if refused?(row[:backlog])
+
+    CONCURRENCIES.map do |c|
+      human(ram_required(
+              concurrency: c,
+              output_seconds: row[:seconds],
+              r_ffmpeg: row[:r_ffmpeg],
+              backlog_bytes: row[:backlog]
+            ))
+    end
+  end
+end
+
+def rendered(rss_table)
+  rows = workload_rows(rss_table)
+  plain = rss_table.values.min
+  filtered = plain + (55 * 1024 * 1024)
+
+  <<~MARKDOWN
+    ### How many renders fit
+
+    Maximum `AP_MAX_CONCURRENCY` whose **worst case** — every slot busy with this
+    workload at once, plus the backlogs still lingering — fits in the container
+    memory limit named by the column.
+
+    #{concurrency_table(rows)}
+
+    `—` is a workload that does not fit at any concurrency on that limit.
+    `> #{CONCURRENCY_CEILING}` means memory has stopped being the binding constraint
+    and CPU has become it: size those from cores, not from this table. **refused**
+    is a render whose output crosses the #{DEFAULT_MAX_SRC_BYTES / 1_000_000_000} GB
+    `AP_MAX_SRC_BYTES` retention cap and is killed partway through — there is no
+    concurrency at which it works, on any host. See
+    [Long-form lossless](#3-long-form-lossless--fails-the-cap-loudly-by-design).
+
+    ### How much memory a concurrency needs
+
+    The same model read the other way, for an operator who has fixed
+    `AP_MAX_CONCURRENCY` and is buying a host. Set the container limit at or above
+    the figure; the [worked examples](#worked-examples) round up to the next
+    convenient size, and so should you.
+
+    #{memory_table(rows)}
+
+    Both tables assume plain renders. `norm` (single-pass `loudnorm`) adds roughly
+    55 MiB per slot — `R_ffmpeg` goes from about #{mib(plain).round} MiB to about
+    #{mib(filtered).round} MiB. On the preview rows that is most of the per-slot
+    cost and divides them by about five; on the long-form rows it disappears into
+    the backlog term.
+
+    Generated by `bin/capacity-matrix` from the formula below and the measured
+    [`R_ffmpeg` table](#measured-r_ffmpeg); do not edit by hand.
+  MARKDOWN
+end
+
+# ---------------------------------------------------------------------------
+# --verify
+# ---------------------------------------------------------------------------
+#
+# The matrix is the model inverted, and an inversion is the easy thing to get
+# subtly wrong: an off-by-one in the linger term, a rounding that goes up, a
+# short-render row halved on the wrong side of the division. All three produce a
+# table that looks entirely reasonable and over-promises.
+#
+# So the two directions are checked against each other rather than trusted. For
+# every cell: the concurrency the matrix publishes must actually fit in that
+# column's limit, and one more slot must not. That is what "maximum" means, and
+# it is a property of the pair of functions rather than of either alone — the
+# same property `bin/check-capacity` relies on when it predicts forwards from a
+# configuration an operator picked out of the table.
+#
+# Needs no docker and no image, so it is cheap enough to run beside the tests
+# rather than in the capacity job.
+def verify(rss_table)
+  failures = []
+
+  workload_rows(rss_table).each do |row|
+    next if refused?(row[:backlog])
+
+    model = {
+      output_seconds: row[:seconds],
+      r_ffmpeg: row[:r_ffmpeg],
+      backlog_bytes: row[:backlog]
+    }
+    where = "#{row[:length]} #{row[:label]}"
+
+    MEMORY_LIMITS.each do |gib|
+      limit = gib * GIB
+      c = max_concurrency(ram_budget: limit, **model)
+
+      if c.positive? && ram_required(concurrency: c, **model) > limit
+        failures << "#{where} at #{gib} GiB: published C_max=#{c} does not fit " \
+                    "(#{human(ram_required(concurrency: c, **model))} needed)"
+      end
+
+      if ram_required(concurrency: c + 1, **model) <= limit
+        failures << "#{where} at #{gib} GiB: published C_max=#{c} is not maximal " \
+                    "(#{c + 1} also fits)"
+      end
+    end
+
+    # The reverse table has to land an operator somewhere the forward table
+    # agrees with: buy the memory it names for `C`, and `C` is what you get.
+    CONCURRENCIES.each do |c|
+      budget = ram_required(concurrency: c, **model)
+      got = max_concurrency(ram_budget: budget, **model)
+      next if got >= c
+
+      failures << "#{where}: the reverse table asks for #{human(budget)} at C=#{c}, " \
+                  "but that budget reads back as C_max=#{got}"
+    end
+  end
+
+  if failures.empty?
+    puts "capacity-matrix: the tables invert the model (#{workload_rows(rss_table).length} workloads, " \
+         "#{MEMORY_LIMITS.length} limits, #{CONCURRENCIES.length} concurrencies)"
+    return true
+  end
+
+  puts "capacity-matrix: #{failures.length} cell(s) disagree with the model"
+  failures.each { |f| puts "  - #{f}" }
+  false
+end
+
+def write_into(path, body)
+  doc = File.read(path)
+  unless doc.include?(BEGIN_MARKER) && doc.include?(END_MARKER)
+    raise "#{path} has no #{BEGIN_MARKER} / #{END_MARKER} pair to write between"
+  end
+
+  updated = doc.sub(/#{Regexp.escape(BEGIN_MARKER)}.*#{Regexp.escape(END_MARKER)}/m,
+                    "#{BEGIN_MARKER}\n\n#{body.strip}\n\n#{END_MARKER}")
+  File.write(path, updated)
+  warn "  wrote the matrix into #{path}"
+end
+
+# ---------------------------------------------------------------------------
+
+target = nil
+verify_only = false
+OptionParser.new do |o|
+  o.banner = "usage: bin/capacity-matrix [--write PATH | --verify]"
+  o.on("--write PATH", "replace the tables between the markers in PATH") { |v| target = v }
+  o.on("--verify", "assert every published cell inverts the model") { verify_only = true }
+end.parse!
+
+if verify_only
+  exit(verify(published_rss) ? 0 : 1)
+end
+
+body = rendered(published_rss)
+
+if target
+  write_into(File.expand_path(target, REPO_ROOT), body)
+else
+  puts body
+end
