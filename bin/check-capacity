@@ -49,12 +49,20 @@ require "tmpdir"
 require "uri"
 
 require_relative "capacity_model"
+require_relative "script_support"
 
 # `MIB`, `HIGH_WATER`, `LINGER_BACKLOGS`, `T_FFMPEG_BUDGET`, `published_rss` and
 # `mib` all live in the shared model, alongside the arithmetic `bin/capacity-matrix`
 # publishes. The guard and the published matrix have to agree about the model, and
 # the only reliable way to make them agree is for there to be one model.
 include CapacityModel
+
+# Two support files, and the split is the same test that decides everything else
+# here: the model above is domain — a reader following the `B_backlog` argument
+# needs it — and the plumbing below is docker and shell, which that reader does
+# not. `sh`, `sh!`, `docker_run`, `docker_rm`, `published_port` and the `anon`
+# sampler come from there, comments and all.
+include ScriptSupport
 
 IMAGE = ENV.fetch("IMAGE", "audio_proxy:runtime")
 
@@ -89,7 +97,6 @@ BASE_BITRATE_KBPS = 128
 # tolerance nobody can argue with.
 HEADROOM = 1.5
 
-@containers = []
 @failures = []
 
 def log(message) = puts("  #{message}")
@@ -97,33 +104,6 @@ def log(message) = puts("  #{message}")
 def step(name)
   puts "→ #{name}"
   yield
-end
-
-def sh(*args)
-  stdout, stderr, status = Open3.capture3(*args)
-  @last_stderr = stderr
-  [stdout, status.success?]
-end
-
-def sh!(*args)
-  out, ok = sh(*args)
-  raise "command failed: #{args.join(" ")}\n#{out}#{@last_stderr}" unless ok
-
-  out
-end
-
-def docker_run(*args)
-  out = sh!("docker", "run", "-d", *args)
-  cid = out.lines.map(&:strip).reverse.find { |line| line.match?(/\A[0-9a-f]{64}\z/) }
-  raise "no container id in docker run output:\n#{out}" unless cid
-
-  @containers << cid
-  cid
-end
-
-def docker_rm(cid)
-  sh("docker", "rm", "-f", cid)
-  @containers.delete(cid)
 end
 
 # ---------------------------------------------------------------------------
@@ -146,31 +126,20 @@ end
 #
 # It is still printed, because the spread is worth seeing and because a reader
 # comparing this line against the document deserves to know the two disagree.
+#
+# The sampling interval is 20 ms: this encode runs for seconds, so the interval
+# only has to be fine enough that the peak is not missed between polls, and it
+# is the same figure `bin/measure-ffmpeg-rss` samples at. It is passed rather
+# than assumed because the two copies of this probe had already drifted on it.
 def measure_ffmpeg_text
-  probe = <<~SH
-    : > /tmp/anon
-    awk '$1 == "anon" {print $2}' /sys/fs/cgroup/memory.stat >> /tmp/anon
-    while :; do
-      awk '$1 == "anon" {print $2}' /sys/fs/cgroup/memory.stat >> /tmp/anon
-      sleep 0.02
-    done &
-    sampler=$!
+  sampled = sample_anon(
+    IMAGE,
+    ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "sine=duration=20",
+     "-vn", "-c:a", "libmp3lame", "-f", "mp3", "pipe:1"],
+    interval: 0.02
+  )
 
-    ffmpeg -hide_banner -loglevel error -f lavfi -i sine=duration=20 \
-      -vn -c:a libmp3lame -f mp3 pipe:1 > /dev/null 2>&1
-    kill "$sampler" 2>/dev/null
-
-    echo "anon=$(sort -n /tmp/anon | tail -1)"
-    echo "peak=$(cat /sys/fs/cgroup/memory.peak)"
-  SH
-
-  out = sh!("docker", "run", "--rm", "--cgroupns=private",
-            "--entrypoint", "sh", IMAGE, "-c", probe)
-  fields = out.lines.map(&:chomp)
-  anon = Integer(fields.find { |l| l.start_with?("anon=") }.delete_prefix("anon="))
-  peak = Integer(fields.find { |l| l.start_with?("peak=") }.delete_prefix("peak="))
-
-  [peak - anon, 0].max
+  [sampled[:peak] - sampled[:anon], 0].max
 end
 
 # The formula from docs/capacity.md, over this workload's configuration.
@@ -254,14 +223,6 @@ def start_server(fixtures)
     IMAGE
   )
   [cid, published_port(cid)]
-end
-
-def published_port(cid, container_port = 4000)
-  ports = JSON.parse(sh!("docker", "inspect", cid)).first.dig("NetworkSettings", "Ports")
-  binding = ports["#{container_port}/tcp"]&.first
-  raise "container #{cid} published no host port for #{container_port}" unless binding
-
-  Integer(binding["HostPort"])
 end
 
 def await_health(cid, port, timeout: 90)
@@ -457,7 +418,7 @@ end
 begin
   within = run_guard(self_test: self_test)
 ensure
-  @containers.dup.each { |cid| docker_rm(cid) }
+  containers.dup.each { |cid| docker_rm(cid) }
 end
 
 puts

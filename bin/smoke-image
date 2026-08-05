@@ -25,6 +25,14 @@ require "securerandom"
 require "tmpdir"
 require "uri"
 
+require_relative "script_support"
+
+# `sh`, `sh!`, `docker_run`, `docker_rm` and `published_port` live in the shared
+# plumbing, together with the comments explaining their shapes. What stays here
+# is what reads differently in this script than in the others — `check` rescuing
+# into a failure, `await_health` dumping diagnostics — and the checks themselves.
+include ScriptSupport
+
 IMAGE = ENV.fetch("IMAGE", "audio_proxy:smoke")
 REPO_ROOT = File.expand_path("..", __dir__)
 
@@ -48,7 +56,6 @@ FIXTURE_SECONDS = 5
 DURATION_TOLERANCE = 0.15
 
 @failures = []
-@containers = []
 
 def log(message) = puts("  #{message}")
 
@@ -69,65 +76,13 @@ rescue StandardError => e
   @failures << description
 end
 
-# Returns [stdout, ok?]. stderr is kept OUT of the first element on purpose:
-# docker writes advisories there — "the requested image's platform does not
-# match the detected host platform" being the one that bites — and a caller
-# doing Float(out) or JSON.parse(out) then chokes on a warning it never asked
-# for. Folding the two together made every command that returns a *value* a
-# parsing hazard. stderr still reaches the failure message below, where it is
-# the useful half.
-def sh(*args)
-  stdout, stderr, status = Open3.capture3(*args)
-  @last_stderr = stderr
-  [stdout, status.success?]
-end
-
 # For the cases that genuinely want both streams — container logs, where the
 # BEAM's crash output goes to stderr and its Logger output to stdout, and
-# reading only one loses half the story.
+# reading only one loses half the story. `sh`, which keeps them apart, is in the
+# shared plumbing and explains itself there.
 def sh_combined(*args)
   stdout, stderr, status = Open3.capture3(*args)
   [stdout.to_s + stderr.to_s, status.success?]
-end
-
-def sh!(*args)
-  out, ok = sh(*args)
-  raise "command failed: #{args.join(" ")}\n#{out}#{@last_stderr}" unless ok
-
-  out
-end
-
-# Every container this script starts is registered for teardown, so a failure
-# mid-suite does not strand one holding a published port.
-#
-# The id is picked out by shape rather than taken as "the output". `sh` keeps
-# stderr separate now, so this is belt-and-braces — but docker has been known to
-# put advisories on stdout too, and handing one of those to `docker inspect`
-# produces an error about a container that was in fact started correctly.
-def docker_run(*args)
-  out = sh!("docker", "run", "-d", *args)
-  cid = out.lines.map(&:strip).reverse.find { |line| line.match?(/\A[0-9a-f]{64}\z/) }
-  raise "no container id in docker run output:\n#{out}" unless cid
-
-  @containers << cid
-  cid
-end
-
-def docker_rm(cid)
-  sh("docker", "rm", "-f", cid)
-  @containers.delete(cid)
-end
-
-# Docker picks the host port and we read back what it bound. Picking one here
-# first — bind port 0, read it, close, hand it over — leaves a window in which
-# anything on a busy runner can take it, and the failure looks like the proxy
-# rather than the race it is.
-def published_port(cid, container_port = 4000)
-  ports = JSON.parse(sh!("docker", "inspect", cid)).first.dig("NetworkSettings", "Ports")
-  binding = ports["#{container_port}/tcp"]&.first
-  raise "container #{cid} published no host port for #{container_port}" unless binding
-
-  Integer(binding["HostPort"])
 end
 
 def wait_for_health(port, timeout: 60)
@@ -621,7 +576,7 @@ begin
     step("SIGTERM during a render") { check_sigterm(fixtures) }
   end
 ensure
-  @containers.dup.each { |cid| docker_rm(cid) }
+  containers.dup.each { |cid| docker_rm(cid) }
 end
 
 puts
