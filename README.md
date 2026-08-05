@@ -6,7 +6,7 @@ Transcode audio on demand, from a URL.
 
 Point it at your audio and ask for a variant by URL: a 30-second preview, a mono file for speech-to-text, a normalised podcast MP3, a 24-bit FLAC excerpt. The options are in the path, so one master can serve all of them and you generate none of them in advance. If you know [imgproxy](https://imgproxy.net), this is that, for audio.
 
-> **Status: early, `v0.3.0`.** Transcoding works end to end and you can try it in about a minute. Sources live on a mounted directory or in S3-compatible object storage (AWS, MinIO, R2, Tigris and friends — see [docs/s3-providers.md](docs/s3-providers.md)); with a [variant store](#variant-store) configured, completed renders are kept and served back with `Range` support, so a variant is encoded once rather than per request. See the [Roadmap](#roadmap).
+> **Status: early, `v0.3.0`.** Transcoding works end to end and you can try it in about a minute. Sources live on a mounted directory (S3-compatible object storage is in flight: the client layer shipped in 0.3.0, the source backend lands next — see [docs/s3-providers.md](docs/s3-providers.md) for what it will support); with a [variant store](#variant-store) configured, completed renders are kept and served back with `Range` support, so a variant is encoded once rather than per request. See the [Roadmap](#roadmap).
 
 ## Quick start
 
@@ -101,7 +101,7 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 - Transcoding to MP3, AAC/M4A, Opus, Vorbis, FLAC and WAV, with trimming, fades, loudness normalisation, channel and sample-rate control
 - Renders stream while they encode, from files in a mounted directory
 - Concurrent requests for the same variant share one render, with mid-render joiners catching up from the start
-- Sources on a mounted directory or in S3-compatible object storage, with virtual-hosted and path-style addressing
+- Sources on a mounted directory; the S3 client layer (SigV4, addressing styles, MinIO test harness — the plumbing the S3 source backend is being built on)
 - A variant cache: completed renders persist to a store — a local directory or an S3 bucket — and are served back without rendering, with `Range` support; hits can redirect to presigned storage URLs so the proxy leaves the hot path
 - A cap on simultaneous renders with a bounded wait queue, so a burst queues (and then sheds, with `Retry-After`) instead of thrashing the machine
 - `GET /info`, giving duration, sample rate, channels and tags, so clients can size their variant URLs to the source
@@ -411,7 +411,7 @@ The wildcards are asymmetric on purpose. A bucket namespace is yours, so a prefi
 
 `http://` and URLs carrying credentials (`https://user:pass@…`) are refused whatever the allowlist says.
 
-**`s3://` renders; `https://` does not yet.** S3 sources are fetched with the credentials in [S3 credentials](#configuration) — see [docs/s3-providers.md](docs/s3-providers.md) for per-provider settings. HTTPS sources parse, canonicalize and authorize, but their storage backend is a separate slice (`add-https-source-backend`); until it lands an HTTPS source answers `404`. See [docs/sources.md](docs/sources.md#remote-sources) for the URL normalization rules, the limits, and the full allowlist grammar.
+**Neither remote form renders yet.** Both parse, canonicalize and authorize, and the S3 *client* layer is shipped and tested — but the storage backends that connect it to rendering are separate slices in flight (`add-s3-source-backend`, `add-https-source-backend`). Until they land, a remote source answers the same blind `404` as a missing one. (An earlier revision of this section claimed `s3://` renders; that was wrong — the claim outran the code.) See [docs/sources.md](docs/sources.md#remote-sources) for the URL normalization rules, the limits, and the full allowlist grammar.
 
 ## Errors
 
