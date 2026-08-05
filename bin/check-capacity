@@ -48,9 +48,15 @@ require "optparse"
 require "tmpdir"
 require "uri"
 
+require_relative "capacity_model"
+
+# `MIB`, `HIGH_WATER`, `LINGER_BACKLOGS`, `T_FFMPEG_BUDGET`, `published_rss` and
+# `mib` all live in the shared model, alongside the arithmetic `bin/capacity-matrix`
+# publishes. The guard and the published matrix have to agree about the model, and
+# the only reliable way to make them agree is for there to be one model.
+include CapacityModel
+
 IMAGE = ENV.fetch("IMAGE", "audio_proxy:runtime")
-REPO_ROOT = File.expand_path("..", __dir__)
-CAPACITY_DOC = File.join(REPO_ROOT, "docs", "capacity.md")
 
 # The configuration the workload runs under. Small on purpose: the guard is
 # about the model's shape, and four slots exercise every term while keeping a
@@ -82,23 +88,6 @@ BASE_BITRATE_KBPS = 128
 # amd64. Stated in docs/capacity.md too — a tolerance nobody can find is a
 # tolerance nobody can argue with.
 HEADROOM = 1.5
-
-# `@linger` in AudioProxy.RenderCoordinator is 1 s, and a completed render holds
-# its whole backlog for that second having already released its slot. Renders
-# here take tens of seconds, so at most about one extra backlog is resident.
-LINGER_BACKLOGS = 1
-
-# `@high_water` in AudioProxy.Ffmpeg.Render.
-HIGH_WATER = 1 * 1024 * 1024
-
-# `T_ffmpeg` as docs/capacity.md publishes it: the library working set a
-# long-lived container holds resident once every format has been exercised.
-# Kept in step with that document's "budget 150 MiB" by hand — it is the one
-# constant here that is a judgement rather than a reading, which is exactly why
-# it is written down in both places rather than derived in one.
-T_FFMPEG_BUDGET = 150 * 1024 * 1024
-
-MIB = 1_048_576.0
 
 @containers = []
 @failures = []
@@ -137,41 +126,9 @@ def docker_rm(cid)
   @containers.delete(cid)
 end
 
-def mib(bytes) = (bytes / MIB).round(1)
-
 # ---------------------------------------------------------------------------
 # The model
 # ---------------------------------------------------------------------------
-
-# `R_ffmpeg`, read out of the published table rather than restated here — so a
-# table that has drifted from the shipped ffmpeg fails this guard rather than
-# quietly under-predicting.
-#
-# Only the `+ norm` rows are dropped: this workload applies no filter, and
-# including them would predict against a filter cost nothing here pays. The
-# long-form rows stay, being plain renders and the largest plain figures in the
-# table, which is what a worst case wants.
-def published_rss
-  doc = File.read(CAPACITY_DOC)
-  table = doc[/<!-- rss-table:begin -->(.*?)<!-- rss-table:end -->/m, 1].to_s
-
-  rows = table.lines.filter_map do |line|
-    cells = line.split("|").map(&:strip)
-    next unless cells.length >= 5
-
-    label, _options, _source, rss = cells[1], cells[2], cells[3], cells[4]
-    next if label.include?("norm") || label.include?("Variant") || label.start_with?("-")
-
-    mibs = rss.gsub("*", "")[/([\d.]+)\s*MiB/, 1]
-    next unless mibs
-
-    [label, Float(mibs) * MIB]
-  end
-
-  raise "no usable rows in the #{CAPACITY_DOC} table — run bin/measure-ffmpeg-rss" if rows.empty?
-
-  rows.to_h
-end
 
 # `T_ffmpeg`: the shared library text a render makes resident, as a *diagnostic
 # only*. The prediction uses `T_FFMPEG_BUDGET` — see below for why measuring it
@@ -231,16 +188,27 @@ end
 # a render, and `R_ffmpeg` is anonymous-only by construction.
 def predict(beam_base:, ffmpeg_text:, rss_table:, backlog_bytes:, concurrency:)
   r_ffmpeg = rss_table.values.max
-  per_render = r_ffmpeg + backlog_bytes + HIGH_WATER
-  renders = concurrency + LINGER_BACKLOGS
+
+  # The slots here are held by the long requests — minutes each — so this is the
+  # `L = 1` case. Evaluating the shared model rather than restating its arithmetic
+  # is what makes the guard and the published matrix agree by construction: the
+  # same function, over the same constants, with only the configuration differing.
+  total = ram_required(
+    concurrency: concurrency,
+    output_seconds: LONG_SECONDS,
+    r_ffmpeg: r_ffmpeg,
+    backlog_bytes: backlog_bytes,
+    beam_base: beam_base,
+    ffmpeg_text: ffmpeg_text
+  )
 
   {
-    total: beam_base + ffmpeg_text + (renders * per_render),
+    total: total,
     beam_base: beam_base,
     ffmpeg_text: ffmpeg_text,
     r_ffmpeg: r_ffmpeg,
     backlog: backlog_bytes,
-    renders: renders
+    renders: resident_renders(concurrency, LONG_SECONDS)
   }
 end
 
