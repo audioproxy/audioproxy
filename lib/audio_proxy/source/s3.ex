@@ -52,16 +52,31 @@ defmodule AudioProxy.Source.S3 do
 
   ## Failures classify by cause
 
-  `AudioProxy.S3` has six error shapes and this module maps every one of them
-  explicitly, with no catch-all — an unmapped shape should crash a test rather
-  than pick a plausible status in production.
+  `AudioProxy.S3`'s error type is five atoms and one `{:http, status, _}` whose
+  status is *unbounded*, and this module maps all of it explicitly, with no
+  catch-all — an unmapped shape should crash a test rather than pick a
+  plausible status in production.
+
+  The status ranges are the part worth reading twice. An earlier revision of
+  this covered 4xx and 5xx and called that total, which it is not: `ex_aws`
+  turns S3's "your bucket is in another region" into `{:http, 301, _}`, and a
+  request that hit it raised `FunctionClauseError` and answered a bare 500 —
+  the exact outcome the no-catch-all rule exists to prevent, arrived at by
+  leaving a hole instead of a default.
 
       :not_found          → :not_found            404, the blind row
       :access_denied      → :not_found            404, the blind row
       {:http, 4xx, _}     → :not_found            404, the blind row
+      {:http, 3xx, _}     → :not_configured       500 — a wrong-region redirect
       :not_configured     → :not_configured       500
       {:http, 5xx, _}     → :upstream_unavailable 502
       {:transport, _}     → :upstream_unavailable 502
+
+  A `{:http, 1xx/2xx, _}` still has no clause, deliberately: `AudioProxy.S3`
+  only builds those for the multipart write path, which this module never
+  reaches. A 3xx other than 301 does not arrive either — `ex_aws`'s own `case`
+  has no branch for one and raises inside the dependency first, which is not
+  something a clause here can repair.
 
   Folding `:access_denied` into the 404 is the deliberate part. A bucket
   policy that denies HEAD is indistinguishable from a missing object *to the
@@ -212,6 +227,18 @@ defmodule AudioProxy.Source.S3 do
   # credentials to learn what a bucket holds; the operator debugging a bucket
   # policy reads the log line instead.
   def classify(:access_denied), do: :not_found
+
+  # A redirect the store meant us to follow, and we do not: the HTTP client
+  # sets `autoredirect: false` (`AudioProxy.S3.HttpClient`), so a 301 arrives
+  # here as an error rather than as a second request. `ex_aws` produces exactly
+  # one — `{:http_error, 301, "redirected"}`, logged by it as "did you specify
+  # the correct region?" — and that is what this is: a bucket in a region the
+  # configuration does not name.
+  #
+  # So it is the operator's, not the client's, and *not* the 502: retrying a
+  # region mismatch never succeeds, and a row that invites a retry would have a
+  # client hammering a request that cannot work.
+  def classify({:http, status, _body}) when status >= 300 and status < 400, do: :not_configured
 
   # Neither 404 nor 403: we asked wrongly for an object the client named, and
   # the client cannot tell that apart from the object not being there.

@@ -139,6 +139,14 @@ defmodule AudioProxy.Source.S3Test do
     @shapes [
       {:not_found, :not_found},
       {:access_denied, :not_found},
+      # The wrong-region redirect. `ex_aws` produces this one for real — its own
+      # log line asks "did you specify the correct region?" — and the client
+      # never follows it, because `AudioProxy.S3.HttpClient` sets
+      # `autoredirect: false`. Absent from this table once, and a misconfigured
+      # region answered a bare 500 through a `FunctionClauseError`.
+      {{:http, 301, ""}, :not_configured},
+      {{:http, 301, "redirected"}, :not_configured},
+      {{:http, 399, ""}, :not_configured},
       {{:http, 400, ""}, :not_found},
       {{:http, 404, "<Error><Code>NoSuchBucket</Code></Error>"}, :not_found},
       {{:http, 409, "<Error/>"}, :not_found},
@@ -164,6 +172,25 @@ defmodule AudioProxy.Source.S3Test do
 
         assert {^expected, _headers, _body} = ErrorJSON.render(S3.classify(shape)),
                "expected #{inspect(shape)} to answer #{expected}"
+      end
+    end
+
+    # The table above pins the statuses someone thought of. This pins the ones
+    # nobody did: `{:http, status, _}` carries an *unbounded* status, and the
+    # bug this replaces was a hole between two range guards rather than a
+    # missing shape. Every status a store can answer an error with must land
+    # somewhere, so a future range edit that leaves a gap fails here instead of
+    # in production.
+    test "no error status in 300..599 is left without a clause" do
+      for status <- 300..599 do
+        reason =
+          try do
+            S3.classify({:http, status, ""})
+          rescue
+            FunctionClauseError -> flunk("{:http, #{status}, _} has no clause")
+          end
+
+        assert reason in [:not_found, :not_configured, :upstream_unavailable]
       end
     end
 
