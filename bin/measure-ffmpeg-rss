@@ -50,11 +50,10 @@
 # The library text is real memory, but it is **shared and counted once** — eight
 # concurrent ffmpegs map one copy — so it belongs with `BEAM_base` in the model
 # and not in a term multiplied by concurrency. What `R_ffmpeg` needs to be is the
-# *private* cost of one more render, which is exactly `anon`. cgroup v2 has no
-# high-water mark for it, so a sampler inside the container polls `memory.stat`
-# while the encode runs and the maximum is taken. The sampler is in the cgroup it
-# samples; the baseline run below carries the same sampler and is subtracted, so
-# it cancels.
+# *private* cost of one more render, which is exactly `anon`. `sample_anon` in
+# `bin/script_support.rb` is how that is read, and says there why it has to be
+# sampled rather than looked up; the baseline run below carries the same sampler
+# and is subtracted, so it cancels.
 #
 # Repeats remain, because sampling can miss a peak between polls. Here the
 # minimum would be the wrong estimator — a missed sample under-reports — so rows
@@ -72,9 +71,20 @@ require "json"
 require "open3"
 require "optparse"
 
+require_relative "capacity_model"
+require_relative "script_support"
+
+# `mib` and `REPO_ROOT` come from the model rather than being restated here, and
+# that is the right way round: this script *writes* the MiB figures
+# `CapacityModel.published_rss` parses back, and a rounding convention the two
+# do not share is precisely the drift that file exists to prevent.
+include CapacityModel
+
+# `sh`, `sh!` and the `anon` sampler, comments and all.
+include ScriptSupport
+
 IMAGE = ENV.fetch("IMAGE", "audio_proxy:runtime")
 TEST_IMAGE = ENV.fetch("TEST_IMAGE", "audio_proxy:test")
-REPO_ROOT = File.expand_path("..", __dir__)
 
 BEGIN_MARKER = "<!-- rss-table:begin -->"
 END_MARKER = "<!-- rss-table:end -->"
@@ -112,19 +122,6 @@ LONG_ROWS = [
   ["f:flac", "flac"],
   ["f:mp3/br:128/norm:ebu", "mp3 128k + norm"]
 ].freeze
-
-def sh(*args)
-  stdout, stderr, status = Open3.capture3(*args)
-  @last_stderr = stderr
-  [stdout, status.success?]
-end
-
-def sh!(*args)
-  out, ok = sh(*args)
-  raise "command failed: #{args.join(" ")}\n#{out}#{@last_stderr}" unless ok
-
-  out
-end
 
 def build_images
   return warn("  skipped (SKIP_BUILD)") if ENV["SKIP_BUILD"]
@@ -177,59 +174,9 @@ def with_lavfi_demuxer(argv)
   argv.dup.insert(i, "-f", "lavfi")
 end
 
-# Runs one command in a fresh container and returns its cgroup accounting.
-#
-# `--cgroupns=private` is the default on a cgroup v2 host, and stated anyway:
-# with the host namespace the container would read the *host's* memory.peak,
-# which is a plausible-looking number about something else entirely.
-def measure(cmd_argv)
-  probe = <<~SH
-    test -r /sys/fs/cgroup/memory.stat || { echo "cgroup=missing"; exit 0; }
-
-    # One sample synchronously before the loop starts: a command that finishes
-    # in milliseconds (the baseline's `true`) would otherwise be measured
-    # against an empty sample file.
-    : > /tmp/anon
-    awk '$1 == "anon" {print $2}' /sys/fs/cgroup/memory.stat >> /tmp/anon
-
-    while :; do
-      awk '$1 == "anon" {print $2}' /sys/fs/cgroup/memory.stat >> /tmp/anon
-      sleep $SAMPLE_INTERVAL
-    done &
-    sampler=$!
-
-    "$@" > /dev/null 2>/tmp/ffmpeg.err
-    rc=$?
-    kill "$sampler" 2>/dev/null
-
-    echo "rc=$rc"
-    echo "anon=$(sort -n /tmp/anon | tail -1)"
-    echo "samples=$(wc -l < /tmp/anon)"
-    echo "peak=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo 0)"
-    echo "file=$(awk '$1 == "file" {print $2}' /sys/fs/cgroup/memory.stat)"
-    tail -c 400 /tmp/ffmpeg.err | tr '\\n' '~'
-  SH
-
-  out = sh!("docker", "run", "--rm", "--cgroupns=private",
-            "-e", "SAMPLE_INTERVAL=#{SAMPLE_INTERVAL}",
-            "--entrypoint", "sh", IMAGE, "-c", probe, "sh", *cmd_argv)
-
-  fields = out.lines.map(&:chomp)
-  field = ->(name) { fields.find { |l| l.start_with?("#{name}=") }&.delete_prefix("#{name}=") }
-
-  raise "this host exposes no cgroup v2 memory.stat" if field["cgroup"] == "missing"
-  raise "ffmpeg exited #{field["rc"]}:\n#{out}" unless field["rc"] == "0"
-
-  anon = field["anon"].to_s
-  raise "the sampler recorded nothing:\n#{out}" if anon.empty?
-
-  {
-    anon: Integer(anon),
-    samples: Integer(field["samples"]),
-    peak: Integer(field["peak"]),
-    file: Integer(field["file"])
-  }
-end
+# One measured run of `cmd_argv` in the runtime image, at this script's
+# sampling interval.
+def measure(cmd_argv) = sample_anon(IMAGE, cmd_argv, interval: SAMPLE_INTERVAL)
 
 # The highest sampled `anon` across REPEATS runs. Maximum rather than minimum:
 # the sampler can land either side of a short-lived peak, and a run that missed
@@ -256,8 +203,6 @@ def baseline
     warn "  probe baseline: #{mib(b[:anon])} MiB anonymous"
   end
 end
-
-def mib(bytes) = (bytes / 1_048_576.0).round(1)
 
 def row(options, label, duration)
   input = "sine=frequency=440:duration=#{duration}"
