@@ -33,10 +33,10 @@ defmodule AudioProxy.InfoEndpointTest do
   setup %{tmp_dir: tmp_dir} do
     File.write!(Path.join(tmp_dir, "piece.wav"), "RIFF-fake-wav-bytes")
     File.write!(Path.join(tmp_dir, "tagged.mp3"), "ID3-fake-mp3-bytes")
-    File.write!(Path.join(tmp_dir, "notaudio.txt"), "definitely not audio")
+    File.write!(Path.join(tmp_dir, "unprobeable.txt"), "definitely not audio")
     File.write!(Path.join(tmp_dir, "silent.mp4"), "fake-mp4-bytes")
     File.write!(Path.join(tmp_dir, "garbage.wav"), "fake-bytes")
-    File.write!(Path.join(tmp_dir, "hang.wav"), "fake-bytes")
+    File.write!(Path.join(tmp_dir, "probehang.wav"), "fake-bytes")
 
     put_config(%{
       key: @key,
@@ -202,7 +202,7 @@ defmodule AudioProxy.InfoEndpointTest do
 
   describe "errors" do
     test "a source ffprobe cannot parse is 415" do
-      conn = info(signed("/info/plain/local://notaudio.txt"))
+      conn = info(signed("/info/plain/local://unprobeable.txt"))
 
       assert conn.status == 415
       assert JSON.decode!(conn.resp_body)["error"] == "undecodable_source"
@@ -217,7 +217,7 @@ defmodule AudioProxy.InfoEndpointTest do
     end
 
     test "a probe that outruns AP_PROBE_TIMEOUT is 504" do
-      conn = info(signed("/info/plain/local://hang.wav"))
+      conn = info(signed("/info/plain/local://probehang.wav"))
 
       assert conn.status == 504
       assert JSON.decode!(conn.resp_body)["error"] == "probe_timeout"
@@ -282,8 +282,8 @@ defmodule AudioProxy.InfoEndpointTest do
     end
 
     test "answers 200 where the GET answers 415, because diagnosing it is the probe" do
-      assert request(:head, signed("/info/plain/local://notaudio.txt"), []).status == 200
-      assert info(signed("/info/plain/local://notaudio.txt")).status == 415
+      assert request(:head, signed("/info/plain/local://unprobeable.txt"), []).status == 200
+      assert info(signed("/info/plain/local://unprobeable.txt")).status == 415
     end
 
     test "still answers everything the check chain can determine" do
