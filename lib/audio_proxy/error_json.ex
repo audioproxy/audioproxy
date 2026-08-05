@@ -24,6 +24,8 @@ defmodule AudioProxy.ErrorJSON do
                                              slot that ran out of budget)
       :render_failed                 500     render_failed
       :probe_failed                  500     probe_failed
+      :not_configured                500     not_configured
+      :upstream_unavailable          502     upstream_unavailable
       :render_timeout                504     render_timeout
       :probe_timeout                 504     probe_timeout
 
@@ -32,12 +34,30 @@ defmodule AudioProxy.ErrorJSON do
   rendering is ignored, per §5, so this status is unreachable from the render
   path.
 
-  The 500 row is the one addition to §5's table, and it is deliberate: §5
-  enumerates what a *client* can have got wrong, and a render that fails for
-  none of those reasons — no ffmpeg on `PATH`, a full disk, a diagnostic no
-  classifier recognises — still has to answer something. A plausible-looking
-  4xx would tell the client to stop retrying something that might well work
-  next time.
+  The 500 and 502 rows are this table's additions to §5's, and both are
+  deliberate: §5 enumerates what a *client* can have got wrong, and neither a
+  failed render nor an unreachable store is that. A render that fails for none
+  of §5's reasons — no ffmpeg on `PATH`, a full disk, a diagnostic no
+  classifier recognises — still has to answer something, and a
+  plausible-looking 4xx would tell the client to stop retrying something that
+  might well work next time.
+
+  ## The 502 row is not the 404 row
+
+  `:upstream_unavailable` is what a storage backend reports when it could not
+  reach its store at all — a transport failure, or a 5xx from S3. It is the
+  one source-side failure that is *not* the blind 404 below, and the
+  distinction is the whole point: an outage says nothing about whether the
+  object exists, so answering 404 reports a deletion that did not happen and
+  then edge-caches that report for ten seconds, suppressing the retry that
+  would have worked. 502 says the three things that are true — not the
+  client's fault, the resource may well exist, retrying is reasonable — and
+  carries `no-store` with the rest of the transient rows.
+
+  `:not_configured` sits beside it at 500 for the same honesty: a backend with
+  no credentials is an operator fault no client action can resolve, and it is
+  neither a failed render nor a failed probe, so it does not borrow their
+  bodies and send an operator to the wrong variable.
 
   `render/1` is the pure mapping — that is what the per-row unit tests pin —
   and `halt_with/2` sends it and halts, which is all a plug ever calls.
@@ -214,6 +234,18 @@ defmodule AudioProxy.ErrorJSON do
     {504, [], encode(%{error: "probe_timeout", message: "Probe exceeded AP_PROBE_TIMEOUT"})}
   end
 
+  # The storage seam's own two rows. Neither is a source failure, so neither
+  # is the blind 404 — see the moduledoc.
+  def render(:not_configured) do
+    body = encode(%{error: "not_configured", message: "Storage backend is not configured"})
+    {500, [], body}
+  end
+
+  def render(:upstream_unavailable) do
+    body = encode(%{error: "upstream_unavailable", message: "Storage backend is unavailable"})
+    {502, [], body}
+  end
+
   @doc """
   Names the error class — the same word the response body's `error` field
   carries.
@@ -234,6 +266,8 @@ defmodule AudioProxy.ErrorJSON do
   def class(:render_timeout), do: :render_timeout
   def class(:probe_failed), do: :probe_failed
   def class(:probe_timeout), do: :probe_timeout
+  def class(:not_configured), do: :not_configured
+  def class(:upstream_unavailable), do: :upstream_unavailable
 
   @doc """
   Sends the rendered error and halts the conn — the only call a plug needs.

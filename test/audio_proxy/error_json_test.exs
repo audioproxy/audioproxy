@@ -77,6 +77,24 @@ defmodule AudioProxy.ErrorJSONTest do
       assert body == %{"error" => "range_not_satisfiable", "message" => "Range not satisfiable"}
     end
 
+    test "500: the storage backend has no credentials" do
+      assert {500, [], body} = decoded(:not_configured)
+
+      assert body == %{
+               "error" => "not_configured",
+               "message" => "Storage backend is not configured"
+             }
+    end
+
+    test "502: the storage backend could not be reached" do
+      assert {502, [], body} = decoded(:upstream_unavailable)
+
+      assert body == %{
+               "error" => "upstream_unavailable",
+               "message" => "Storage backend is unavailable"
+             }
+    end
+
     test "504: render timeout (producer lands with add-render-endpoint)" do
       assert {504, [], body} = decoded(:render_timeout)
 
@@ -96,6 +114,15 @@ defmodule AudioProxy.ErrorJSONTest do
       bodies = Enum.map(@source_not_found, &ErrorJSON.render/1)
 
       assert Enum.uniq(bodies) == [ErrorJSON.render(:not_found)]
+    end
+
+    # The one source-side failure that is *not* the blind 404, and the reason
+    # the row exists: an outage the client can distinguish is an outage it can
+    # retry. Nothing else in the table may collapse into it either.
+    test "an upstream failure is distinguishable from a missing object" do
+      assert {502, [], _body} = ErrorJSON.render(:upstream_unavailable)
+      refute :upstream_unavailable in @source_not_found
+      assert ErrorJSON.render(:upstream_unavailable) != ErrorJSON.render(:not_found)
     end
   end
 
@@ -129,7 +156,9 @@ defmodule AudioProxy.ErrorJSONTest do
       {{:range_not_satisfiable, 200}, "no-store"},
       {{:queue_full, 3}, "no-store"},
       {:render_failed, "no-store"},
-      {:render_timeout, "no-store"}
+      {:render_timeout, "no-store"},
+      {:not_configured, "no-store"},
+      {:upstream_unavailable, "no-store"}
     ]
 
     test "each row's response carries its documented Cache-Control" do
