@@ -567,7 +567,12 @@ Structured JSON output is not implemented yet — it arrives with its own slice.
 
 Elixir with Plug and [Bandit](https://github.com/mtrudel/bandit), and no Phoenix, because there is no HTML to render and no channels to serve. ffmpeg runs as a subprocess rather than through libav bindings, so it does all decoding and encoding while Elixir stays orchestration; `ffprobe` backs `/info`. There is no database, no queue and no sidecar, because the only state is what lives in S3 and in the URLs themselves. That leaves one container to deploy and nothing to migrate.
 
+## License
+
+[Apache-2.0](LICENSE). The container images additionally distribute Debian packages (ffmpeg among them) under their own licenses; how the images comply is tracked in [`add-image-license-compliance`](openspec/changes/add-image-license-compliance) until it lands.
+
 ## Documentation
+
 
 | Document | What it covers |
 |---|---|

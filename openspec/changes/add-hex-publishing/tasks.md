@@ -1,6 +1,6 @@
 ## 1. Licensing & metadata
 
-- [ ] 1.1 `LICENSE` (Apache-2.0) at the repo root
+- [x] 1.1 `LICENSE` (Apache-2.0) at the repo root — landed early (pulled forward; the repo was public without a license)
 - [ ] 1.2 `mix.exs`: `description`, `package` (licenses, links, curated `files:`), `docs` (`main: "readme"`, extras); `{:ex_doc, only: :dev, runtime: false}`
 - [ ] 1.3 README: embedding-contract note (app start boots the listener, validates `AP_*` env); hexdocs/hex badges
 
