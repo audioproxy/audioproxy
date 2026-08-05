@@ -13,4 +13,4 @@
 ## 3. Verify
 
 - [x] 3.1 Re-run all four invocations from 1.1 and diff against the baseline; the capacity guard must still pass and its self-test must still fail the red path
-- [ ] 3.2 Confirm CI is green, `smoke` and `capacity` in particular
+- [x] 3.2 Confirm CI is green, `smoke` and `capacity` in particular
