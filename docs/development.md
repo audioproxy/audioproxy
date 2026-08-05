@@ -137,6 +137,15 @@ The fixture directory is mounted `:ro` throughout, which is the posture the
 README tells operators to use rather than an incidental detail — write access to
 `AP_LOCAL_ROOT` is write access to what the proxy will serve.
 
+It also renders an **`s3://` source**, against a MinIO container on a
+suite-private network: the fixture is uploaded with `mc`, the proxy signs its
+own presigned URL, and the shipped ffmpeg opens that URL and ranges it over the
+network. Then the store is removed and a source that is plainly there answers
+`502` rather than `404`. Both are here rather than only in the `:minio` ExUnit
+suite for the reason [Releases](#releases) gives: v0.3.0's notes announced S3
+rendering that no check exercised, and a release gate that cannot see S3 cannot
+catch that.
+
 ## Continuous integration
 
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on every push to
@@ -146,7 +155,7 @@ README tells operators to use rather than an incidental detail — write access 
 |---|---|---|---|
 | `test` | — | `mix format --check-formatted`, `mix compile --warnings-as-errors`, starts MinIO, then `mix test --include integration --include minio` | No external *binaries* — the untagged + `:integration` suite must pass on a bare runner |
 | `image-ffmpeg` | `test` | Builds the `test` and `runtime` stages, then `mix test --only ffmpeg` inside the image | Asserts the two stages carry the *same* ffmpeg build, and that its major matches [`VERSIONS.md`](../VERSIONS.md) |
-| `smoke` | `test` | Builds the release image, runs [`bin/smoke-image`](../bin/smoke-image) | Boot, health, an end-to-end render off a read-only mount, a signed percent-escaped URL over h2c, config validation, SIGTERM during a render |
+| `smoke` | `test` | Builds the release image, runs [`bin/smoke-image`](../bin/smoke-image) | Boot, health, an end-to-end render off a read-only mount, an `s3://` render against MinIO (and `502` once the store is gone), a signed percent-escaped URL over h2c, config validation, SIGTERM during a render |
 | `capacity` | `test` | Runs [`bin/capacity-matrix --verify`](../bin/capacity-matrix), then builds the release image and runs [`bin/check-capacity`](../bin/check-capacity) twice | Drives a concurrent workload (two-hour source included) and asserts cgroup `memory.peak` stays inside the model [`docs/capacity.md`](capacity.md) publishes; the second run is the guard's own red-path check. The `--verify` step needs no image and checks the other direction — that every cell of that document's decision matrix really is the largest concurrency its column's memory limit holds |
 | `publish` | `smoke`, `image-ffmpeg`, `capacity` | Pushes to GHCR | Never runs for a pull request; see [Releases](#releases) |
 

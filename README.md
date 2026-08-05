@@ -105,7 +105,7 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 - Transcoding to MP3, AAC/M4A, Opus, Vorbis, FLAC and WAV, with trimming, fades, loudness normalisation, channel and sample-rate control
 - Renders stream while they encode, from files in a mounted directory
 - Concurrent requests for the same variant share one render, with mid-render joiners catching up from the start
-- Sources on a mounted directory; the S3 client layer (SigV4, addressing styles, MinIO test harness — the plumbing the S3 source backend is being built on)
+- Sources on a mounted directory; the S3 client layer (SigV4, addressing styles, MinIO test harness — the plumbing the S3 source backend is built on)
 - A variant cache: completed renders persist to a store — a local directory or an S3 bucket — and are served back without rendering, with `Range` support; hits can redirect to presigned storage URLs so the proxy leaves the hot path
 - A cap on simultaneous renders with a bounded wait queue, so a burst queues (and then sheds, with `Retry-After`) instead of thrashing the machine
 - `GET /info`, giving duration, sample rate, channels and tags, so clients can size their variant URLs to the source
@@ -114,6 +114,7 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 **Merged, in the next release**
 
 - `f:peaks`, waveform min/max data in audiowaveform's JSON and binary formats, cached like any other variant. It is on `main` but not in the `0.3.0` image the Quick start pins.
+- `s3://` sources. ffmpeg reads the object through a presigned URL, so a trim fetches only the bytes it needs, and an unreachable store answers `502` rather than a `404` that would report a deletion that did not happen. Same caveat as above: on `main`, not in the `0.3.0` image.
 
 **After that**
 
@@ -462,7 +463,13 @@ The wildcards are asymmetric on purpose. A bucket namespace is yours, so a prefi
 
 `http://` and URLs carrying credentials (`https://user:pass@…`) are refused whatever the allowlist says.
 
-**Neither remote form renders yet.** Both parse, canonicalize and authorize, and the S3 *client* layer is shipped and tested — but the storage backends that connect it to rendering are separate slices in flight (`add-s3-source-backend`, `add-https-source-backend`). Until they land, a remote source answers the same blind `404` as a missing one. (An earlier revision of this section claimed `s3://` renders; that was wrong — the claim outran the code.) See [docs/sources.md](docs/sources.md#remote-sources) for the URL normalization rules, the limits, and the full allowlist grammar.
+**`s3://` renders and describes; `https://` does not yet.** An `s3://` source is HEADed for its size and ETag and then handed to ffmpeg as a presigned URL, so ffmpeg ranges the object directly and no source bytes pass through the proxy — which is what makes `t:0:30` on a two-hour master read only the seconds it needs. It needs the `AWS_*` credentials under [Configuration](#configuration). An `https://` source still parses, canonicalizes and authorizes but answers the same blind `404` as a missing one, until `add-https-source-backend` lands.
+
+`AP_PRESIGN_TTL` bounds the *URL*, not the read: ffmpeg has to open the object within the TTL, and the connection it opens outlives it. A long transcode does not need a long TTL.
+
+A store that is unreachable answers [`502`](#errors), not `404` — an outage says nothing about whether your object is there. A bucket policy that refuses the proxy's credentials *does* answer `404`, deliberately indistinguishable from a missing object; the log line names `access_denied`, so that is where an operator debugging a policy should look.
+
+See [docs/sources.md](docs/sources.md#remote-sources) for the URL normalization rules, the limits, and the full allowlist grammar.
 
 ## Errors
 
@@ -479,6 +486,8 @@ Failures are JSON, one shape everywhere: `{"error": "…", "message": "…"}`.
 | `429` | `queue_full` | The render queue is full, or this request waited longer than `AP_RENDER_TIMEOUT` for a slot; `Retry-After` is set |
 | `500` | `render_failed` | The render failed for a reason that is not yours: no encoder on the host, no disk space, a failure the proxy could not classify. Worth retrying |
 | `500` | `probe_failed` | A probe failed for a reason that is not yours. Worth retrying. Both endpoints probe — `/info` is a probe, and a render runs one first to check the source is audio |
+| `500` | `not_configured` | The storage backend the source names is misconfigured — no credentials, or a region/endpoint that is not the object's, which the store answers with a redirect. An operator has to fix it; retrying will not |
+| `502` | `upstream_unavailable` | The storage backend could not be reached — it answered `5xx`, or nothing at all. Says nothing about whether your object exists, and is `no-store` for that reason. Worth retrying |
 | `504` | `render_timeout` | A render started and then exceeded `AP_RENDER_TIMEOUT`. Time spent waiting for a slot is a `429`, not this |
 | `504` | `probe_timeout` | A probe exceeded `AP_PROBE_TIMEOUT`. On a render URL this means the audio-only check ran out of time before any encoding started — raise `AP_PROBE_TIMEOUT`, not `AP_RENDER_TIMEOUT` |
 
@@ -613,7 +622,7 @@ The proxy is built to sit behind a CDN without special configuration on either s
 | `401`, `422` | `max-age=60` | Pure functions of the URL: a bad signature never becomes good, invalid options never become valid — only a deploy changes that |
 | `302` (cache hit, redirect mode) | `no-store` | The `Location` is a credential with an expiry; a cached redirect hands out URLs that no longer work |
 | `416` | `no-store` | The only response whose body depends on a request header, and nothing here sends `Vary: Range` |
-| `429`, `500`, `504` | `no-store` | Transient — caching a transient failure amplifies it (`429` carries `Retry-After`) |
+| `429`, `500`, `502`, `504` | `no-store` | Transient — caching a transient failure amplifies it (`429` carries `Retry-After`, and a cached `502` would suppress the retry that would have worked) |
 | `200` from `/info` | `public, max-age=3600` | Not `immutable`, and not a year: the metadata describes a source somebody may re-upload, so caches must be able to revalidate it. See [Asking what a source is](#asking-what-a-source-is) |
 | `/health` | `no-store` | Liveness is only worth anything fresh |
 
