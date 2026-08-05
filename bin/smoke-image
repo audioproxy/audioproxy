@@ -434,8 +434,14 @@ def check_s3_source(fixtures)
     end
   end
 
-  docker_rm(cid)
 ensure
+  # Both containers come off the network before the network goes, and all of it
+  # runs here rather than on the happy path. `docker network rm` refuses while
+  # anything is still attached, and `sh` swallows that refusal — so removing the
+  # proxy container at the end of the body instead would leak a bridge network
+  # on every raise between `start_server` and here. The outer `ensure` reaps the
+  # container eventually; nothing reaps the network.
+  docker_rm(cid) if cid
   docker_rm(minio) if minio
   sh("docker", "network", "rm", network) if network
 end
