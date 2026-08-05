@@ -125,7 +125,39 @@ Peaks respect `t` and `ch`, ignore encoding options. Cheap enough to render eage
 }
 ```
 
-Straight mapping of `ffprobe -show_format -show_streams`, filtered. Cached aggressively (immutable per source ETag).
+Derived from `ffprobe -show_format -show_streams -select_streams a:0`, filtered to the fields above. `info` takes **no** processing options: any option segment alongside it is a `422`.
+
+### 4.1 Field rules
+
+The mapping is explicit rather than a passthrough, because ffprobe's output is verbose, version-dependent and inconsistent across containers while this object is none of those.
+
+| Field | Source | Rule |
+|---|---|---|
+| `format` | `format.format_name`, refined by `stream.codec_name` | Whichever name in ffprobe's comma-separated list is a §3.1 token, so the `mov,mp4,m4a,3gp,3g2,mj2` family is `m4a` and Ogg is `opus` or `ogg` by codec. Membership, not the whole string: the list's contents and order are ffprobe's business and change between versions. A container §3.1 has no token for falls through to the first name (`matroska,webm` → `matroska`) — `format` describes the *source*, and a source may be in a container this proxy cannot emit |
+| `duration` | `format.duration`, else `stream.duration` | Seconds, float |
+| `sample_rate`, `channels` | the audio stream | Integers |
+| `bit_depth` | `stream.bits_per_raw_sample`, else `stream.bits_per_sample` | Never `sample_fmt`: a lossy stream decodes to a float format and has no depth to report |
+| `bitrate` | `format.bit_rate`, else `stream.bit_rate` | Integer, bits per second |
+| `size` | the storage backend's `stat`, else `format.size` | The store is authoritative for the object |
+| `tags` | `format.tags` | String-valued entries only, keys lowercased, capped in count and length. Arbitrary bytes from a file the operator may not control |
+
+Each fallback is tried on the *extracted* value: ffprobe writes `"N/A"` rather than omitting a field it cannot answer, so taking the first key that is present would stop at the `"N/A"` and never reach the section that knows.
+
+**A field ffprobe cannot answer is omitted, never `null` and never a zero standing in for "unknown".** `"bit_depth" in info` is therefore a true answer for every source. A source with no audio stream at all — a video-only MP4, a text file — is a `415`, not an object with everything missing.
+
+### 4.2 Caching
+
+`ETag` is `hash(canonical-source ‖ source ETag)`: it changes exactly when the object does, and `If-None-Match` is answered `304` after the source `stat` and before the probe, which is the expensive half.
+
+`Cache-Control` is `public, max-age=3600` — **not** `immutable`, unlike a variant's. A variant's URL describes its bytes completely, so it can never become stale; `/info` describes a *mutable* source, and the same URL answers differently after a re-upload. `immutable` there would tell caches never to revalidate a document that has no other way of being corrected. An hour plus a cheap `304` is the aggressive caching this endpoint can honestly offer. A backend with no ETag material to give gets `public, max-age=60` and no validator, since nothing could correct it early.
+
+A `HEAD` answers what the check chain determines — `401`, `404`, `413` and the caching headers — and stops there, so it never spawns a probe and therefore answers `200` where a `GET` would answer `415`. That is the same discipline `HEAD` follows on the render endpoint, for the same reason: diagnosing `415` *is* the work `HEAD` exists to skip.
+
+### 4.3 Cost
+
+`AP_MAX_SRC_BYTES` does **not** apply to `/info`, unlike every other signed request: a probe reads container headers and never decodes, so a source too large to *render* still costs a probe nothing to describe — and the client most in need of the endpoint is precisely the one holding a long source it means to ask a trimmed preview of.
+
+A probe reads container headers and stops; it never decodes. It therefore does **not** take an `AP_MAX_CONCURRENCY` slot — that cap exists to bound encoders pinning cores, and queueing probes behind renders would make the endpoint a client calls *before* it knows what to request the slowest thing in the proxy. `AP_PROBE_TIMEOUT` is what bounds this path, and it is separate from and shorter than `AP_RENDER_TIMEOUT`.
 
 ---
 
@@ -185,6 +217,8 @@ Every response, success or error, carries an explicit `Cache-Control` — no CDN
 | `500` | The render failed for a reason that is not the client's: no encoder, no space, a diagnostic the classifier does not recognise |
 | `504` | A render started and then exceeded `AP_RENDER_TIMEOUT` |
 
+`/info` adds two rows of its own — `probe_failed` (`500`) and `probe_timeout` (`504`) — rather than reusing the render pair. The bodies name the limit an operator would raise, and `AP_RENDER_TIMEOUT` is not that limit for a probe; an error naming the wrong variable sends them to the wrong place.
+
 Every other row is something the *client* got wrong, which is why `500` is worth stating rather than leaving to the adapter: a render can fail with none of them true, and answering a plausible `4xx` would tell a client to stop retrying something that might well work next time.
 
 `429` and `504` divide on whether a render ever ran, not on how long the client waited — both can take the full `AP_RENDER_TIMEOUT`. A request that spent that budget queued for a slot has nothing to report about a render, so it is told to come back, with the same `Retry-After` a full queue would have given it up front. `504` means a render held a slot and then went silent. Answering `504` for a wait would name a timeout that never happened, and would tell a client its variant is too expensive to encode when the truth is that the box is busy.
@@ -205,6 +239,7 @@ Mid-stream render failure after `200` is signaled by abnormal termination of the
 | `AP_MAX_CONCURRENCY` | Max simultaneous ffmpeg processes (default: CPU count). Coalesced requests share one, so this counts renders and not requests |
 | `AP_QUEUE_SIZE` | Requests that may wait for a slot before the next is answered `429` |
 | `AP_MAX_SRC_BYTES`, `AP_RENDER_TIMEOUT` | Abuse limits |
+| `AP_PROBE_TIMEOUT` | Seconds an `/info` probe may take before ffprobe is killed and the request answered `504` (default: 10). Separate from `AP_RENDER_TIMEOUT` because a probe reads headers rather than decoding — see §4.3 |
 | `AP_SERVE_MODE` | `redirect` \| `proxy` |
 | `AP_PRESIGN_TTL` | Seconds a HIT's presigned URL stays valid (default: 300); redirect mode only |
 | `AP_LOG_LEVEL` | `debug` \| `info` \| `warning` \| `error` (default: `info`) |

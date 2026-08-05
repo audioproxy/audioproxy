@@ -7,7 +7,7 @@
 - `info` recognized in the options position (no processing options allowed with it).
 - Run `ffprobe -show_format -show_streams -print_format json` against a presigned source URL; map/filter to the §4 JSON shape (`format`, `duration`, `sample_rate`, `channels`, `bit_depth`, `bitrate`, `size`, `tags`).
 - Aggressive caching: `ETag` from source identity + source ETag; `Cache-Control` immutable semantics per §4.
-- Errors: 404 unreadable source, 415 unprobeable, 401/413 as usual.
+- Errors: 404 unreadable source, 415 unprobeable, 401 as usual. **Not** 413: `AP_MAX_SRC_BYTES` is a decoding limit and a probe does not decode, so a source too large to render is still described (decided during implementation, against this proposal's first draft).
 
 ## Capabilities
 

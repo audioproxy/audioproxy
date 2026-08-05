@@ -53,6 +53,52 @@ defmodule AudioProxy.Plugs.ParseOptionsTest do
     end
   end
 
+  describe "the info pseudo-option" do
+    test "a bare info marks the request and parses no options" do
+      conn = call("/info/plain/local://piece.wav")
+
+      refute conn.halted
+      assert conn.assigns.action == :info
+      assert conn.assigns.endpoint_class == :info
+      assert conn.assigns.source_string == "plain/local://piece.wav"
+      # No materialized defaults: nothing here describes a variant, and an
+      # `opts=f:mp3` on the log line would claim one was asked for.
+      refute Map.has_key?(conn.assigns, :options)
+    end
+
+    test "info with any other option is a 422 naming the other one" do
+      conn = call("/info/br:128/plain/local://piece.wav")
+
+      assert conn.halted
+      assert conn.status == 422
+
+      assert JSON.decode!(conn.resp_body) == %{
+               "error" => "invalid_options",
+               "message" => ~s("br:128" cannot be combined with "info")
+             }
+    end
+
+    test "the conflict is symmetric in segment order" do
+      assert call("/br:128/info/plain/local://piece.wav").status == 422
+      assert call("/f:mp3/info/f:opus/plain/local://piece.wav").status == 422
+    end
+
+    test "a render request is untouched by any of it" do
+      conn = call("/f:opus/plain/local://piece.wav")
+
+      refute conn.halted
+      refute Map.has_key?(conn.assigns, :action)
+      assert %Options{format: :opus} = conn.assigns.options
+    end
+
+    test "an option whose value spells info is not the marker" do
+      conn = call("/dl:info/plain/local://piece.wav")
+
+      refute conn.halted
+      assert %Options{download: "info"} = conn.assigns.options
+    end
+  end
+
   describe "options failures" do
     test "an invalid option value is a 422 naming the segment" do
       conn = call("/f:bogus/plain/local://piece.wav")

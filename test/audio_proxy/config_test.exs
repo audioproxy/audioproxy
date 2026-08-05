@@ -20,6 +20,7 @@ defmodule AudioProxy.ConfigTest do
                queue_size: 32,
                max_src_bytes: 2_000_000_000,
                render_timeout: 300,
+               probe_timeout: 10,
                serve_mode: :redirect,
                presign_ttl: 300,
                log_level: :info,

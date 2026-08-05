@@ -1,6 +1,6 @@
 defmodule AudioProxy.Plugs.RenderPipeline do
   @moduledoc """
-  The signed render chain (API doc §2): verify, parse, resolve, act.
+  The signed chain (API doc §2): verify, parse, resolve, act.
 
   Cheapest checks first — signature verification and both parsers are pure
   functions of the request, and authorization is an existence-blind
@@ -15,10 +15,13 @@ defmodule AudioProxy.Plugs.RenderPipeline do
   `KeyError`. Mount the four together, in this order.
 
   Mounted by the router for `GET /:sig/*rest`; `/health` stays outside it, so
-  an unsigned liveness check never touches signature verification. The action
-  is the seam: a 501 placeholder today, the streaming render in
-  `add-render-endpoint`. The info endpoint will reuse the first three plugs
-  with an action of its own.
+  an unsigned liveness check never touches signature verification.
+
+  The action is the seam, and there are two behind it: the streaming render and
+  the info probe. Both endpoints in §2 are the same route and the same first
+  three checks, so which one a request reached is a fact the chain discovers
+  rather than the router — `AudioProxy.Plugs.ParseOptions` decides it and
+  `AudioProxy.Plugs.Action` acts on it.
   """
 
   use Plug.Builder
@@ -26,5 +29,5 @@ defmodule AudioProxy.Plugs.RenderPipeline do
   plug AudioProxy.Plugs.VerifySignature
   plug AudioProxy.Plugs.ParseOptions
   plug AudioProxy.Plugs.ResolveSource
-  plug AudioProxy.Plugs.RenderAction
+  plug AudioProxy.Plugs.Action
 end
