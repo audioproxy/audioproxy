@@ -83,6 +83,14 @@ No write endpoints in v1: variant write-back to S3 is a side effect of a GET ren
 | `ch` | `1` \| `2` | Downmix (defensible defaults: >2ch → 2) |
 | `bd` | `16` \| `24` \| `32f` | Bit depth, lossless formats only; default: the source's depth, as `sr` defaults to its rate. `32f` is wav-only (flac encodes integers) |
 
+**Audio only, enforced rather than implied.** Every format above is audio, and so is every input this proxy accepts: a source carrying a genuine video stream is refused with `415`, by an `ffprobe` gate that runs before any render starts. It is a *reject*, not a strip — extracting the audio track from arbitrary video would make this a free transcoding service at video's cost profile and video's CVE exposure, which is a different product. Embedded cover art (an `attached_pic` stream, which virtually every tagged mp3, flac and m4a carries) is metadata, not video, and renders normally.
+
+Two things hold underneath that gate, for every render and independently of it. The argv disables non-audio streams (`-vn -sn -dn`), and ffmpeg runs under a `-protocol_whitelist` derived from the resolved source's type: `file` for a local source, `https,tls,tcp` for a remote one (plus `http` only where a plaintext development endpoint is configured). The two sets are disjoint, so a local render cannot reach the network, a remote one cannot read the filesystem, and neither can reach `concat:`, `subfile:` or any other pivot. No processing option and no environment variable widens either — that is the point of deriving it from the source.
+
+One consequence of the remote set carrying no `http`: an HTTPS origin that answers with a redirect to a cleartext URL fails to open, as a source error. That is the policy working rather than a gap — `http://` is not a scheme this proxy serves in the first place (§1) — but it is worth knowing before debugging a source whose origin downgrades on redirect.
+
+The gate does not run on a cache hit, because a hit is immutable bytes that already passed it, and it does not run on `HEAD`, which spawns no subprocess at all. Both are stated here because they are the two ways a `200` can answer a URL whose `GET` on a miss would be a `415`.
+
 ### 3.2 Time-domain / preview
 
 | Option | Values | Notes |
@@ -130,7 +138,7 @@ Peaks are a *format*, so they participate in the cache key, the write-back and t
 }
 ```
 
-Derived from `ffprobe -show_format -show_streams -select_streams a:0`, filtered to the fields above. `info` takes **no** processing options: any option segment alongside it is a `422`.
+Derived from `ffprobe -show_format -show_streams`, filtered to the fields above — the first audio stream is what the object describes. Every stream is requested rather than just `a:0` because the audio-only policy applies here too, and a gate cannot refuse a stream ffprobe was told to hide. `info` takes **no** processing options: any option segment alongside it is a `422`.
 
 ### 4.1 Field rules
 
@@ -149,6 +157,8 @@ The mapping is explicit rather than a passthrough, because ffprobe's output is v
 Each fallback is tried on the *extracted* value: ffprobe writes `"N/A"` rather than omitting a field it cannot answer, so taking the first key that is present would stop at the `"N/A"` and never reach the section that knows.
 
 **A field ffprobe cannot answer is omitted, never `null` and never a zero standing in for "unknown".** `"bit_depth" in info` is therefore a true answer for every source. A source with no audio stream at all — a video-only MP4, a text file — is a `415`, not an object with everything missing.
+
+The audio-only policy (§3.1) covers this endpoint as well: a source carrying a genuine video stream is `415` `video_source` here exactly as it is on a render, so the policy has no endpoint-shaped exception and `/info` is not a metadata-extraction service for arbitrary video. Cover art is not video, so a tagged mp3 with artwork is described normally. The check costs nothing extra — it reads the probe the endpoint had already run.
 
 ### 4.2 Caching
 
@@ -215,7 +225,7 @@ Every response, success or error, carries an explicit `Cache-Control` — no CDN
 | `401` | Invalid/missing signature |
 | `404` | Source not found / not readable |
 | `413` | Source exceeds `AP_MAX_SRC_BYTES` |
-| `415` | Source format not decodable |
+| `415` | Source not decodable (`undecodable_source`), or contains video (`video_source` — see §3.1) |
 | `416` | `Range` unsatisfiable against a cached variant (proxy mode only) |
 | `422` | Invalid or conflicting options |
 | `429` | No render slot: the wait queue was full, or this request waited in it longer than `AP_RENDER_TIMEOUT` without reaching the front (`Retry-After` set) |
@@ -224,7 +234,11 @@ Every response, success or error, carries an explicit `Cache-Control` — no CDN
 | `502` | The storage backend could not be reached: a transport failure, or a `5xx` from the store itself |
 | `504` | A render started and then exceeded `AP_RENDER_TIMEOUT` |
 
-`/info` adds two rows of its own — `probe_failed` (`500`) and `probe_timeout` (`504`) — rather than reusing the render pair. The bodies name the limit an operator would raise, and `AP_RENDER_TIMEOUT` is not that limit for a probe; an error naming the wrong variable sends them to the wrong place.
+The two `415`s are separate `error` values on one status because they are different verdicts: `undecodable_source` says the bytes could not be read, `video_source` says they were read and refused. A client told "not decodable" about a file every player opens would go looking for a corrupt upload.
+
+That makes `415` the one status that discriminates between *contents*, which is a deliberate exception to the blindness the `404` row enforces — and it is sound only because of where it sits. Signature verification precedes it, so the answer is available exclusively to someone the operator already handed a URL for this exact source; and `415` at all (rather than `404`) already discloses that the source exists and is readable. Splitting "missing" from "unauthorized" was rejected for the opposite reason: those answers are reachable by anyone who can guess a path.
+
+`probe_failed` (`500`) and `probe_timeout` (`504`) are two rows of their own rather than a reuse of the render pair. The bodies name the limit an operator would raise, and `AP_RENDER_TIMEOUT` is not that limit for a probe; an error naming the wrong variable sends them to the wrong place. Both are reachable **on either endpoint**: `/info` is a probe, and a render probes too before it starts (§3.1's audio-only gate), so a render URL answering `504 probe_timeout` means the gate's probe ran out of `AP_PROBE_TIMEOUT` before any encoding began.
 
 Every other row is something the *client* got wrong, which is why `500` and `502` are worth stating rather than leaving to the adapter: a render can fail with none of them true, and answering a plausible `4xx` would tell a client to stop retrying something that might well work next time.
 

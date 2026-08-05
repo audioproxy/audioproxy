@@ -130,7 +130,7 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 
 **Deliberately not planned**
 
-- **Video.** This is an audio proxy and will refuse video input rather than become a general ffmpeg gateway; video transcoding is far more expensive and carries most of ffmpeg's CVE history.
+- **Video.** This is an audio proxy and refuses video input rather than becoming a general ffmpeg gateway; video transcoding is far more expensive and carries most of ffmpeg's CVE history. Refusing it is now enforced rather than intended — see [The source must be audio](#the-source-must-be-audio).
 
 **Wanted, but not designed yet**
 
@@ -299,7 +299,7 @@ etag: "a1f3…"
 
 **A field the source cannot answer is left out, never `null`.** A lossy source has no `bit_depth`, so the key is simply absent; an untagged file has no `tags`. Test for the key, not for a value.
 
-`info` takes no processing options: it describes the source, not a variant, so `/info/br:128/…` is a `422`. A source with no audio in it at all — a video-only MP4, a text file — is a `415`.
+`info` takes no processing options: it describes the source, not a variant, so `/info/br:128/…` is a `422`. A source with no audio in it at all — a video-only MP4, a text file — is a `415`, and so is one that has both audio and video: the [audio-only rule](#the-source-must-be-audio) applies here too, so `/info` will not describe a video file for you. Cover art is not video.
 
 Responses carry an `ETag` derived from the source object, so a client or CDN that has seen this metadata before revalidates for the price of a `304`. `Cache-Control` is one hour rather than the year a rendered variant gets, and deliberately not `immutable`: a variant's URL describes its bytes exactly and can never go stale, while this describes a file somebody may re-upload tomorrow.
 
@@ -419,6 +419,14 @@ Both name the same thing and produce the same cache key. `enc/` exists because e
 
 In the `plain/` form the source is percent-escaped, and it is unescaped exactly once. A space is `%20`, a literal percent is `%25`, and `+` is a literal plus. One consequence to watch: a source that already carries escapes has to be escaped *again*, so a URL ending in `a%20b.wav` is written `plain/https://h/a%2520b.wav`. Sign the source in the same spelling you request it in, because the signature covers the raw path.
 
+### The source must be audio
+
+A source containing video is refused with a `415` (`video_source`), whatever variant was asked for. The audio track is not extracted: this is an audio proxy, and pointing it at a video library gets you an error rather than a slow, expensive render. Embedded cover art is not video — the tagged mp3s, flacs and m4a files in a normal catalogue render exactly as they always did.
+
+The rule covers `/info` as well, so there is no endpoint that will describe a video file for you either. One consequence worth knowing while you are building URLs: a video source answers `415` on a `GET` but `200` on a `HEAD` of the same URL, because deciding costs a probe and `HEAD` does not run one (see [Caching and CDNs](#caching-and-cdns)).
+
+**Upgrading onto this rule:** the check runs before a render, not before a cache hit — a hit is immutable bytes that were already rendered. So a variant store populated *before* this rule existed keeps serving whatever it holds, including audio that was extracted from a video source back when that was allowed, for the full year its `Cache-Control` claims. If that matters to you, purge the variant store (and the CDN in front of it); nothing else reaches those bytes.
+
 ### `local://`: files under a configured root
 
 `local://{path}` serves a path relative to `AP_LOCAL_ROOT`. Mount the directory you want served, read-only, and point the proxy at it:
@@ -473,14 +481,15 @@ Failures are JSON, one shape everywhere: `{"error": "…", "message": "…"}`.
 | `404` | `not_found` | The source is missing, unreadable, unparseable, or not one this proxy may serve, deliberately indistinguishable, so a `404` tells you nothing about what exists on disk |
 | `413` | `source_too_large` | The source exceeds `AP_MAX_SRC_BYTES`. Renders only — `/info` describes a source of any size |
 | `415` | `undecodable_source` | The source format is not decodable, or — on `/info` — carries no audio at all |
+| `415` | `video_source` | The source contains a video stream, and this proxy serves audio only. Cover art is not video. See [Sources](#sources) |
 | `422` | `invalid_options` | Invalid or conflicting options; the message names the offending segment |
 | `429` | `queue_full` | The render queue is full, or this request waited longer than `AP_RENDER_TIMEOUT` for a slot; `Retry-After` is set |
 | `500` | `render_failed` | The render failed for a reason that is not yours: no encoder on the host, no disk space, a failure the proxy could not classify. Worth retrying |
-| `500` | `probe_failed` | The `/info` probe failed for a reason that is not yours. Worth retrying |
+| `500` | `probe_failed` | A probe failed for a reason that is not yours. Worth retrying. Both endpoints probe — `/info` is a probe, and a render runs one first to check the source is audio |
 | `500` | `not_configured` | The storage backend the source names is misconfigured — no credentials, or a region/endpoint that is not the object's, which the store answers with a redirect. An operator has to fix it; retrying will not |
 | `502` | `upstream_unavailable` | The storage backend could not be reached — it answered `5xx`, or nothing at all. Says nothing about whether your object exists, and is `no-store` for that reason. Worth retrying |
 | `504` | `render_timeout` | A render started and then exceeded `AP_RENDER_TIMEOUT`. Time spent waiting for a slot is a `429`, not this |
-| `504` | `probe_timeout` | An `/info` probe exceeded `AP_PROBE_TIMEOUT` |
+| `504` | `probe_timeout` | A probe exceeded `AP_PROBE_TIMEOUT`. On a render URL this means the audio-only check ran out of time before any encoding started — raise `AP_PROBE_TIMEOUT`, not `AP_RENDER_TIMEOUT` |
 
 A failure *after* the response has begun is not in this table and cannot be: see [Rendering a variant](#rendering-a-variant).
 
@@ -622,7 +631,7 @@ The error rows are a deliberate relaxation, worth knowing if you operate a share
 Three behaviors round out the CDN-facing surface:
 
 - **Revalidation costs no render.** A request whose `If-None-Match` matches the variant's `ETag` answers `304` before the proxy touches storage or spawns anything — the ETag derives from the URL alone. The signature still gates: an unsigned request is `401`, matching validator or not. On `/info` the validator comes from the source object rather than the URL, so revalidating there costs one `stat` and still no probe.
-- **HEAD works.** `HEAD` on a signed URL runs every check a `GET` runs — signature, options, source authorization and stat — with an empty body and no render. Errors answer as `GET` does, bodiless. `HEAD /health` works too. Two caveats if you use it to validate URLs. Because it does not decode, it cannot report a source ffmpeg would reject, so a `HEAD` can answer `200` where the `GET` answers `415`; everything decidable without decoding (`401`, `404`, `413`, `422`) matches the `GET` exactly. And it does not consult the variant cache, so it reports the render path's framing, never a hit's `content-length` or its `302`.
+- **HEAD works.** `HEAD` on a signed URL runs every check a `GET` runs — signature, options, source authorization and stat — with an empty body and no render. Errors answer as `GET` does, bodiless. `HEAD /health` works too. Two caveats if you use it to validate URLs. Because it neither decodes nor probes, it cannot report a source ffmpeg would reject or one that turns out to be video, so a `HEAD` can answer `200` where the `GET` answers either `415`; everything decidable without a subprocess (`401`, `404`, `413`, `422`) matches the `GET` exactly. And it does not consult the variant cache, so it reports the render path's framing, never a hit's `content-length` or its `302`.
 - **`Range` on an uncached variant is ignored.** A `Range` header on a variant that has to be rendered gets the full `200` chunked stream (RFC 9110 permits this), with no `Accept-Ranges` and no `206`. Range serving belongs to cached variants: a hit answers `206` in proxy mode, or redirects to storage that serves it natively. A range no byte of a cached variant can satisfy is a `416`; one this proxy does not implement (several ranges at once, a unit other than `bytes`) is ignored, and answers the whole variant rather than failing. See [Cache semantics](#cache-semantics).
 
 ## Logs

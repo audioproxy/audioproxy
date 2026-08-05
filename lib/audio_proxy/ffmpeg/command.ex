@@ -3,16 +3,17 @@ defmodule AudioProxy.Ffmpeg.Command do
   Normalized options → ffmpeg argument vector (API doc §3).
 
   This is the last leg of the round-trip the project is built around: parse →
-  normalize → cache key → **identical ffmpeg args**. `build/2` is a pure
+  normalize → cache key → **identical ffmpeg args**. `build/3` is a pure
   function of a validated `t:AudioProxy.Options.t/0` and the input URL, so two
   option strings that normalize alike produce byte-identical argv, which is
   what makes a cache key a promise about bytes rather than about a URL.
 
       iex> {:ok, opts} = AudioProxy.Options.parse("f:opus/br:96/t:12.5:30/fade:0.5:1")
-      iex> AudioProxy.Ffmpeg.Command.build(opts, "https://example.test/a.wav")
+      iex> AudioProxy.Ffmpeg.Command.build(opts, "https://example.test/a.wav", type: :http)
       ["-nostdin", "-hide_banner", "-loglevel", "error",
+       "-protocol_whitelist", "https,tls,tcp",
        "-ss", "12.5", "-t", "30", "-i", "https://example.test/a.wav",
-       "-vn", "-af", "afade=t=in:st=0:d=0.5,afade=t=out:st=29:d=1",
+       "-vn", "-sn", "-dn", "-af", "afade=t=in:st=0:d=0.5,afade=t=out:st=29:d=1",
        "-c:a", "libopus", "-b:a", "96k", "-f", "ogg", "pipe:1"]
 
   ## Shape of the argv
@@ -21,11 +22,12 @@ defmodule AudioProxy.Ffmpeg.Command do
   list equality is the tested contract, so a stable shape is the whole point:
 
     1. baseline flags (`-nostdin -hide_banner -loglevel error`),
-    2. input-side seek (`-ss`/`-t`) **before** `-i`,
-    3. the input URL as one argv element,
-    4. `-vn` (sources carry cover art; we ship audio),
-    5. the filtergraph, then `-ac`, then the codec/muxer arguments,
-    6. `-f <muxer> pipe:1`.
+    2. the input protocol whitelist, before `-i` so it binds the input,
+    3. input-side seek (`-ss`/`-t`) **before** `-i`,
+    4. the input URL as one argv element,
+    5. `-vn -sn -dn` (we ship audio, and nothing else — see *Audio only*),
+    6. the filtergraph, then `-ac`, then the codec/muxer arguments,
+    7. `-f <muxer> pipe:1`.
 
   Seeking before `-i` is not a micro-optimization: ffmpeg's HTTP client turns
   it into a Range request, so `t:3600:30` on a two-hour master reads the
@@ -42,6 +44,31 @@ defmodule AudioProxy.Ffmpeg.Command do
   never appear in argv at all, and every filter value is a number that
   `AudioProxy.Options` has already parsed and bounded, re-rendered here
   through `AudioProxy.Options.render_number/1`.
+
+  No URL content can become an ffmpeg *flag*, either, and that is asserted
+  rather than argued: `allowed_flags/0` publishes every flag this module can
+  emit, and the property test walks a generated argv position by position,
+  checking each flag against that list and each value against the flag it
+  follows. A value that happens to start with `-` — `f:ogg/q:-1` renders
+  `["-q:a", "-1"]` — is therefore not mistaken for a flag, and a flag that
+  arrived from anywhere but this module has nowhere to hide.
+
+  ## Audio only
+
+  Every argv disables non-audio streams (`-vn -sn -dn`) and restricts ffmpeg's
+  input protocols (`-protocol_whitelist`), unconditionally, for every format
+  and for the peaks PCM path. Both are defence in depth behind the render
+  action's probe gate, which is what actually rejects a video source with 415:
+  these two are what hold if the gate is ever bypassed, reordered, or asked
+  about a source it cannot see inside.
+
+  The protocol set is derived from the **resolved source's type**, never from
+  the input string and never from an env knob — a knob would reopen the hole
+  this closes. The sets are disjoint by construction: a local source gets
+  `file` and so cannot reach the network, a remote one gets `https,tls,tcp`
+  and so cannot reach the filesystem. `concat:`, `subfile:` and friends are
+  reachable from neither, which is what stops a crafted or redirecting source
+  from pivoting ffmpeg across a boundary. See `protocols/1`.
 
   ## Filter order
 
@@ -62,11 +89,12 @@ defmodule AudioProxy.Ffmpeg.Command do
 
   ## What the builder does not know
 
-  `build/3` takes an optional `t:source/0` because one decision genuinely
-  cannot be made from the options alone: with no `bd`, a lossless variant
-  should follow the source's own bit depth, the way `sr` follows its sample
-  rate (§3.1). Until the `/info` probe exists to supply it, the fallback is
-  16-bit — documented, not silent.
+  `build/3` takes a `t:source/0` because two decisions genuinely cannot be made
+  from the options alone. The protocol whitelist is one, and it is required.
+  The other is optional: with no `bd`, a lossless variant should follow the
+  source's own bit depth, the way `sr` follows its sample rate (§3.1). Until
+  the `/info` probe exists to supply it, the fallback is 16-bit — documented,
+  not silent.
 
   ## Peaks
 
@@ -79,23 +107,84 @@ defmodule AudioProxy.Ffmpeg.Command do
   waveform UI draws one shape.
   """
 
-  alias AudioProxy.Options
+  alias AudioProxy.{Config, Options}
 
   @typedoc """
   What the builder needs to know about the source itself.
 
-  Empty today: the probe that fills it belongs to the `/info` slice. The one
-  key it carries, `:bit_depth`, exists because a lossless variant cannot pick
-  a sane default without knowing the source's depth. Passing nothing keeps the
-  documented fallback.
+  `:type` is the resolved source's tag (`AudioProxy.Source.Type.tag/0`) and is
+  **required**: it is what the input protocol whitelist is derived from, and a
+  default would be a guess about which side of the network/filesystem boundary
+  this render sits on. `:bit_depth` is optional, and exists because a lossless
+  variant cannot pick a sane default without knowing the source's depth;
+  omitting it keeps the documented 16-bit fallback.
 
-  This does not weaken the round-trip invariant. The cache key hashes the
-  normalized options *and* the source, so equal keys already imply the same
-  source — and therefore the same source metadata, and the same argv.
+  This does not weaken the round-trip invariant, but it is worth stating the
+  invariant precisely. The cache key hashes the normalized options *and* the
+  source, so equal keys imply the same source and therefore the same type, the
+  same source metadata, and — **within one deployment** — the same argv.
+
+  The qualifier is not new to this key: `input_url` is what
+  `AudioProxy.Source.ffmpeg_input/1` produced, and for a remote source that is a
+  presigned URL whose host, scheme and signature all come from deployment
+  configuration. Argv has therefore never been portable across deployments, and
+  `protocols/1`'s `:s3` clause (which reads `AP_S3_ENDPOINT`) adds nothing in
+  kind. What the cache needs is that argv be a deterministic function of the key
+  *on the box serving it*, and it is. Neither the presigned URL nor the protocol
+  set changes a single output byte, so two deployments still render identical
+  variants for identical keys.
   """
-  @type source :: [bit_depth: Options.bit_depth()]
+  @type source :: [type: source_type(), bit_depth: Options.bit_depth()]
+
+  @typedoc "A resolved source's type tag, as its module reports it."
+  @type source_type :: :local | :s3 | :http
 
   @baseline ~w(-nostdin -hide_banner -loglevel error)
+
+  # Non-audio streams, disabled on the output side for every render. See the
+  # moduledoc's *Audio only*.
+  @audio_only ~w(-vn -sn -dn)
+
+  # What a remote input needs and nothing more: TLS over TCP. No `file`, so a
+  # redirect to `file:///etc/passwd` fails to open rather than being read.
+  @remote_protocols "https,tls,tcp"
+
+  # The same set plus cleartext, for a development S3 endpoint that speaks it
+  # (`AP_S3_ENDPOINT=http://minio:9000`). Still no `file`.
+  @plaintext_protocols "https,tls,tcp,http"
+
+  # What a local input needs and nothing more. No network protocol, so a
+  # source resolved to a path cannot make ffmpeg fetch anything.
+  @local_protocols "file"
+
+  # The complete flag vocabulary, each mapped to how many argv elements follow
+  # it. Hand-maintained on purpose: adding a flag to `build/3` without adding
+  # it here fails the allowlist property test, which is exactly the review this
+  # table exists to force. Every entry is an audio, container or I/O flag —
+  # there is no `-c:v`, `-vf`, `-filter:v` or `-map`, and `allowed_flags/0` is
+  # asserted against that denylist rather than merely inspected.
+  @flags %{
+    "-nostdin" => 0,
+    "-hide_banner" => 0,
+    "-loglevel" => 1,
+    "-protocol_whitelist" => 1,
+    "-ss" => 1,
+    "-t" => 1,
+    "-i" => 1,
+    "-vn" => 0,
+    "-sn" => 0,
+    "-dn" => 0,
+    "-af" => 1,
+    "-ac" => 1,
+    "-c:a" => 1,
+    "-b:a" => 1,
+    "-q:a" => 1,
+    "-compression_level" => 1,
+    "-sample_fmt" => 1,
+    "-movflags" => 1,
+    "-frag_duration" => 1,
+    "-f" => 1
+  }
 
   # Muxer per format. Always explicit: stdout has no filename to infer from.
   @muxers %{
@@ -166,30 +255,105 @@ defmodule AudioProxy.Ffmpeg.Command do
   `bd`, and so on). `input_url` is passed through verbatim as a single argv
   element; it is never parsed, escaped, or interpolated.
 
+  `source` must carry the resolved source's `:type` — see `t:source/0` and
+  `protocols/1`.
+
   The result is the argument list *after* the program name, ready for
   `Port.open/2` with `:args`.
 
       iex> {:ok, opts} = AudioProxy.Options.parse("f:wav/bd:24")
-      iex> AudioProxy.Ffmpeg.Command.build(opts, "s3://b/k.aif") |> Enum.take(-6)
-      ["-vn", "-c:a", "pcm_s24le", "-f", "wav", "pipe:1"]
+      iex> AudioProxy.Ffmpeg.Command.build(opts, "/srv/audio/k.aif", type: :local)
+      ...> |> Enum.take(-8)
+      ["-vn", "-sn", "-dn", "-c:a", "pcm_s24le", "-f", "wav", "pipe:1"]
 
   With no `bd`, a lossless variant follows the source when its depth is known:
 
       iex> {:ok, opts} = AudioProxy.Options.parse("f:wav")
-      iex> AudioProxy.Ffmpeg.Command.build(opts, "s3://b/k.aif", bit_depth: :bd24)
+      iex> AudioProxy.Ffmpeg.Command.build(opts, "/srv/audio/k.aif",
+      ...>   type: :local, bit_depth: :bd24)
       ...> |> Enum.take(-5)
       ["-c:a", "pcm_s24le", "-f", "wav", "pipe:1"]
   """
   @spec build(Options.t(), String.t(), source()) :: [String.t()]
-  def build(%Options{} = options, input_url, source \\ []) when is_binary(input_url) do
+  def build(%Options{} = options, input_url, source) when is_binary(input_url) do
     @baseline ++
+      ["-protocol_whitelist", protocols(Keyword.fetch!(source, :type))] ++
       input_args(options) ++
-      ["-i", input_url, "-vn"] ++
+      ["-i", input_url] ++
+      @audio_only ++
       filter_args(options) ++
       channel_args(options) ++
       output_args(options, source) ++
       ["-f", muxer(options), "pipe:1"]
   end
+
+  @doc """
+  The ffmpeg input protocol whitelist for a resolved source's type.
+
+  One entry per source type, and deliberately not configurable: the whole
+  point is that the set follows from what the source *is*, so no request and
+  no environment variable can widen it.
+
+      iex> AudioProxy.Ffmpeg.Command.protocols(:local)
+      "file"
+
+      iex> AudioProxy.Ffmpeg.Command.protocols(:http)
+      "https,tls,tcp"
+
+  A source type added later has no clause here, so it raises rather than
+  inheriting somebody else's protocol set — the same discipline
+  `AudioProxy.ErrorJSON` applies to its own rows, and for the same reason: the
+  mistake should crash that slice's tests, not quietly open a protocol.
+
+  One clause is not a pure function of its argument, despite the spec: `:s3`
+  reads `AP_S3_ENDPOINT`, because the presigned URL ffmpeg is handed carries the
+  endpoint's own scheme. See `t:source/0` for why that does not weaken the
+  round-trip invariant — the same endpoint is already in the input URL.
+  """
+  @spec protocols(source_type()) :: String.t()
+  def protocols(:local), do: @local_protocols
+  def protocols(:http), do: @remote_protocols
+
+  # An S3 source is handed to ffmpeg as a presigned URL, whose scheme is the
+  # endpoint's. Against AWS that is always HTTPS; a dev deployment pointing at
+  # `http://minio:9000` needs cleartext too, and this is the one place that
+  # widening is allowed to come from — a *deployment fact*, not a knob, and
+  # still no `file`.
+  def protocols(:s3) do
+    case Config.get(:s3).endpoint do
+      %URI{scheme: "http"} -> @plaintext_protocols
+      _tls_or_aws -> @remote_protocols
+    end
+  end
+
+  @doc """
+  Every flag `build/3` can ever emit, sorted.
+
+  Published so the argv-allowlist property test compares against this module's
+  own vocabulary rather than a copy that can drift. Two things are asserted
+  against it: that every flag in a built argv is a member (reality ⊆
+  allowlist), and that the list itself contains no video, subtitle or stream-
+  mapping flag (allowlist ∩ denylist = ∅).
+  """
+  @spec allowed_flags() :: [String.t()]
+  def allowed_flags, do: @flags |> Map.keys() |> Enum.sort()
+
+  @doc """
+  Whether `flag` is followed by a value argument.
+
+  The other half of what the property test needs: without it, walking an argv
+  cannot tell the flag `-t` from the *value* `-1` that `f:ogg/q:-1` renders,
+  and a check that only looked at leading hyphens would have to choose between
+  a false alarm and a hole.
+
+      iex> AudioProxy.Ffmpeg.Command.takes_value?("-b:a")
+      true
+
+      iex> AudioProxy.Ffmpeg.Command.takes_value?("-vn")
+      false
+  """
+  @spec takes_value?(String.t()) :: boolean()
+  def takes_value?(flag) when is_binary(flag), do: Map.fetch!(@flags, flag) == 1
 
   @doc """
   The Content-Type for a variant.

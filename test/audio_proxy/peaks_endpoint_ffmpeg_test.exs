@@ -253,17 +253,22 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
       assert JSON.decode!(response.body)["error"] == "undecodable_source"
     end
 
-    # ffprobe reads this one happily and reports no audio stream, so the 415 is
-    # this module's own classification rather than something ffmpeg's stderr
-    # produced.
+    # This test's expectation moved when `add-audio-only-policy` merged, and the
+    # divergence it used to record is the thing that closed.
     #
-    # The audio path answers 500 for the same file, and that is deliberately
-    # *not* asserted here as correct: ffmpeg says "Output file does not contain
-    # any stream", which `AudioProxy.Ffmpeg.Render`'s classifiers do not match,
-    # so it falls through to `:render_failed`. That gap predates this change
-    # and belongs to the audio-only-policy slice; peaks are not the place to
-    # widen it. Recorded so the divergence is known rather than surprising.
-    test "a source with no audio stream is a 415, not a server error",
+    # It read: peaks answer 415 `undecodable_source` for a file with no audio
+    # stream, while the audio path answers **500** for the same file, because
+    # ffmpeg says "Output file does not contain any stream" and no classifier
+    # matches it — a gap belonging to the audio-only-policy slice.
+    #
+    # The gate closed it from the other side. A bare PNG is a video-typed stream
+    # with `attached_pic: 0` and no `nb_frames`, so it is not exempt as cover
+    # art, and the probe refuses it before either pipeline starts: both paths now
+    # answer 415 `video_source`. That is the honest reason — ffmpeg models a PNG
+    # as video, and this proxy does not serve video — and it is the same answer a
+    # video-only MP4 gets, which is the consistency the policy is for. Both
+    # halves are asserted below so the convergence stays pinned.
+    test "a source with no audio stream is refused the same way on both paths",
          %{port: port, root: root} do
       cover = Path.join(root, "cover.png")
 
@@ -288,7 +293,13 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
       peaks = render("/f:peaks/plain/local://cover.png", port)
 
       assert peaks.head =~ "http/1.1 415"
-      assert JSON.decode!(peaks.body)["error"] == "undecodable_source"
+      assert JSON.decode!(peaks.body)["error"] == "video_source"
+
+      # The half that used to be a 500.
+      audio = render("/f:mp3/plain/local://cover.png", port)
+
+      assert audio.head =~ "http/1.1 415"
+      assert JSON.decode!(audio.body)["error"] == "video_source"
     end
   end
 

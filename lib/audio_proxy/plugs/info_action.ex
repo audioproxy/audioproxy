@@ -66,6 +66,13 @@ defmodule AudioProxy.Plugs.InfoAction do
   `AP_PROBE_TIMEOUT` is 504, and anything else is 500. A missing source
   rediscovered by the probe (deleted between the stat and the spawn) is the
   same blind 404 the stat would have given.
+
+  One 415 is not the probe's verdict but the audio-only policy's: a source
+  carrying a genuine video stream is refused as `:video_source`, the same
+  answer the render endpoint gives it, so the policy has no endpoint-shaped
+  exception. It costs nothing extra — the probe has already run, and this is one
+  pass over the streams it returned. Cover art is not video; see
+  `AudioProxy.Ffprobe.has_video?/1`.
   """
 
   @behaviour Plug
@@ -73,6 +80,7 @@ defmodule AudioProxy.Plugs.InfoAction do
   import Plug.Conn
 
   alias AudioProxy.{ErrorJSON, Ffprobe, Source}
+  alias AudioProxy.Ffmpeg.Command
 
   # An hour, then revalidate. See the moduledoc for why not `immutable`.
   @cache_control "public, max-age=3600"
@@ -133,8 +141,17 @@ defmodule AudioProxy.Plugs.InfoAction do
   end
 
   defp probe(conn, source, stat, opts) do
+    # The same protocol whitelist the render path gives ffmpeg, for the same
+    # reason and derived the same way — from the resolved source's tag. A probe
+    # decodes nothing, but it does *read*, so an input that redirected to
+    # `file:` would otherwise report a local file's duration and tags back to
+    # the client. See `AudioProxy.Ffmpeg.Command.protocols/1`.
+    probe_opts =
+      [protocols: Command.protocols(elem(source, 0))] ++ Keyword.take(opts, [:executable])
+
     with {:ok, input} <- Source.ffmpeg_input(source),
-         {:ok, output} <- Ffprobe.probe(input, Keyword.take(opts, [:executable])),
+         {:ok, output} <- Ffprobe.probe(input, probe_opts),
+         :ok <- audio_only(output),
          {:ok, info} <- Ffprobe.contract(output, size: stat.size) do
       conn
       |> put_resp_content_type("application/json")
@@ -143,6 +160,17 @@ defmodule AudioProxy.Plugs.InfoAction do
     else
       {:error, reason} -> ErrorJSON.halt_with(conn, reason)
     end
+  end
+
+  # The audio-only policy applies here too, and it costs nothing extra: the
+  # probe has already run, so this is one pass over the streams it returned.
+  # Consistency is the whole argument — "this proxy does not touch video" with
+  # an endpoint-shaped exception is a rule nobody can hold in their head, and
+  # describing arbitrary video is metadata extraction as a service, which is not
+  # what /info is for. A video-only source answers `:undecodable_source` a line
+  # later anyway; this is what catches the ones that also carry audio.
+  defp audio_only(probe) do
+    if Ffprobe.has_video?(probe), do: {:error, :video_source}, else: :ok
   end
 
   ## The validator

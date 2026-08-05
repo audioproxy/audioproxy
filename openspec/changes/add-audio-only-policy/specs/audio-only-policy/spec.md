@@ -1,7 +1,11 @@
 ## ADDED Requirements
 
 ### Requirement: Sources containing video are rejected
-The system SHALL reject render and info-adjacent processing of sources that contain one or more genuine video streams with a 415 error, before any render subprocess starts. Attached-picture streams (`attached_pic` disposition — embedded cover art) SHALL NOT count as video.
+The system SHALL reject processing of sources that contain one or more genuine video streams with a 415 error naming the video-input policy, on **every** signed endpoint — renders before any render subprocess starts, and `/info` before it describes anything. Attached-picture streams (`attached_pic` disposition — embedded cover art) SHALL NOT count as video.
+
+#### Scenario: /info refuses video too
+- **WHEN** `/info` is requested for a source containing both audio and video
+- **THEN** the response is 415 with the same error the render endpoint gives, rather than a description of the audio stream
 
 #### Scenario: Video file rejected
 - **WHEN** a render is requested for an mp4 containing video and audio streams

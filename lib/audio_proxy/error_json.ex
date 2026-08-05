@@ -17,6 +17,7 @@ defmodule AudioProxy.ErrorJSON do
       source failure (see below)     404     not_found
       :source_too_large              413     source_too_large
       :undecodable_source            415     undecodable_source
+      :video_source                  415     video_source
       {:range_not_satisfiable, size} 416     range_not_satisfiable  Content-Range
       %OptionError{}                 422     invalid_options
       {:queue_full, retry_after}     429     queue_full          Retry-After
@@ -208,6 +209,18 @@ defmodule AudioProxy.ErrorJSON do
     {415, [], encode(%{error: "undecodable_source", message: "Source format is not decodable"})}
   end
 
+  # Its own row rather than a second message on `:undecodable_source`: the
+  # source decodes perfectly well, and a client told "not decodable" about a
+  # file every player opens would go looking for a corrupt upload. This is a
+  # policy refusal, and the body says so.
+  def render(:video_source) do
+    {415, [],
+     encode(%{
+       error: "video_source",
+       message: "Source contains video; this proxy serves audio only"
+     })}
+  end
+
   def render({:queue_full, retry_after})
       when is_integer(retry_after) and retry_after >= 0 do
     body = encode(%{error: "queue_full", message: "Render queue is full"})
@@ -262,6 +275,7 @@ defmodule AudioProxy.ErrorJSON do
   def class(:invalid_signature), do: :invalid_signature
   def class(:source_too_large), do: :source_too_large
   def class(:undecodable_source), do: :undecodable_source
+  def class(:video_source), do: :video_source
   def class(:render_failed), do: :render_failed
   def class(:render_timeout), do: :render_timeout
   def class(:probe_failed), do: :probe_failed

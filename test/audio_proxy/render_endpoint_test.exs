@@ -39,6 +39,13 @@ defmodule AudioProxy.RenderEndpointTest do
     File.write!(Path.join(tmp_dir, "a track.wav"), "RIFF")
     File.write!(Path.join(tmp_dir, "notaudio.txt"), "definitely not audio")
 
+    # The audio-only gate's fixtures. What they contain is irrelevant — the
+    # stand-in prober answers on the filename, so these say "video", "cover
+    # art" and "ambiguous" without shipping an mp4 to say it with.
+    for name <- ~w(video.mp4 videoonly.mp4 cover.mp3 stillcover.flac slideshow.mp4) do
+      File.write!(Path.join(tmp_dir, name), "fake-bytes")
+    end
+
     # Pin every config value the chain reads: a boot-time AP_MAX_SRC_BYTES in
     # the environment must not be able to flip these tests' 501s to 413s.
     put_config(%{
@@ -279,10 +286,115 @@ defmodule AudioProxy.RenderEndpointTest do
     end
 
     test "an undecodable source is a 415, from the render's own diagnosis" do
+      # The probe accepts this fixture (the stand-in prober has no directive for
+      # it), so the 415 is the *encoder's* verdict, reached after the gate — the
+      # case that is not the gate's, kept distinct from the ones below.
       conn = render(signed("/f:mp3/plain/local://notaudio.txt"))
 
       assert conn.status == 415
       assert JSON.decode!(conn.resp_body)["error"] == "undecodable_source"
+    end
+  end
+
+  describe "the audio-only gate" do
+    test "a source with audio and video is 415, with no render spawned" do
+      conn = render(signed("/f:mp3/plain/local://video.mp4"))
+
+      assert conn.status == 415
+      assert JSON.decode!(conn.resp_body)["error"] == "video_source"
+      assert JSON.decode!(conn.resp_body)["message"] =~ "audio only"
+
+      # The whole point of the gate's placement: no ffmpeg, and no render slot
+      # held while deciding.
+      assert no_render_spawned?()
+    end
+
+    test "a video-only source is 415 too" do
+      conn = render(signed("/f:mp3/plain/local://videoonly.mp4"))
+
+      assert conn.status == 415
+      assert JSON.decode!(conn.resp_body)["error"] == "video_source"
+      assert no_render_spawned?()
+    end
+
+    test "the refusal is a policy statement, not a decoding complaint" do
+      video = render(signed("/f:mp3/plain/local://video.mp4"))
+      undecodable = render(signed("/f:mp3/plain/local://notaudio.txt"))
+
+      assert video.status == undecodable.status
+      refute video.resp_body == undecodable.resp_body
+    end
+
+    test "a video refusal is briefly negative-cached, like every 415" do
+      conn = render(signed("/f:mp3/plain/local://videoonly.mp4"))
+
+      assert get_resp_header(conn, "cache-control") == ["max-age=10"]
+    end
+
+    test "cover art is not video: an mp3 with embedded artwork renders" do
+      conn = render(signed("/f:mp3/plain/local://cover.mp3"))
+
+      assert conn.status == 200
+      assert conn.resp_body == @payload
+    end
+
+    test "a still image with no disposition data renders too" do
+      # Fake-prober only, and it cannot be otherwise: ffmpeg's mp3 and flac
+      # muxers always write `attached_pic`, so a real fixture that omits the
+      # disposition is not constructible with the tools this repo has. That is
+      # exactly why the fallback is codec-based guesswork — it exists for
+      # containers we cannot enumerate, so the containers we *can* produce
+      # cannot exercise it.
+      assert render(signed("/f:flac/plain/local://stillcover.flac")).status == 200
+    end
+
+    test "ambiguity that is not a picture fails closed" do
+      conn = render(signed("/f:mp3/plain/local://slideshow.mp4"))
+
+      assert conn.status == 415
+      assert JSON.decode!(conn.resp_body)["error"] == "video_source"
+    end
+
+    test "every format is gated, not just the default one" do
+      for format <- ~w(mp3 opus aac m4a flac wav peaks) do
+        conn = render(signed("/f:#{format}/plain/local://video.mp4"))
+
+        assert conn.status == 415, "f:#{format} rendered a video source"
+      end
+    end
+
+    test "a cache HIT never pays for the gate", %{tmp_dir: tmp_dir} do
+      # The gate sits after the cache lookup, so a stored variant is served
+      # without probing — asserted by storing one for a *video* source, which
+      # only a HIT could ever answer 200 for.
+      store = Path.join(tmp_dir, "gate-store")
+      File.mkdir_p!(store)
+      put_config(%{variant_store: {:file, store}})
+
+      key = AudioProxy.CacheKey.derive!("f:mp3", "local://video.mp4")
+
+      metadata = %{
+        content_type: "audio/mpeg",
+        cache_control: "public, max-age=31536000, immutable, no-transform",
+        etag: ~s("#{key}")
+      }
+
+      assert :ok = AudioProxy.VariantStore.put_stream(key, ["cached-bytes"], metadata)
+
+      conn = render(signed("/f:mp3/plain/local://video.mp4"))
+
+      assert conn.status in [200, 302]
+      assert get_resp_header(conn, "x-audio-proxy") == ["HIT"]
+    end
+
+    test "HEAD does not probe, so it answers 200 where the GET answers 415" do
+      # The same divergence HEAD already has for an undecodable source, and
+      # deliberate for the same reason: HEAD exists to be cheap.
+      path = signed("/f:mp3/plain/local://video.mp4")
+
+      assert render(path).status == 415
+      assert request(:head, path).status == 200
+      assert no_render_spawned?()
     end
   end
 

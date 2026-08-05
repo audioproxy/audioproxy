@@ -52,7 +52,7 @@ defmodule AudioProxy.Ffmpeg.CommandFfmpegTest do
 
   defp render(options, source) do
     {:ok, opts} = Options.parse(options)
-    argv = Command.build(opts, source)
+    argv = Command.build(opts, source, type: :local)
 
     port =
       Port.open({:spawn_executable, System.find_executable("ffmpeg")}, [
@@ -98,7 +98,7 @@ defmodule AudioProxy.Ffmpeg.CommandFfmpegTest do
   # took to arrive. A container that buffers to EOF returns ~the source length.
   defp time_to_first_bytes(options, source) do
     {:ok, opts} = Options.parse(options)
-    argv = Command.build(opts, source)
+    argv = Command.build(opts, source, type: :local)
     started = System.monotonic_time(:millisecond)
 
     port =
@@ -218,5 +218,64 @@ defmodule AudioProxy.Ffmpeg.CommandFfmpegTest do
 
       assert_renders("f:mp3/br:96/t:0:2", hostile)
     end
+  end
+
+  # The whitelist is only a boundary if the binary enforces it, and which
+  # protocol names ffmpeg wants for a given input is exactly the sort of thing
+  # an upgrade changes quietly. These four assertions are what make that a red
+  # test rather than a silent behaviour change: the two legitimate combinations
+  # must work, and the two crossings must not.
+  describe "the protocol whitelist is enforced by ffmpeg itself" do
+    test "a local source renders under a file-only whitelist", %{source: source} do
+      assert_renders("f:mp3/br:96/t:0:2", source)
+    end
+
+    test "a local invocation cannot reach the network", %{source: _source} do
+      # Port 1 on loopback, so nothing is listening and nothing leaves the host
+      # even if the whitelist were wide open — the assertion is on *how* it
+      # fails, not that it fails.
+      {output, status} = run(:local, "https://127.0.0.1:1/piece.wav")
+
+      assert status != 0
+      assert output =~ ~r/whitelist/i
+    end
+
+    test "a remote invocation cannot read the filesystem", %{source: source} do
+      {output, status} = run(:http, "file:" <> source)
+
+      assert status != 0
+      assert output =~ ~r/whitelist/i
+
+      # And the same input without a scheme, which is how a bare path arrives:
+      # ffmpeg reads it through the `file` protocol either way.
+      {_output, status} = run(:http, source)
+      assert status != 0
+    end
+
+    # `concat:` is the pivot the whitelist exists to close: it is a protocol,
+    # not a demuxer option, so it is refused before any of its parts are read.
+    test "concat: is not reachable from either set", %{source: source} do
+      for type <- [:local, :http] do
+        {output, status} = run(type, "concat:#{source}|#{source}")
+
+        assert status != 0, "concat: was accepted under the #{type} whitelist"
+        assert output =~ ~r/whitelist|invalid|no such/i
+      end
+    end
+  end
+
+  defp run(type, input) do
+    {:ok, opts} = Options.parse("f:mp3/br:96/t:0:1")
+    argv = Command.build(opts, input, type: type)
+
+    port =
+      Port.open({:spawn_executable, System.find_executable("ffmpeg")}, [
+        :binary,
+        :exit_status,
+        :stderr_to_stdout,
+        args: argv
+      ])
+
+    collect(port, [])
   end
 end

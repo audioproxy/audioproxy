@@ -27,6 +27,10 @@ defmodule AudioProxy.FakeFfmpeg do
   reason the render action does: the response shape, the validator and the
   error mapping are properties of the action, and a real `ffprobe` can neither
   hang on demand nor emit output that is not JSON.
+
+  The render action takes it too, under `:probe_executable`, because the
+  audio-only gate probes before every render — so a test needs a source that
+  *says* it carries video without shipping an mp4 fixture to say it with.
   """
   @spec probe_path() :: String.t()
   def probe_path, do: Path.expand("fake_ffprobe.sh", __DIR__)
@@ -42,7 +46,10 @@ defmodule AudioProxy.FakeFfmpeg.Pipeline do
   plug AudioProxy.Plugs.ResolveSource
   # Resolved at compile time, which is the same filesystem the tests run on.
   plug AudioProxy.Plugs.Action,
-    render: [executable: AudioProxy.FakeFfmpeg.path()],
+    render: [
+      executable: AudioProxy.FakeFfmpeg.path(),
+      probe_executable: AudioProxy.FakeFfmpeg.probe_path()
+    ],
     info: [executable: AudioProxy.FakeFfmpeg.probe_path()]
 end
 

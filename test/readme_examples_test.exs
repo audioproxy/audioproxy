@@ -51,7 +51,7 @@ defmodule AudioProxy.ReadmeExamplesTest do
     for options <- examples(), options != "info" do
       {:ok, opts} = Options.parse(options)
 
-      argv = Command.build(opts, "https://example.test/piece.wav")
+      argv = Command.build(opts, "https://example.test/piece.wav", type: :http)
 
       assert List.last(argv) == "pipe:1"
       assert Command.content_type(opts) =~ ~r"^[a-z]+/[a-z0-9.+-]+$"

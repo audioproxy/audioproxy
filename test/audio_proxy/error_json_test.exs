@@ -52,6 +52,20 @@ defmodule AudioProxy.ErrorJSONTest do
              }
     end
 
+    test "415: a video source is its own row, not a decoding complaint" do
+      assert {415, [], body} = decoded(:video_source)
+
+      assert body == %{
+               "error" => "video_source",
+               "message" => "Source contains video; this proxy serves audio only"
+             }
+
+      # Same status, deliberately different `error`: the source decodes fine,
+      # and telling a client otherwise sends it looking for a corrupt upload.
+      refute body == elem(decoded(:undecodable_source), 2)
+      assert ErrorJSON.class(:video_source) == :video_source
+    end
+
     test "422: invalid options, message names the segment" do
       error = OptionError.new("f:bogus", :invalid_value)
 
@@ -153,6 +167,7 @@ defmodule AudioProxy.ErrorJSONTest do
       {OptionError.new("f:bogus", :invalid_value), "max-age=60"},
       {:source_too_large, "max-age=10"},
       {:undecodable_source, "max-age=10"},
+      {:video_source, "max-age=10"},
       {{:range_not_satisfiable, 200}, "no-store"},
       {{:queue_full, 3}, "no-store"},
       {:render_failed, "no-store"},

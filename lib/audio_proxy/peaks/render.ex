@@ -97,6 +97,11 @@ defmodule AudioProxy.Peaks.Render do
     * `:options` — the parsed `t:AudioProxy.Options.t/0`, for `pts`, `ch` and
       the trim the probe's duration has to be narrowed by.
     * `:input` — what ffmpeg and ffprobe read; a presigned URL, usually.
+    * `:protocols` — the `-protocol_whitelist` set the probe runs under, from
+      `AudioProxy.Ffmpeg.Command.protocols/1`. Required, because this pipeline
+      builds its own probe argv: the decode's whitelist is already inside
+      `:args`, and a probe spawned without one would be the single route in the
+      proxy that reads a source with every ffmpeg protocol available to it.
     * `:probe_executable` — the ffprobe binary. Unset means `ffprobe` from
       `PATH`, which is what production uses; tests pass a stand-in.
   """
@@ -170,13 +175,18 @@ defmodule AudioProxy.Peaks.Render do
     # `init/1` returns — so spawning one from here would be this process asking
     # the supervisor that is waiting for it. The continuation runs after the
     # reply, which is the whole reason it exists here.
-    {:ok, state,
-     {:continue, {:probe, Keyword.fetch!(peaks, :input), Keyword.fetch!(opts, :probe_executable)}}}
+    probe = {
+      Keyword.fetch!(peaks, :input),
+      Keyword.fetch!(peaks, :protocols),
+      Keyword.fetch!(opts, :probe_executable)
+    }
+
+    {:ok, state, {:continue, {:probe, probe}}}
   end
 
   @impl true
-  def handle_continue({:probe, input, probe_executable}, state) do
-    case start_inner(Ffprobe.args(input), executable: probe_executable) do
+  def handle_continue({:probe, {input, protocols, probe_executable}}, state) do
+    case start_inner(Ffprobe.args(input, protocols), executable: probe_executable) do
       {:ok, inner} ->
         {:noreply, %{state | inner: inner, inner_monitor: Process.monitor(inner)}}
 

@@ -10,8 +10,20 @@ defmodule AudioProxy.Plugs.RenderAction do
   unknown size passes — `AP_MAX_SRC_BYTES` is then the render pipeline's byte
   cap, per the `AudioProxy.Source.Type` contract.
 
+  Then the audio-only gate: one `ffprobe` header read through
+  `AudioProxy.Ffprobe`, and a source carrying a genuine video stream is 415
+  before a render slot is asked for. Cover art is not video, and the whole
+  argument for rejecting rather than stripping is in
+  `openspec/changes/add-audio-only-policy` — briefly, `-vn` alone would make
+  this a free audio-extraction service for arbitrary video, at video's cost
+  profile and video's CVE surface. The gate's placement is the load-bearing
+  part: after the cache lookup, so a HIT never pays for it, and before the
+  semaphore, so a refused source cannot occupy a slot. Everything the gate
+  cannot see inside is still covered downstream — every argv carries
+  `-vn -sn -dn` and a protocol whitelist (`AudioProxy.Ffmpeg.Command`).
+
   Then the render: `AudioProxy.Source.ffmpeg_input/1` says what ffmpeg should
-  read, `AudioProxy.Ffmpeg.Command.build/2` says how, and
+  read, `AudioProxy.Ffmpeg.Command.build/3` says how, and
   `AudioProxy.RenderCoordinator.subscribe/2` runs it — or attaches to the one
   already running for this cache key — with *this* process as subscriber. The
   filesystem is never reached around that seam: `ffmpeg_input/1` is what
@@ -34,11 +46,14 @@ defmodule AudioProxy.Plugs.RenderAction do
   Two consequences worth stating, because both look like bugs and are not:
 
   A HEAD answers the status the *check chain* can determine, which is not
-  always the status a GET answers. 415 is diagnosed by ffmpeg while decoding,
-  so a HEAD on an undecodable source answers 200 where the GET answers 415 —
-  and it cannot do better without rendering, which is the entire point of
-  HEAD. The same holds for 500 and 504. Everything the chain *can* know —
-  401, 404, 413, 422 — is identical to the GET.
+  always the status a GET answers. Both 415s need a subprocess — ffmpeg
+  diagnoses an undecodable source while decoding, ffprobe diagnoses a video one
+  at the gate — so a HEAD on either answers 200 where the GET answers 415. It
+  cannot do better without doing the work HEAD exists to skip; the same holds
+  for 500 and 504. Everything the chain *can* know — 401, 404, 413, 422 — is
+  identical to the GET. (The gate is deliberately not moved into the HEAD path
+  to close the video half of this: HEAD would then be the one request whose
+  cost is a subprocess, and clients use it precisely because it is cheap.)
 
   And the 304 outranks the stat, so a revalidation for a variant whose source
   has since been deleted answers 304, not 404. That is deliberate: the ETag
@@ -145,6 +160,7 @@ defmodule AudioProxy.Plugs.RenderAction do
     CacheKey,
     Config,
     ErrorJSON,
+    Ffprobe,
     RenderCoordinator,
     Semaphore,
     Source,
@@ -178,6 +194,10 @@ defmodule AudioProxy.Plugs.RenderAction do
       `AudioProxy.Ffmpeg.Render`. Unset means `ffmpeg` from `PATH`, which is
       what the mounted pipeline uses; tests mount a chain of their own with a
       stand-in, so the HTTP lifecycle can be driven without the real encoder.
+    * `:probe_executable` — the binary the audio-only gate probes with, passed
+      through to `AudioProxy.Ffprobe`. Unset means `ffprobe` from `PATH`. A
+      separate key from `:executable` because the gate and the render are two
+      different binaries with two different stand-ins.
   """
   @type opts :: keyword()
 
@@ -250,10 +270,17 @@ defmodule AudioProxy.Plugs.RenderAction do
   end
 
   defp respond(conn, source, opts) do
+    # The resolved source's own tag, which is what both subprocesses' protocol
+    # whitelists are derived from — never anything a client sends. The mapping
+    # from tag to protocol set belongs to `AudioProxy.Ffmpeg.Command`, so the
+    # probe and the render cannot end up with different answers.
+    type = elem(source, 0)
+
     with {:ok, stat} <- Source.stat(source),
          :ok <- within_limit(stat.size),
          {:ok, input} <- Source.ffmpeg_input(source),
-         {:ok, status, render, backlog} <- subscribe(conn, input, opts) do
+         :ok <- audio_only(input, type, opts),
+         {:ok, status, render, backlog} <- subscribe(conn, input, type, opts) do
       # `input` is what ffmpeg reads and can be a presigned URL; the span
       # carries the canonical identity instead, so nothing downstream of here
       # can log a credential. See `AudioProxy.Telemetry`.
@@ -302,7 +329,29 @@ defmodule AudioProxy.Plugs.RenderAction do
     if size > Config.get(:max_src_bytes), do: {:error, :source_too_large}, else: :ok
   end
 
-  defp subscribe(conn, input, opts) do
+  ## The audio-only gate
+
+  # One header-read probe, on a MISS only. Its failures are passed through as
+  # themselves — a source that vanished between the stat and the probe is the
+  # same blind 404, one ffprobe cannot parse is the 415 the render would have
+  # reached anyway, and a probe that times out or dies says so with the limit an
+  # operator would raise. Nothing here falls back to "render it and see": a gate
+  # that fails open is not a gate.
+  defp audio_only(input, type, opts) do
+    probe_opts =
+      [protocols: Command.protocols(type)] ++
+        probe_executable(Keyword.get(opts, :probe_executable))
+
+    case Ffprobe.probe(input, probe_opts) do
+      {:ok, probe} -> if Ffprobe.has_video?(probe), do: {:error, :video_source}, else: :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp probe_executable(nil), do: []
+  defp probe_executable(path), do: [executable: path]
+
+  defp subscribe(conn, input, type, opts) do
     # What the write-back stores alongside the bytes: the headers `begin/1`
     # sends, so a store-direct fetch serves the variant the way this response
     # would have. Built here because only this module knows them.
@@ -315,9 +364,9 @@ defmodule AudioProxy.Plugs.RenderAction do
     options = conn.assigns.options
 
     spec =
-      [args: Command.build(options, input), metadata: metadata] ++
+      [args: Command.build(options, input, type: type), metadata: metadata] ++
         Keyword.take(opts, [:executable]) ++
-        peaks_spec(options, input, opts)
+        peaks_spec(options, input, type, opts)
 
     case RenderCoordinator.subscribe(conn.assigns.cache_key, spec) do
       {:ok, status, render, backlog} ->
@@ -347,11 +396,18 @@ defmodule AudioProxy.Plugs.RenderAction do
   # and everything from the coordinator down treats the result as a render like
   # any other. The reduction needs what the argv alone cannot carry — the `pts`
   # and `ch` the reducer buckets by, and the input the leading probe reads.
-  defp peaks_spec(%{format: :peaks} = options, input, opts) do
-    [peaks: [options: options, input: input] ++ Keyword.take(opts, [:probe_executable])]
+  #
+  # `:protocols` rides along for the same reason the argv carries one: the peaks
+  # pipeline spawns its own ffprobe rather than going through
+  # `AudioProxy.Ffprobe.probe/2`, and a route that builds its own argv is
+  # exactly where an unrestricted probe would otherwise reappear.
+  defp peaks_spec(%{format: :peaks} = options, input, type, opts) do
+    spec = [options: options, input: input, protocols: Command.protocols(type)]
+
+    [peaks: spec ++ Keyword.take(opts, [:probe_executable])]
   end
 
-  defp peaks_spec(_options, _input, _opts), do: []
+  defp peaks_spec(_options, _input, _type, _opts), do: []
 
   ## Before the first byte
 
