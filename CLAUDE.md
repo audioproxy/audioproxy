@@ -42,6 +42,7 @@ Stay with the stdlib and core/OTP tooling as far as possible. GenStage is accept
   - `bin/agent-server` boots the app on the branch's hashed port (Bandit reads `PORT`). No per-branch database exists — the app is stateless, so worktree isolation is just directory + port.
   - Devcontainer image carries Elixir/OTP + ffmpeg/ffprobe (mirrors runtime deps); `postCreateCommand` is `bin/agent-setup`. Use `devcontainer up` / `devcontainer exec`, not raw `docker compose`.
 - One OpenSpec change per worktree; merge back when its tasks are checked off and tests are green.
+- **A deferral is a change, created in the same commit.** Descoping mid-implementation is fine; a "Deferred out of this change" note in an archived change is not a plan. Whatever is deferred gets its own change on the board *before* the archive lands, and the deferral note names it. (v0.3.0 shipped release notes for deferred work because the deferral lived only inside an archived file no planner reads.)
 - Toolchain pin lives in `.tool-versions`, Elixir/OTP as a matched pair. It is the single source of truth: mise reads it locally, `erlef/setup-beam` reads it in CI. Bumping a version means editing that one file (and the devcontainer/release image tags by hand).
 - **Documentation has a shape; keep writing to it.** Every slice that changes behavior, options, config, or workflow updates the docs in the same change — but *which* doc is not a free choice:
 

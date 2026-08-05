@@ -244,6 +244,17 @@ git push origin v0.1.0
 The tag push runs the whole pipeline again — tests, image, smoke — and only
 then publishes. There is no separate release workflow to keep in step.
 
+**Release notes are claims, and claims name their checks.** Before publishing
+notes, every Highlight must point at the automated check that demonstrates it —
+a smoke assertion, a tagged suite, a named test. A feature no check exercises
+does not go in the Highlights, however merged it looks; it goes under Known
+gaps, or the check gets written first. This rule exists because v0.3.0's notes
+announced S3 rendering while `Source.S3` still answered `no_backend`: the
+change had been archived with the gap honestly recorded, the stub was pinned
+by a green test, and the smoke suite rendered `local://` only — every signal
+was green and the claim was still false. Notes written from the board instead
+of from a check inherit exactly that failure.
+
 ### What bumps what
 
 SemVer here is over the **URL contract**: the grammar, the response semantics,
