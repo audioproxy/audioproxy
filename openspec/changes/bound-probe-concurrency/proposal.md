@@ -5,6 +5,7 @@
 Probes are bounded per-probe and unbounded in aggregate. A probe deliberately takes no `AP_MAX_CONCURRENCY` slot — the semaphore rations *encoders*, and queueing a header read behind a transcode would make `/info` the slowest thing in the proxy — and the gate runs *before* the coalescing registry, because a source that will be refused must not join a render. Both decisions are sound in isolation, and together they mean:
 
 - N concurrent requests for one cache key spawn N probes and exactly one render. The registry that exists to stop duplicate work does not cover the work that now happens ahead of it.
+- A `f:peaks` MISS pays **two** probes, not one: the gate's, and the one `AudioProxy.Peaks.Render` runs to learn the frame count its bucket boundaries need. They ask ffprobe the same question about the same bytes, moments apart, and neither knows about the other — so on that format the sharing this change is about is worth double.
 - N concurrent requests for a *refused* source spawn N probes and no render at all, so the render queue — the thing that sheds load with a 429 — never sees them.
 - `AP_PROBE_TIMEOUT` bounds each probe's lifetime; nothing bounds how many exist. The ceiling is the number of open connections, which is a Bandit setting nobody picked as a subprocess limit.
 
