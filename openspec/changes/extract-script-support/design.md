@@ -20,6 +20,7 @@ Three `bin/` scripts, ~1500 lines between them, sharing about 30 lines of identi
 - **The sampler takes its interval as a parameter.** That is the drift that already happened, so the extracted form has to make the interval explicit at the call site rather than defaulting it invisibly.
 - **Comments move, not copy.** The point of the exercise. A comment left behind in duplicate is the failure mode being fixed.
 - **File placement:** under `bin/`, since it is only ever loaded by things in `bin/`. It is not executable and not a script; naming should make that obvious at a glance so nobody tries to run it.
+- **Two support files, not one.** `bin/capacity_model.rb` arrived with #41 and holds the published memory model — constants, arithmetic, and the parser for the table `docs/capacity.md` publishes. It does not merge into this change's file, and the test is the one that decides everything else here: plumbing moves, domain stays. Docker invocation and shell capture mean nothing to a reader following the capacity argument, and the capacity model means nothing to a reader wondering why `docker_run` picks its container id out by shape. One file would be the union of two audiences and the natural home for neither. The visible cost is `check-capacity` requiring two of them, which is the honest shape and cheaper than the merged file's slow accumulation of everything any script ever needed.
 
 ## Risks / Trade-offs
 

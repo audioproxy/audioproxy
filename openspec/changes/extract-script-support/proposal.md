@@ -22,6 +22,10 @@ There is also one duplication that is not boilerplate: the cgroup `anon` sampler
 - `await_health` — `smoke-image`'s dumps container state and the last forty log lines on failure, which is most of its value; `check-capacity`'s is a bounded poll.
 - `generate_fixtures`, `start_server` — same names, different fixtures and different environments.
 
+**One support file already landed while this was queued**, and this change has to decide what to do about it. `add-capacity-decision-matrix` (#41) added `bin/capacity_model.rb`, required by `check-capacity` and the new `capacity-matrix`: the memory model's constants, its arithmetic and its parser for the table `docs/capacity.md` publishes. It exists for the same reason as this change — two copies of a thing is one copy and one liability — but it is a *different* thing, and the default answer is that the two stay separate. `capacity_model.rb` is domain: it is the published model, and a reader following an argument about `B_backlog` needs it. The file this change extracts is plumbing with no domain content at all, which is exactly the test used to decide what moves. Merging them would produce a support file that is half "how we talk to docker" and half "how much memory a render costs", and the second half is the part the exclusion list above is trying to protect.
+
+So: two files, and this change should say so where a reader will find it rather than leaving the next person to wonder why there are two. Note also that `check-capacity` now requires *both*, and that `capacity-matrix` is a fourth script requiring neither the docker nor the shell plumbing — it takes no subprocess at all, so it is not a caller this change serves.
+
 ## Capabilities
 
 ### New Capabilities
@@ -36,5 +40,6 @@ There is also one duplication that is not boilerplate: the cgroup `anon` sampler
 
 - Modified: `bin/smoke-image`, `bin/check-capacity`, `bin/measure-ffmpeg-rss`; new support file under `bin/`.
 - **Touches a release gate.** `bin/smoke-image` gates `publish`, so this is a refactor whose only real test is running all three scripts before and after and diffing the outcomes.
-- Depends on: `add-capacity-model-doc` (merged, #40).
+- Depends on: `add-capacity-model-doc` (merged, #40) and `add-capacity-decision-matrix` (#41) — rebase onto the latter, since it rewrote `check-capacity`'s constants and added `bin/capacity_model.rb` next to where this change's support file goes.
+- Not modified: `bin/capacity-matrix`, which runs no subprocess and needs none of this.
 - No CI, config, docs or `lib/` changes.
