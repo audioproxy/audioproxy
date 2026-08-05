@@ -147,6 +147,73 @@ def memory_table(rows)
   end
 end
 
+# One cell, spelled out in full, so a reader can see what the number means
+# before trusting 143 more of them. Generated rather than written down, because
+# a worked example that has drifted from the table beside it is worse than no
+# worked example: pinned to a row and a column, and loud if that pair ever stops
+# being an ordinary cell.
+REFERENCE_CELL = {length: "2 h", variant: "`f:mp3/br:128`", limit_gib: 4}.freeze
+
+def worked_cell(rows)
+  row = rows.find { |r| r[:length] == REFERENCE_CELL[:length] && r[:label] == REFERENCE_CELL[:variant] }
+  raise "the reference cell #{REFERENCE_CELL.inspect} is no longer in the matrix" unless row
+
+  limit = REFERENCE_CELL[:limit_gib] * GIB
+  model = {output_seconds: row[:seconds], r_ffmpeg: row[:r_ffmpeg], backlog_bytes: row[:backlog]}
+  c = max_concurrency(ram_budget: limit, **model)
+
+  unless c.between?(2, CONCURRENCY_CEILING)
+    raise "the reference cell now reads #{c}, which the worked example cannot narrate"
+  end
+
+  # MiB throughout the final comparison, not GiB: rounded to a tenth of a
+  # gibibyte the punchline reads "3.9 GiB fits, 4.0 GiB does not" against a 4 GiB
+  # limit, which looks like a typo rather than an argument.
+  wrap(
+    "Reading one cell in full: **#{REFERENCE_CELL[:length]}** of " \
+    "#{REFERENCE_CELL[:variant]} at #{REFERENCE_CELL[:limit_gib]} GiB says **#{c}**, " \
+    "so that deployment sets `AP_MAX_CONCURRENCY=#{c}`. One render of that shape " \
+    "holds #{mib(model[:r_ffmpeg])} MiB of ffmpeg, #{mib(model[:backlog_bytes])} MiB " \
+    "of retained output and #{mib(HIGH_WATER)} MiB of pipeline — " \
+    "#{mib(per_render_bytes(**model.slice(:r_ffmpeg, :backlog_bytes)))} MiB between " \
+    "them. At #{c} slots the worst case is #{resident_renders(c, row[:seconds])} of " \
+    "those resident at once — the #{LINGER_BACKLOGS} extra being a render that has " \
+    "finished and released its slot but is still holding its backlog for the linger " \
+    "second — which with `BEAM_base` and `T_ffmpeg` on top comes to " \
+    "#{mib(ram_required(concurrency: c, **model))} MiB against the limit's " \
+    "#{mib(limit)} MiB. One more slot would need " \
+    "#{mib(ram_required(concurrency: c + 1, **model))} MiB and does not fit, which is " \
+    "what makes #{c} the maximum."
+  )
+end
+
+# Interpolated prose arrives as one long line; the rest of this document wraps at
+# 80 columns and a generated paragraph should not be the exception.
+def wrap(text, width = 80)
+  text.split(/\s+/).each_with_object([""]) do |word, lines|
+    if lines.last.empty?
+      lines[-1] = word
+    elsif lines.last.length + 1 + word.length <= width
+      lines[-1] = "#{lines.last} #{word}"
+    else
+      lines << word
+    end
+  end.join("\n")
+end
+
+def legend
+  wrap(
+    "`#{NONE}` is a workload that does not fit at any concurrency on that limit. " \
+    "`> #{CONCURRENCY_CEILING}` means memory has stopped being the binding " \
+    "constraint and CPU has become it: size those from cores, not from this table. " \
+    "**#{REFUSED}** is a render whose output crosses the " \
+    "#{DEFAULT_MAX_SRC_BYTES / 1_000_000_000} GB `AP_MAX_SRC_BYTES` retention cap " \
+    "and is killed partway through — there is no concurrency at which it works, on " \
+    "any host. See " \
+    "[Long-form lossless](#3-long-form-lossless--fails-the-cap-loudly-by-design)."
+  )
+end
+
 def rendered(rss_table)
   rows = workload_rows(rss_table)
   plain = rss_table.values.min
@@ -155,26 +222,25 @@ def rendered(rss_table)
   <<~MARKDOWN
     ### How many renders fit
 
-    Maximum `AP_MAX_CONCURRENCY` whose **worst case** — every slot busy with this
-    workload at once, plus the backlogs still lingering — fits in the container
-    memory limit named by the column.
+    **Each cell is the number to put in `AP_MAX_CONCURRENCY`** — the largest
+    setting whose worst case still fits the memory limit in the column heading.
+    Worst case means every slot busy with that row's workload at the same moment,
+    plus the backlogs of renders that have just finished and are still holding
+    them.
 
     #{concurrency_table(rows)}
 
-    `—` is a workload that does not fit at any concurrency on that limit.
-    `> #{CONCURRENCY_CEILING}` means memory has stopped being the binding constraint
-    and CPU has become it: size those from cores, not from this table. **refused**
-    is a render whose output crosses the #{DEFAULT_MAX_SRC_BYTES / 1_000_000_000} GB
-    `AP_MAX_SRC_BYTES` retention cap and is killed partway through — there is no
-    concurrency at which it works, on any host. See
-    [Long-form lossless](#3-long-form-lossless--fails-the-cap-loudly-by-design).
+    #{worked_cell(rows)}
+
+    #{legend}
 
     ### How much memory a concurrency needs
 
     The same model read the other way, for an operator who has fixed
-    `AP_MAX_CONCURRENCY` and is buying a host. Set the container limit at or above
-    the figure; the [worked examples](#worked-examples) round up to the next
-    convenient size, and so should you.
+    `AP_MAX_CONCURRENCY` and is buying a host. Here the column is the setting and
+    **each cell is the memory that setting needs** — its worst case, again. Give
+    the container at least that much; the [worked examples](#worked-examples) round
+    up to the next convenient size, and so should you.
 
     #{memory_table(rows)}
 

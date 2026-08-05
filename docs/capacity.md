@@ -32,9 +32,11 @@ Three things the tables assume, all of them deliberate:
 
 ### How many renders fit
 
-Maximum `AP_MAX_CONCURRENCY` whose **worst case** — every slot busy with this
-workload at once, plus the backlogs still lingering — fits in the container
-memory limit named by the column.
+**Each cell is the number to put in `AP_MAX_CONCURRENCY`** — the largest
+setting whose worst case still fits the memory limit in the column heading.
+Worst case means every slot busy with that row's workload at the same moment,
+plus the backlogs of renders that have just finished and are still holding
+them.
 
 | Output | Variant | 1 GiB | 2 GiB | 4 GiB | 8 GiB | 16 GiB | 32 GiB |
 |---|---|---|---|---|---|---|---|
@@ -63,20 +65,29 @@ memory limit named by the column.
 |  | `f:wav` (44.1/16) | — | — | 2 | 5 | 12 | 25 |
 |  | `f:wav/bd:24` (48/24) | **refused** | **refused** | **refused** | **refused** | **refused** | **refused** |
 
-`—` is a workload that does not fit at any concurrency on that limit.
-`> 64` means memory has stopped being the binding constraint
-and CPU has become it: size those from cores, not from this table. **refused**
-is a render whose output crosses the 2 GB
-`AP_MAX_SRC_BYTES` retention cap and is killed partway through — there is no
-concurrency at which it works, on any host. See
-[Long-form lossless](#3-long-form-lossless--fails-the-cap-loudly-by-design).
+Reading one cell in full: **2 h** of `f:mp3/br:128` at 4 GiB says **29**, so
+that deployment sets `AP_MAX_CONCURRENCY=29`. One render of that shape holds
+14.4 MiB of ffmpeg, 109.9 MiB of retained output and 1.0 MiB of pipeline — 125.3
+MiB between them. At 29 slots the worst case is 30 of those resident at once —
+the 1 extra being a render that has finished and released its slot but is still
+holding its backlog for the linger second — which with `BEAM_base` and
+`T_ffmpeg` on top comes to 4017.9 MiB against the limit's 4096.0 MiB. One more
+slot would need 4143.2 MiB and does not fit, which is what makes 29 the maximum.
+
+`—` is a workload that does not fit at any concurrency on that limit. `> 64`
+means memory has stopped being the binding constraint and CPU has become it:
+size those from cores, not from this table. **refused** is a render whose output
+crosses the 2 GB `AP_MAX_SRC_BYTES` retention cap and is killed partway through
+— there is no concurrency at which it works, on any host. See [Long-form
+lossless](#3-long-form-lossless--fails-the-cap-loudly-by-design).
 
 ### How much memory a concurrency needs
 
 The same model read the other way, for an operator who has fixed
-`AP_MAX_CONCURRENCY` and is buying a host. Set the container limit at or above
-the figure; the [worked examples](#worked-examples) round up to the next
-convenient size, and so should you.
+`AP_MAX_CONCURRENCY` and is buying a host. Here the column is the setting and
+**each cell is the memory that setting needs** — its worst case, again. Give
+the container at least that much; the [worked examples](#worked-examples) round
+up to the next convenient size, and so should you.
 
 | Output | Variant | C = 1 | C = 2 | C = 4 | C = 8 | C = 16 | C = 32 |
 |---|---|---|---|---|---|---|---|
