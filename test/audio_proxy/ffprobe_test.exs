@@ -261,4 +261,108 @@ defmodule AudioProxy.FfprobeTest do
       assert Ffprobe.contract(%{}) == {:error, :undecodable_source}
     end
   end
+
+  describe "has_video?/1 — the audio-only gate" do
+    defp streams(streams), do: %{"streams" => streams, "format" => %{"format_name" => "x"}}
+
+    defp audio, do: %{"codec_type" => "audio", "codec_name" => "aac", "sample_rate" => "48000"}
+
+    test "an mp4 with audio and video is video" do
+      video = %{
+        "codec_type" => "video",
+        "codec_name" => "h264",
+        "nb_frames" => "500",
+        "disposition" => %{"attached_pic" => 0}
+      }
+
+      assert Ffprobe.has_video?(streams([video, audio()]))
+    end
+
+    test "a video-only source is video" do
+      assert Ffprobe.has_video?(streams([%{"codec_type" => "video", "codec_name" => "h264"}]))
+    end
+
+    test "an audio-only source is not" do
+      refute Ffprobe.has_video?(streams([audio()]))
+    end
+
+    test "mp3 cover art is not video" do
+      cover = %{
+        "codec_type" => "video",
+        "codec_name" => "mjpeg",
+        "nb_frames" => "1",
+        "disposition" => %{"attached_pic" => 1}
+      }
+
+      refute Ffprobe.has_video?(streams([audio(), cover]))
+    end
+
+    test "flac cover art is not video, even spelled as png" do
+      cover = %{
+        "codec_type" => "video",
+        "codec_name" => "png",
+        "disposition" => %{"attached_pic" => 1}
+      }
+
+      refute Ffprobe.has_video?(streams([audio(), cover]))
+    end
+
+    # The disposition is authoritative where present; these are the containers
+    # that do not carry one. A single frame of an image codec is a picture.
+    test "an ambiguous single-frame image stream is exempt" do
+      still = %{"codec_type" => "video", "codec_name" => "png", "nb_frames" => 1}
+
+      refute Ffprobe.has_video?(streams([audio(), still]))
+    end
+
+    test "an ambiguous stream that is not an image codec is video" do
+      # One frame of h265 is still h265: the exemption is for pictures, not for
+      # short videos, and the fallback direction is deliberate.
+      one_frame = %{"codec_type" => "video", "codec_name" => "hevc", "nb_frames" => "1"}
+
+      assert Ffprobe.has_video?(streams([audio(), one_frame]))
+    end
+
+    test "an image codec with more than one frame is video" do
+      animation = %{"codec_type" => "video", "codec_name" => "gif", "nb_frames" => "48"}
+
+      assert Ffprobe.has_video?(streams([audio(), animation]))
+    end
+
+    test "an image codec with no frame count at all fails closed" do
+      # "Not established" is not "one". A source that cannot say how many
+      # frames it has does not get the exemption.
+      unknown = %{"codec_type" => "video", "codec_name" => "mjpeg"}
+
+      assert Ffprobe.has_video?(streams([audio(), unknown]))
+    end
+
+    test "a disposition map that says nothing is not an exemption" do
+      undisposed = %{
+        "codec_type" => "video",
+        "codec_name" => "h264",
+        "disposition" => %{"default" => 1, "attached_pic" => 0}
+      }
+
+      assert Ffprobe.has_video?(streams([audio(), undisposed]))
+    end
+
+    test "subtitle and data streams are not video" do
+      refute Ffprobe.has_video?(
+               streams([
+                 audio(),
+                 %{"codec_type" => "subtitle", "codec_name" => "mov_text"},
+                 %{"codec_type" => "data", "codec_name" => "bin_data"}
+               ])
+             )
+    end
+
+    test "output with no streams is not a video verdict to invent" do
+      # It is refused a moment later as `:undecodable_source`, which is the
+      # honest reason — see `contract/2` above.
+      refute Ffprobe.has_video?(%{})
+      refute Ffprobe.has_video?(streams([]))
+      refute Ffprobe.has_video?(%{"streams" => "nonsense"})
+    end
+  end
 end

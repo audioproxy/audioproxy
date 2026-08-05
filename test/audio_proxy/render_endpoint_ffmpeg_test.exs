@@ -52,6 +52,13 @@ defmodule AudioProxy.RenderEndpointFfmpegTest do
     sine(Path.join(root, "long.wav"), 600)
     File.write!(Path.join(root, "notaudio.txt"), "definitely not audio")
 
+    # The audio-only gate's two halves, generated rather than committed so the
+    # fixtures are what this ffmpeg produces: a real video-plus-audio mp4, and a
+    # real mp3 carrying real cover art. Canned ffprobe JSON pins the *mapping*
+    # elsewhere; only these say the mapping matches what the binary emits.
+    video(Path.join(root, "video.mp4"))
+    tagged_mp3(Path.join(root, "cover.mp3"), root)
+
     {:ok, root: root}
   end
 
@@ -164,6 +171,50 @@ defmodule AudioProxy.RenderEndpointFfmpegTest do
     end
   end
 
+  describe "the audio-only gate, against the real prober" do
+    test "an mp4 carrying video is refused, and nothing is encoded", %{port: port} do
+      response = render("/f:mp3/plain/local://video.mp4", port)
+
+      assert response.head =~ "http/1.1 415"
+      assert JSON.decode!(response.body)["error"] == "video_source"
+
+      # The refusal is the gate's, not the encoder's: extracting the audio track
+      # is precisely what this policy exists not to do.
+      refute JSON.decode!(response.body)["error"] == "undecodable_source"
+    end
+
+    test "an mp3 with embedded cover art renders", %{port: port} do
+      # The other half, and the reason the gate cannot simply refuse every
+      # video-typed stream: real ffprobe reports this file's artwork as a video
+      # stream, and virtually every tagged mp3 in a real catalogue has one.
+      response = render("/f:mp3/br:96/t:0:2/plain/local://cover.mp3", port)
+
+      assert response.head =~ "http/1.1 200 ok"
+      assert RawHttp.complete?(response.body)
+
+      audio = RawHttp.dechunk(response.body)
+      assert probe(audio, "mp3")["format"]["format_name"] =~ "mp3"
+    end
+
+    test "the fixture really is what the test claims: cover art, not video",
+         %{root: root} do
+      # A tripwire on the fixture itself. If a future ffmpeg stops writing the
+      # `attached_pic` disposition, the test above would go green for the wrong
+      # reason — the gate would be exempting it as a single-frame image, or the
+      # mp3 would have no artwork at all.
+      streams = probe_file(Path.join(root, "cover.mp3"))["streams"]
+
+      assert Enum.any?(streams, &(&1["codec_type"] == "audio"))
+
+      assert Enum.any?(streams, fn stream ->
+               stream["codec_type"] == "video" and stream["disposition"]["attached_pic"] == 1
+             end)
+
+      assert AudioProxy.Ffprobe.has_video?(probe_file(Path.join(root, "video.mp4")))
+      refute AudioProxy.Ffprobe.has_video?(probe_file(Path.join(root, "cover.mp3")))
+    end
+  end
+
   defp render(rest, port) do
     "/#{Signature.sign(rest, @key, @salt)}#{rest}"
     |> RawHttp.get(port)
@@ -192,15 +243,82 @@ defmodule AudioProxy.RenderEndpointFfmpegTest do
       )
   end
 
-  # ffprobe reads a file rather than a pipe here on purpose: seeking is how it
-  # reads a container's index, and a piped mp3 reports no duration.
-  defp probe(audio, extension) do
-    path =
-      Path.join(System.tmp_dir!(), "probe-#{System.unique_integer([:positive])}.#{extension}")
+  # A short video-plus-audio mp4. `mpeg4` rather than `libx264`: the native
+  # encoder is in every build, and what this fixture needs is a genuine video
+  # stream, not a particular codec.
+  defp video(path) do
+    {_output, 0} =
+      System.cmd(
+        "ffmpeg",
+        [
+          "-y",
+          "-loglevel",
+          "error",
+          "-f",
+          "lavfi",
+          "-i",
+          "testsrc=duration=2:size=320x240:rate=10",
+          "-f",
+          "lavfi",
+          "-i",
+          "sine=frequency=440:duration=2",
+          "-c:v",
+          "mpeg4",
+          "-c:a",
+          "aac",
+          "-shortest",
+          path
+        ],
+        stderr_to_stdout: true
+      )
+  end
 
-    File.write!(path, audio)
-    on_exit(fn -> File.rm(path) end)
+  # An mp3 with a real attached picture — the cover art every tagged file in a
+  # catalogue carries, and the case the gate must not refuse.
+  defp tagged_mp3(path, root) do
+    audio = Path.join(root, "cover-source.wav")
+    artwork = Path.join(root, "cover-art.png")
 
+    sine(audio, 3)
+
+    {_output, 0} =
+      System.cmd(
+        "ffmpeg",
+        ["-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=64x64", "-frames:v", "1"] ++
+          [artwork],
+        stderr_to_stdout: true
+      )
+
+    {_output, 0} =
+      System.cmd(
+        "ffmpeg",
+        [
+          "-y",
+          "-loglevel",
+          "error",
+          "-i",
+          audio,
+          "-i",
+          artwork,
+          "-map",
+          "0:a",
+          "-map",
+          "1:v",
+          "-c:a",
+          "libmp3lame",
+          "-c:v",
+          "copy",
+          "-id3v2_version",
+          "3",
+          "-disposition:v",
+          "attached_pic",
+          path
+        ],
+        stderr_to_stdout: true
+      )
+  end
+
+  defp probe_file(path) do
     {json, 0} =
       System.cmd("ffprobe", [
         "-v",
@@ -213,5 +331,17 @@ defmodule AudioProxy.RenderEndpointFfmpegTest do
       ])
 
     JSON.decode!(json)
+  end
+
+  # ffprobe reads a file rather than a pipe here on purpose: seeking is how it
+  # reads a container's index, and a piped mp3 reports no duration.
+  defp probe(audio, extension) do
+    path =
+      Path.join(System.tmp_dir!(), "probe-#{System.unique_integer([:positive])}.#{extension}")
+
+    File.write!(path, audio)
+    on_exit(fn -> File.rm(path) end)
+
+    probe_file(path)
   end
 end

@@ -73,6 +73,7 @@ defmodule AudioProxy.Plugs.InfoAction do
   import Plug.Conn
 
   alias AudioProxy.{ErrorJSON, Ffprobe, Source}
+  alias AudioProxy.Ffmpeg.Command
 
   # An hour, then revalidate. See the moduledoc for why not `immutable`.
   @cache_control "public, max-age=3600"
@@ -133,8 +134,16 @@ defmodule AudioProxy.Plugs.InfoAction do
   end
 
   defp probe(conn, source, stat, opts) do
+    # The same protocol whitelist the render path gives ffmpeg, for the same
+    # reason and derived the same way — from the resolved source's tag. A probe
+    # decodes nothing, but it does *read*, so an input that redirected to
+    # `file:` would otherwise report a local file's duration and tags back to
+    # the client. See `AudioProxy.Ffmpeg.Command.protocols/1`.
+    probe_opts =
+      [protocols: Command.protocols(elem(source, 0))] ++ Keyword.take(opts, [:executable])
+
     with {:ok, input} <- Source.ffmpeg_input(source),
-         {:ok, output} <- Ffprobe.probe(input, Keyword.take(opts, [:executable])),
+         {:ok, output} <- Ffprobe.probe(input, probe_opts),
          {:ok, info} <- Ffprobe.contract(output, size: stat.size) do
       conn
       |> put_resp_content_type("application/json")

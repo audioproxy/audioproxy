@@ -3,12 +3,19 @@ defmodule AudioProxy.Ffprobe do
   One probe: `ffprobe` run against a source, its JSON collected, and the §4
   contract filtered out of it.
 
-  Two public functions, split where the tests want to cut. `probe/2` runs the
+  Three public functions, split where the tests want to cut. `probe/2` runs the
   subprocess and hands back ffprobe's own decoded JSON; `contract/2` is a pure
   mapping from that JSON to the object `docs/audio-proxy-api-v1.md` §4 defines.
   Everything version- and format-specific lives in the second one, which is
   what makes it testable against canned output per container rather than
   against a binary.
+
+  `has_video?/1` is the third, and it is the audio-only policy's gate rather
+  than part of §4: the render action probes on a MISS and refuses a source with
+  video before a render slot is taken. It reads the same JSON `contract/2` does
+  — pure, canned-output-testable, for the same reason — but needs `probe/2` to
+  have been asked for `streams: :all`, since §4's default selection hides the
+  very streams it is looking for.
 
   ## Collect, not stream
 
@@ -68,12 +75,15 @@ defmodule AudioProxy.Ffprobe do
   alias AudioProxy.Ffmpeg.RenderSupervisor
 
   # `-show_format` for the container and its tags, `-show_streams` for the
-  # audio parameters, `-select_streams a:0` because the contract describes one
-  # audio stream and a cover-art video stream would otherwise be in the output.
-  # No `-i`: ffprobe takes its input positionally, and it is the last element so
-  # nothing after it can be read as a flag.
-  @flags ~w(-hide_banner -loglevel error -show_format -show_streams -select_streams a:0
-            -print_format json)
+  # stream parameters. No `-i`: ffprobe takes its input positionally, and it is
+  # the last element so nothing after it can be read as a flag.
+  @flags ~w(-hide_banner -loglevel error -show_format -show_streams -print_format json)
+
+  # `-select_streams a:0` because §4's contract describes one audio stream and a
+  # cover-art video stream would otherwise be in the output. The audio-only
+  # policy gate needs the opposite — every stream, so it can see the video it
+  # exists to refuse — which is what `streams: :all` asks for.
+  @audio_selection ~w(-select_streams a:0)
 
   # Well past any real probe (a few KB) and well short of a memory hazard.
   @max_output 1_048_576
@@ -107,12 +117,63 @@ defmodule AudioProxy.Ffprobe do
 
     * `:executable` — the binary to run. Defaults to `ffprobe` from `PATH`.
     * `:timeout` — milliseconds. Defaults to `AP_PROBE_TIMEOUT`.
+    * `:streams` — `:audio` (default, §4's one audio stream) or `:all`, which
+      the audio-only gate needs so `has_video?/1` can see what it refuses.
+    * `:protocols` — the `-protocol_whitelist` set, from
+      `AudioProxy.Ffmpeg.Command.protocols/1`. Omitted means unrestricted,
+      which is what a caller with no resolved source type to offer gets;
+      every caller on the request path passes one.
   """
   @spec probe(String.t(), keyword()) :: {:ok, map()} | {:error, error_reason()}
   def probe(input, opts \\ []) when is_binary(input) do
     with {:ok, executable} <- executable(Keyword.get(opts, :executable)),
-         {:ok, output} <- run(executable, input, timeout(opts)) do
+         {:ok, output} <- run(executable, input, args(opts), timeout(opts)) do
       decode(output)
+    end
+  end
+
+  @doc """
+  Whether a probe found a genuine video stream.
+
+  The question the audio-only policy turns on, and it is not simply "is there a
+  stream whose `codec_type` is video". Virtually every tagged mp3, flac and m4a
+  carries its cover art as exactly such a stream, and refusing those would
+  refuse most of a real catalogue. Two exemptions, in the order they are
+  checked:
+
+    * **`attached_pic` disposition** — ffmpeg's own word for "this is cover
+      art, not a video track". Authoritative where present.
+    * **A single-frame image codec** — `mjpeg`/`png`/… with `nb_frames` of 1,
+      for containers whose disposition data is missing or ambiguous.
+
+  Anything else with a video `codec_type` is video. The fallback direction is
+  deliberate: an unrecognized codec, an absent frame count, a disposition map
+  that says nothing all reject. Failing closed here costs a client a 415 on an
+  odd file; failing open makes the proxy a video transcoder.
+
+      iex> AudioProxy.Ffprobe.has_video?(%{"streams" => [
+      ...>   %{"codec_type" => "audio", "codec_name" => "mp3"},
+      ...>   %{"codec_type" => "video", "codec_name" => "mjpeg",
+      ...>     "disposition" => %{"attached_pic" => 1}}
+      ...> ]})
+      false
+
+      iex> AudioProxy.Ffprobe.has_video?(%{"streams" => [
+      ...>   %{"codec_type" => "video", "codec_name" => "h264"}
+      ...> ]})
+      true
+  """
+  @spec has_video?(map()) :: boolean()
+  def has_video?(probe) when is_map(probe) do
+    case Map.get(probe, "streams") do
+      streams when is_list(streams) ->
+        Enum.any?(streams, &video?/1)
+
+      # ffprobe described no streams at all. Not a video verdict to invent: a
+      # source like that carries no audio stream either, so it is refused a few
+      # lines later — as `:undecodable_source`, which is the honest reason.
+      _absent ->
+        false
     end
   end
 
@@ -178,9 +239,25 @@ defmodule AudioProxy.Ffprobe do
 
   ## Running
 
-  defp run(executable, input, timeout) do
+  # The input stays last, after every flag and after the whitelist, so nothing
+  # in it can be read as an option.
+  defp args(opts) do
+    @flags ++ selection(Keyword.get(opts, :streams, :audio)) ++ whitelist(opts)
+  end
+
+  defp selection(:audio), do: @audio_selection
+  defp selection(:all), do: []
+
+  defp whitelist(opts) do
+    case Keyword.get(opts, :protocols) do
+      nil -> []
+      protocols when is_binary(protocols) -> ["-protocol_whitelist", protocols]
+    end
+  end
+
+  defp run(executable, input, args, timeout) do
     opts = [
-      args: @flags ++ [input],
+      args: args ++ [input],
       executable: executable,
       consumer: self(),
       timeout: timeout
@@ -359,6 +436,34 @@ defmodule AudioProxy.Ffprobe do
   # depth" arrives — and `positive_integer/1` turns it into an omitted key.
   defp bit_depth(stream) do
     positive_integer(stream["bits_per_raw_sample"]) || positive_integer(stream["bits_per_sample"])
+  end
+
+  # Codecs that are a picture rather than a moving image. The list is the
+  # exemption's whole width: a codec absent from it, single-frame or not, is
+  # video. See `has_video?/1` for why the direction is this way round.
+  @image_codecs ~w(mjpeg mjpegb png bmp gif tiff webp jpeg2000 jpegls)
+
+  defp video?(stream) when is_map(stream) do
+    Map.get(stream, "codec_type") == "video" and
+      not attached_pic?(stream) and
+      not still_image?(stream)
+  end
+
+  defp video?(_absent), do: false
+
+  defp attached_pic?(stream) do
+    case Map.get(stream, "disposition") do
+      disposition when is_map(disposition) -> Map.get(disposition, "attached_pic") == 1
+      _absent -> false
+    end
+  end
+
+  # `nb_frames` is a string in some ffprobe versions and an integer in others,
+  # and absent in a third set — where absent means "not established", which is
+  # not the same as one and is therefore not exempted.
+  defp still_image?(stream) do
+    Map.get(stream, "codec_name") in @image_codecs and
+      positive_integer(Map.get(stream, "nb_frames")) == 1
   end
 
   defp audio_stream(streams) when is_list(streams) do

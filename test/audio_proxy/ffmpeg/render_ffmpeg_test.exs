@@ -110,7 +110,7 @@ defmodule AudioProxy.Ffmpeg.RenderFfmpegTest do
       # `GenServer.call/3`. That flaked on main before it flaked on a branch.
       {:ok, render} =
         Render.start_link(
-          args: Command.build(options, source),
+          args: Command.build(options, source, type: :local),
           timeout: 100
         )
 
@@ -126,7 +126,7 @@ defmodule AudioProxy.Ffmpeg.RenderFfmpegTest do
   ## Helpers
 
   defp start(options, input) do
-    Render.start_link(args: Command.build(options, input))
+    Render.start_link(args: Command.build(options, input, type: :local))
   end
 
   defp render!(options, input) do

@@ -4,16 +4,19 @@ defmodule AudioProxy.Ffmpeg.CommandPropertyTest do
 
   import AudioProxy.OptionsGenerators, only: [option_segments: 0]
 
+  alias AudioProxy.ArgvWalk
   alias AudioProxy.CacheKey
   alias AudioProxy.Ffmpeg.Command
   alias AudioProxy.Options
 
+  doctest AudioProxy.ArgvWalk
+
   @source "s3://masters/2026/piece-final.wav"
   @input "https://masters.example/2026/piece-final.wav?X-Amz-Signature=deadbeef"
 
-  defp build(segments, input \\ @input) do
+  defp build(segments, input \\ @input, type \\ :http) do
     {:ok, opts} = Options.parse(segments)
-    Command.build(opts, input)
+    Command.build(opts, input, type: type)
   end
 
   # This is the invariant the whole project rests on: the cache key promises
@@ -149,6 +152,90 @@ defmodule AudioProxy.Ffmpeg.CommandPropertyTest do
     check all(segments <- option_segments()) do
       assert ["-f", muxer, "pipe:1"] = build(segments) |> Enum.take(-3)
       assert muxer =~ ~r/^[a-z0-9]+$/
+    end
+  end
+
+  # The audio-only policy's central claim, as a property: whatever options a
+  # signed URL carries, every flag ffmpeg is handed came from this module's own
+  # vocabulary. Reality ⊆ allowlist — the other direction (allowlist ∩ denylist
+  # = ∅) is an example test, since it is a statement about a fixed list.
+  property "every flag in a built argv is in the published allowlist" do
+    check all(segments <- option_segments()) do
+      assert ArgvWalk.flags(build(segments)) -- Command.allowed_flags() == []
+    end
+  end
+
+  property "every argv disables video, subtitles and data, whatever the options" do
+    check all(segments <- option_segments()) do
+      argv = build(segments)
+
+      assert "-vn" in argv
+      assert "-sn" in argv
+      assert "-dn" in argv
+    end
+  end
+
+  property "every argv restricts input protocols, before the input" do
+    check all(segments <- option_segments(), type <- member_of([:local, :http])) do
+      argv = build(segments, @input, type)
+      flag = Enum.find_index(argv, &(&1 == "-protocol_whitelist"))
+
+      assert flag < Enum.find_index(argv, &(&1 == "-i"))
+      assert Enum.at(argv, flag + 1) == Command.protocols(type)
+    end
+  end
+
+  # The opaque options are where a flag would be smuggled if it could be: `dl`
+  # is arbitrary text and `cb` is arbitrary text, and both are refused only for
+  # control characters. Neither reaches argv at all — so a value spelled exactly
+  # like a flag stays out of it, and the argv is identical to one built without
+  # them.
+  property "a flag spelled into dl or cb never becomes a flag" do
+    check all(
+            segments <- option_segments(),
+            smuggled <-
+              member_of([
+                "-filter_complex",
+                "-vf",
+                "-map",
+                "-c:v",
+                "-protocol_whitelist",
+                "-i",
+                "--",
+                "-f concat"
+              ])
+          ) do
+      bare = Enum.reject(segments, &String.starts_with?(&1, ["dl:", "cb:"]))
+      opaque = bare ++ ["dl:#{smuggled}", "cb:#{smuggled}"]
+
+      # Either validation refuses the spelling outright (a 422 before argv
+      # exists), or the argv is byte-identical to the one without it.
+      with {:ok, opts} <- Options.parse(opaque) do
+        argv = Command.build(opts, @input, type: :http)
+
+        # Byte-identical to the argv without the smuggled spelling — which is
+        # the strongest form of "it did not reach argv", and holds even when the
+        # spelling is a flag this module legitimately emits of its own accord.
+        assert argv == build(bare)
+        assert ArgvWalk.flags(argv) -- Command.allowed_flags() == []
+      end
+    end
+  end
+
+  # The other half of the smuggling surface: the *input*, which is the one argv
+  # element derived from a source a client named. A flag-shaped input is one
+  # argument in a value position and changes nothing else.
+  property "a flag-shaped input stays a value" do
+    check all(
+            segments <- option_segments(),
+            input <- member_of(["-vf", "-map", "-i", "--", "-protocol_whitelist", "-y"])
+          ) do
+      argv = build(segments, input)
+      index = Enum.find_index(argv, &(&1 == "-i"))
+
+      assert Enum.at(argv, index + 1) == input
+      assert ArgvWalk.flags(argv) -- Command.allowed_flags() == []
+      assert List.replace_at(argv, index + 1, @input) == build(segments)
     end
   end
 
