@@ -76,5 +76,10 @@ bytes for the same URL — so it is a release, not a silent update. The procedur
    operator sizes a container from — a stale table is a wrong memory limit.
    Commit the regenerated table with the bump; a bump that moves the numbers
    noticeably belongs in the release notes.
-5. Run `bin/smoke-image` locally, then let CI run it again.
-6. Cut a patch release (see [docs/development.md](docs/development.md#releases)).
+5. Regenerate the decision matrix on top of it:
+   `bin/capacity-matrix --write docs/capacity.md`. It reads the table step 4 just
+   rewrote, so it has to run second, and it is what an operator actually reads —
+   a correct table under a stale matrix is a wrong memory limit with an audit
+   trail. Needs no docker; commit both in the same change.
+6. Run `bin/smoke-image` locally, then let CI run it again.
+7. Cut a patch release (see [docs/development.md](docs/development.md#releases)).

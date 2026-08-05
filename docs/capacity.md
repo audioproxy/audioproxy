@@ -10,7 +10,137 @@ configuration rather than a number somebody once observed.
 > dominant term and this page is wrong for that version. Check that the version
 > you run matches the banner before you size against it.
 
-## Start here: output is the hazard, input is not
+## The matrix
+
+Find your workload in a row and your container's memory limit in a column. The
+derivation is [below](#the-derivation-output-is-the-hazard-input-is-not) and accounts
+for every cell; you do not need it to read one.
+
+Three things the tables assume, all of them deliberate:
+
+- **Worst case, not average.** Every slot busy with that workload at the same
+  moment, plus the backlogs still lingering from renders that just finished. It
+  is the number that belongs in a memory limit, not the number a dashboard shows.
+- **The column is the container's limit, not the machine's.** A VM running
+  anything else needs room for it on top.
+- **This is a memory bound, not a throughput one.** It answers how many renders
+  fit in RAM, not how many a host can encode in parallel — those are different
+  limits, and `AP_MAX_CONCURRENCY` defaults to schedulers online for the other
+  one. Take the smaller of the two.
+
+<!-- matrix:begin -->
+
+### How many renders fit
+
+Maximum `AP_MAX_CONCURRENCY` whose **worst case** — every slot busy with this
+workload at once, plus the backlogs still lingering — fits in the container
+memory limit named by the column.
+
+| Output | Variant | 1 GiB | 2 GiB | 4 GiB | 8 GiB | 16 GiB | 32 GiB |
+|---|---|---|---|---|---|---|---|
+| **30 s** | `f:mp3/br:128` | 24 | 56 | > 64 | > 64 | > 64 | > 64 |
+|  | `f:opus/br:96` | 23 | 55 | > 64 | > 64 | > 64 | > 64 |
+|  | `f:mp3/br:320` | 23 | 54 | > 64 | > 64 | > 64 | > 64 |
+|  | `f:flac` (44.1/16) | 17 | 40 | > 64 | > 64 | > 64 | > 64 |
+|  | `f:wav` (44.1/16) | 23 | 54 | > 64 | > 64 | > 64 | > 64 |
+|  | `f:wav/bd:24` (48/24) | 19 | 45 | > 64 | > 64 | > 64 | > 64 |
+| **10 min** | `f:mp3/br:128` | 30 | > 64 | > 64 | > 64 | > 64 | > 64 |
+|  | `f:opus/br:96` | 32 | > 64 | > 64 | > 64 | > 64 | > 64 |
+|  | `f:mp3/br:320` | 18 | 45 | > 64 | > 64 | > 64 | > 64 |
+|  | `f:flac` (44.1/16) | 8 | 21 | 47 | > 64 | > 64 | > 64 |
+|  | `f:wav` (44.1/16) | 5 | 14 | 33 | > 64 | > 64 | > 64 |
+|  | `f:wav/bd:24` (48/24) | 3 | 9 | 20 | 43 | > 64 | > 64 |
+| **1 h** | `f:mp3/br:128` | 9 | 24 | 53 | > 64 | > 64 | > 64 |
+|  | `f:opus/br:96` | 12 | 30 | > 64 | > 64 | > 64 | > 64 |
+|  | `f:mp3/br:320` | 4 | 10 | 24 | 50 | > 64 | > 64 |
+|  | `f:flac` (44.1/16) | — | 3 | 8 | 19 | 41 | > 64 |
+|  | `f:wav` (44.1/16) | — | 1 | 5 | 11 | 25 | 51 |
+|  | `f:wav/bd:24` (48/24) | — | — | 2 | 6 | 15 | 31 |
+| **2 h** | `f:mp3/br:128` | 5 | 13 | 29 | 62 | > 64 | > 64 |
+|  | `f:opus/br:96` | 6 | 17 | 38 | > 64 | > 64 | > 64 |
+|  | `f:mp3/br:320` | 1 | 5 | 12 | 26 | 54 | > 64 |
+|  | `f:flac` (44.1/16) | — | 1 | 4 | 9 | 20 | 42 |
+|  | `f:wav` (44.1/16) | — | — | 2 | 5 | 12 | 25 |
+|  | `f:wav/bd:24` (48/24) | **refused** | **refused** | **refused** | **refused** | **refused** | **refused** |
+
+`—` is a workload that does not fit at any concurrency on that limit.
+`> 64` means memory has stopped being the binding constraint
+and CPU has become it: size those from cores, not from this table. **refused**
+is a render whose output crosses the 2 GB
+`AP_MAX_SRC_BYTES` retention cap and is killed partway through — there is no
+concurrency at which it works, on any host. See
+[Long-form lossless](#3-long-form-lossless--fails-the-cap-loudly-by-design).
+
+### How much memory a concurrency needs
+
+The same model read the other way, for an operator who has fixed
+`AP_MAX_CONCURRENCY` and is buying a host. Set the container limit at or above
+the figure; the [worked examples](#worked-examples) round up to the next
+convenient size, and so should you.
+
+| Output | Variant | C = 1 | C = 2 | C = 4 | C = 8 | C = 16 | C = 32 |
+|---|---|---|---|---|---|---|---|
+| **30 s** | `f:mp3/br:128` | 292 MiB | 323 MiB | 387 MiB | 514 MiB | 767 MiB | 1.2 GiB |
+|  | `f:opus/br:96` | 292 MiB | 324 MiB | 388 MiB | 517 MiB | 773 MiB | 1.3 GiB |
+|  | `f:mp3/br:320` | 293 MiB | 326 MiB | 392 MiB | 525 MiB | 789 MiB | 1.3 GiB |
+|  | `f:flac` (44.1/16) | 304 MiB | 348 MiB | 436 MiB | 613 MiB | 965 MiB | 1.6 GiB |
+|  | `f:wav` (44.1/16) | 293 MiB | 326 MiB | 392 MiB | 525 MiB | 789 MiB | 1.3 GiB |
+|  | `f:wav/bd:24` (48/24) | 299 MiB | 339 MiB | 418 MiB | 576 MiB | 892 MiB | 1.5 GiB |
+| **10 min** | `f:mp3/br:128` | 309 MiB | 334 MiB | 383 MiB | 481 MiB | 677 MiB | 1.0 GiB |
+|  | `f:opus/br:96` | 305 MiB | 328 MiB | 373 MiB | 463 MiB | 644 MiB | 1005 MiB |
+|  | `f:mp3/br:320` | 337 MiB | 375 MiB | 451 MiB | 605 MiB | 911 MiB | 1.5 GiB |
+|  | `f:flac` (44.1/16) | 420 MiB | 499 MiB | 659 MiB | 978 MiB | 1.6 GiB | 2.8 GiB |
+|  | `f:wav` (44.1/16) | 485 MiB | 597 MiB | 822 MiB | 1.2 GiB | 2.1 GiB | 3.9 GiB |
+|  | `f:wav/bd:24` (48/24) | 613 MiB | 789 MiB | 1.1 GiB | 1.8 GiB | 3.2 GiB | 5.9 GiB |
+| **1 h** | `f:mp3/br:128` | 401 MiB | 471 MiB | 612 MiB | 893 MiB | 1.4 GiB | 2.5 GiB |
+|  | `f:opus/br:96` | 374 MiB | 431 MiB | 544 MiB | 772 MiB | 1.2 GiB | 2.1 GiB |
+|  | `f:mp3/br:320` | 565 MiB | 718 MiB | 1.0 GiB | 1.6 GiB | 2.8 GiB | 5.2 GiB |
+|  | `f:flac` (44.1/16) | 1.0 GiB | 1.4 GiB | 2.1 GiB | 3.6 GiB | 6.6 GiB | 12.6 GiB |
+|  | `f:wav` (44.1/16) | 1.5 GiB | 2.1 GiB | 3.3 GiB | 5.7 GiB | 10.5 GiB | 20.1 GiB |
+|  | `f:wav/bd:24` (48/24) | 2.2 GiB | 3.2 GiB | 5.1 GiB | 9.0 GiB | 16.9 GiB | 32.5 GiB |
+| **2 h** | `f:mp3/br:128` | 511 MiB | 636 MiB | 886 MiB | 1.4 GiB | 2.3 GiB | 4.3 GiB |
+|  | `f:opus/br:96` | 456 MiB | 554 MiB | 750 MiB | 1.1 GiB | 1.9 GiB | 3.4 GiB |
+|  | `f:mp3/br:320` | 840 MiB | 1.1 GiB | 1.7 GiB | 2.8 GiB | 5.1 GiB | 9.6 GiB |
+|  | `f:flac` (44.1/16) | 1.7 GiB | 2.4 GiB | 3.9 GiB | 6.8 GiB | 12.7 GiB | 24.4 GiB |
+|  | `f:wav` (44.1/16) | 2.6 GiB | 3.8 GiB | 6.2 GiB | 11.0 GiB | 20.6 GiB | 39.7 GiB |
+|  | `f:wav/bd:24` (48/24) | **refused** | **refused** | **refused** | **refused** | **refused** | **refused** |
+
+Both tables assume plain renders. `norm` (single-pass `loudnorm`) adds roughly
+55 MiB per slot — `R_ffmpeg` goes from about 11 MiB to about
+66 MiB. On the preview rows that is most of the per-slot
+cost and divides them by about five; on the long-form rows it disappears into
+the backlog term.
+
+Generated by `bin/capacity-matrix` from the formula below and the measured
+[`R_ffmpeg` table](#measured-r_ffmpeg); do not edit by hand.
+
+<!-- matrix:end -->
+
+### What is not in the matrix, and why
+
+Two adjustable variables are absent, and their absence is a finding rather than
+an omission.
+
+**`AP_QUEUE_SIZE` costs approximately nothing.** A queued request is waiting for
+a slot: it holds no ffmpeg subprocess, no backlog and no pipeline buffer — a few
+kilobytes of coordinator state and a parked connection. Nothing in the formula
+scales with it. Sizing the queue is a **latency and `429` decision** (how long a
+client should wait before being told to come back), not a memory one, so it does
+not get a column here. Set it from how long your clients will tolerate waiting.
+
+**`AP_MAX_SRC_BYTES` bounds one render, not the total.** It caps the bytes a
+*single* render may retain, which is why it decides whether a cell reads
+**refused**. It does not bound `C × B_backlog`, so it cannot be used as a
+container memory limit: eight renders each staying just under a 2 GB cap is 16 GB.
+The lever that bounds the total is `AP_MAX_CONCURRENCY`, and the cap's other job
+— rejecting oversized *sources* — pulls in the opposite direction. See
+[`AP_MAX_SRC_BYTES` does two jobs](#ap_max_src_bytes-does-two-jobs-and-they-pull-in-opposite-directions).
+
+## The derivation: output is the hazard, input is not
+
+Everything from here down is where the cells above come from. It is worth
+reading before trusting them with a production limit, and it is not worth
+reading to find a number.
 
 The instinct when sizing a transcoding proxy is to ask how large the source
 files are. That instinct is wrong here, and it is worth getting rid of before
@@ -260,6 +390,13 @@ over 16 GB. **A deployment that has not thought about this has not been sized.**
 
 ## Worked examples
 
+These are the matrix's proof rather than its substitute: the same arithmetic,
+done by hand, on three shapes worth understanding. Where an example reads a
+little lower than the corresponding cell, it is because each one takes
+`R_ffmpeg` from the row for *its own* format while the matrix takes the largest
+row that format has — a matrix cannot know which of your renders is the long
+one, so it assumes all of them are.
+
 ### 1. Previews, the shape the defaults assume
 
 30-second MP3 and Opus previews, `AP_MAX_CONCURRENCY=8`, no `norm`, `file://`
@@ -364,7 +501,24 @@ What to do instead, in order of preference:
 
 ## How this page is kept honest
 
-Two mechanisms, because a capacity document that drifts is worse than none.
+Three mechanisms, because a capacity document that drifts is worse than none.
+
+**The matrix is generated, and then checked against itself.** Every cell at the
+top of this page is `bin/capacity-matrix` evaluating the formula below over the
+measured table below, using constants it shares with the CI guard
+(`bin/capacity_model.rb` — one copy, required by both). A hand-maintained matrix
+would be a second copy of the model, and the second copy is the one that goes
+stale.
+
+Generating it is not quite enough, though, because the matrix runs the model
+*backwards* and an inversion is the easy thing to get subtly wrong — an
+off-by-one in the linger term, a rounding that goes up, a short-render row halved
+on the wrong side of the division. Each of those produces a table that looks
+entirely reasonable and over-promises. So `bin/capacity-matrix --verify` checks
+the two directions against each other on every cell: the published concurrency
+must fit the column's limit, and one more slot must not. CI runs it, and it needs
+no image. It has already earned its place — it caught the published figures
+losing a slot to floating-point residue in about a fifth of the cells.
 
 **The measured table is regenerated from the image.** `bin/measure-ffmpeg-rss`
 takes its ffmpeg from the pinned runtime image and its argv from
@@ -405,17 +559,28 @@ size — not every configuration an operator could choose. A failing guard means
 the model has stopped describing the code, and the fix is to reconcile the two,
 not to widen the factor.
 
-## Regenerating this table
+## Regenerating these tables
 
-Both scripts need docker and a cgroup v2 host (`memory.peak`, kernel ≥ 5.19).
-Neither needs ffmpeg or Elixir installed.
+The two measuring scripts need docker and a cgroup v2 host (`memory.peak`,
+kernel ≥ 5.19); none of them needs ffmpeg or Elixir installed. `bin/capacity-matrix`
+needs nothing at all — it is arithmetic over this document and a constants file.
 
 ```bash
-# Measure R_ffmpeg on the current image and rewrite the table above in place.
+# Measure R_ffmpeg on the current image and rewrite the measured table in place.
 bin/measure-ffmpeg-rss --write docs/capacity.md
 
 # Reuse already-built images (much faster while iterating).
 SKIP_BUILD=1 bin/measure-ffmpeg-rss --write docs/capacity.md
+
+# Regenerate the matrix from that table. Always second: it reads what the line
+# above wrote.
+bin/capacity-matrix --write docs/capacity.md
+
+# Print the matrix without touching the document.
+bin/capacity-matrix
+
+# Assert every published cell inverts the model. No docker, under a second.
+bin/capacity-matrix --verify
 
 # Run the workload guard the way CI does.
 SKIP_BUILD=1 bin/check-capacity
@@ -425,5 +590,5 @@ SKIP_BUILD=1 bin/check-capacity --self-test
 ```
 
 A different ffmpeg encodes differently and holds different memory, so
-**regenerating this table is a step in the pin-bump procedure** — see
+**regenerating both tables is a step in the pin-bump procedure** — see
 [VERSIONS.md](../VERSIONS.md#bumping-a-pin).
