@@ -3,7 +3,7 @@ defmodule AudioProxy.Ffmpeg.Command do
   Normalized options → ffmpeg argument vector (API doc §3).
 
   This is the last leg of the round-trip the project is built around: parse →
-  normalize → cache key → **identical ffmpeg args**. `build/2` is a pure
+  normalize → cache key → **identical ffmpeg args**. `build/3` is a pure
   function of a validated `t:AudioProxy.Options.t/0` and the input URL, so two
   option strings that normalize alike produce byte-identical argv, which is
   what makes a cache key a promise about bytes rather than about a URL.
@@ -98,11 +98,13 @@ defmodule AudioProxy.Ffmpeg.Command do
 
   ## Peaks
 
-  `f:peaks` builds raw interleaved `s16le` PCM on stdout — the input to the
-  peak reducer, not its output. Encoding and loudness options are already
-  refused for peaks by `AudioProxy.Options`; `t`, `ch` and `fade` apply,
-  since all three change the samples a waveform would be drawn from. The
-  peaks slice extends this module with the reduction itself.
+  `f:peaks` builds raw interleaved `s16le` PCM on stdout — the input to
+  `AudioProxy.Peaks`, not its output. Encoding and loudness options are already
+  refused for peaks by `AudioProxy.Options`; `t`, `ch` and `fade` apply, since
+  all three change the samples a waveform would be drawn from. `ch` is the one
+  option peaks read differently: absent, it means mono rather than "follow the
+  source", because the reducer has to know the interleaving up front and a
+  waveform UI draws one shape.
   """
 
   alias AudioProxy.{Config, Options}
@@ -441,6 +443,14 @@ defmodule AudioProxy.Ffmpeg.Command do
   end
 
   defp millis(seconds), do: round(seconds * 1000)
+
+  # Peaks are the one format that does not follow the source here: with no `ch`
+  # they downmix to mono, and the argv has to say so explicitly because the
+  # reducer needs the interleaving to be the one the cache key names. See
+  # `AudioProxy.Options.peak_channels/1`.
+  defp channel_args(%Options{format: :peaks} = options) do
+    ["-ac", Integer.to_string(Options.peak_channels(options))]
+  end
 
   defp channel_args(%Options{channels: nil}), do: []
   defp channel_args(%Options{channels: channels}), do: ["-ac", Integer.to_string(channels)]

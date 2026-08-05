@@ -283,6 +283,15 @@ defmodule AudioProxy.Ffmpeg.CommandTest do
       assert filtergraph("f:peaks/t:0:10/fade:1:1") ==
                "afade=t=in:st=0:d=1,afade=t=out:st=9:d=1"
     end
+
+    test "peaks downmix to mono with no ch, unlike every other format" do
+      assert argv("f:peaks") == argv("f:peaks/ch:1")
+      assert Enum.chunk_every(argv("f:peaks"), 2, 1) |> Enum.member?(["-ac", "1"])
+      assert Enum.chunk_every(argv("f:peaks/ch:2"), 2, 1) |> Enum.member?(["-ac", "2"])
+
+      # The contrast: an audio format with no `ch` follows the source.
+      refute Enum.member?(argv("f:mp3"), "-ac")
+    end
   end
 
   describe "build/3 — injection safety" do

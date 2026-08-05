@@ -115,6 +115,15 @@ defmodule AudioProxy.Plugs.RenderAction do
   restarts on every message, so the pipeline's own timeout is what a client
   normally sees, with its classification intact.
 
+  That claim holds for every format that streams, which is every format but
+  one. `f:peaks` produces a single chunk at the end of its render (see
+  `AudioProxy.Peaks.Render`), so nothing resets the deadline while it works and
+  the budget below is a *total* rather than an idle one — and the peaks
+  pipeline runs two subprocesses in sequence, each with a timer of its own. A
+  peaks render slower than this deadline is ended here, by the request loop,
+  rather than by the pipeline whose timer was supposed to fire first. It takes
+  a five-minute peaks render at the default to happen.
+
   The same budget is spent twice, on two different things, and which one ran out
   decides the status. A request may wait for a render *slot* before any render
   exists; the coordinator's `{:rendering, _}` is what says that wait is over,
@@ -352,9 +361,12 @@ defmodule AudioProxy.Plugs.RenderAction do
       etag: ~s("#{conn.assigns.cache_key}")
     }
 
+    options = conn.assigns.options
+
     spec =
-      [args: Command.build(conn.assigns.options, input, type: type), metadata: metadata] ++
-        Keyword.take(opts, [:executable])
+      [args: Command.build(options, input, type: type), metadata: metadata] ++
+        Keyword.take(opts, [:executable]) ++
+        peaks_spec(options, input, type, opts)
 
     case RenderCoordinator.subscribe(conn.assigns.cache_key, spec) do
       {:ok, status, render, backlog} ->
@@ -378,6 +390,24 @@ defmodule AudioProxy.Plugs.RenderAction do
         {:error, :render_failed}
     end
   end
+
+  # The one branch in this module that knows peaks exist, and it only decides
+  # *which* pipeline runs: `AudioProxy.Ffmpeg.RenderSupervisor` reads this key,
+  # and everything from the coordinator down treats the result as a render like
+  # any other. The reduction needs what the argv alone cannot carry — the `pts`
+  # and `ch` the reducer buckets by, and the input the leading probe reads.
+  #
+  # `:protocols` rides along for the same reason the argv carries one: the peaks
+  # pipeline spawns its own ffprobe rather than going through
+  # `AudioProxy.Ffprobe.probe/2`, and a route that builds its own argv is
+  # exactly where an unrestricted probe would otherwise reappear.
+  defp peaks_spec(%{format: :peaks} = options, input, type, opts) do
+    spec = [options: options, input: input, protocols: Command.protocols(type)]
+
+    [peaks: spec ++ Keyword.take(opts, [:probe_executable])]
+  end
+
+  defp peaks_spec(_options, _input, _type, _opts), do: []
 
   ## Before the first byte
 

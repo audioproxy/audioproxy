@@ -130,7 +130,8 @@ defmodule AudioProxy.Ffprobe do
   @spec probe(String.t(), keyword()) :: {:ok, map()} | {:error, error_reason()}
   def probe(input, opts) when is_binary(input) do
     with {:ok, executable} <- executable(Keyword.get(opts, :executable)),
-         {:ok, output} <- run(executable, input, args(opts), timeout(opts)) do
+         {:ok, output} <-
+           run(executable, args(input, Keyword.fetch!(opts, :protocols)), timeout(opts)) do
       decode(output)
     end
   end
@@ -188,6 +189,60 @@ defmodule AudioProxy.Ffprobe do
         false
     end
   end
+
+  @doc """
+  The argument vector `probe/2` runs, for a caller that spawns the subprocess
+  itself.
+
+  `/info` wants `probe/2`: it is answering a request and can block on the
+  collect. `AudioProxy.Peaks.Render` cannot — it is a GenServer that has to
+  stay answerable to `cancel/1` while the probe runs, so it spawns the same
+  argv through `AudioProxy.Ffmpeg.Render` and folds the chunks in
+  `handle_info/2`. Both routes must ask ffprobe the *same question*, or the two
+  callers would drift on flags; this function is that shared answer.
+
+  `protocols` is the `-protocol_whitelist` set, from
+  `AudioProxy.Ffmpeg.Command.protocols/1`, and it is an argument rather than an
+  option for exactly the reason above: a caller that builds its own argv would
+  otherwise be the one route that reads a source unrestricted, which is the hole
+  the whitelist exists to close. It binds the input because it precedes it.
+
+  `input` is passed through as a single argv element, and is last, so nothing
+  after it can be read as a flag.
+
+      iex> AudioProxy.Ffprobe.args("s3://b/k.wav", "https,tls,tcp") |> List.last()
+      "s3://b/k.wav"
+
+      iex> AudioProxy.Ffprobe.args("/srv/a.wav", "file") |> Enum.take(-3)
+      ["-protocol_whitelist", "file", "/srv/a.wav"]
+  """
+  @spec args(String.t(), String.t()) :: [String.t()]
+  def args(input, protocols) when is_binary(input) and is_binary(protocols) do
+    @flags ++ ["-protocol_whitelist", protocols] ++ [input]
+  end
+
+  @doc """
+  Resolves the ffprobe binary, or `{:error, :probe_failed}`.
+
+  Public for the same reason `args/1` is: a caller that spawns the subprocess
+  itself still has to find it, and finding it twice in two ways is how the two
+  paths end up disagreeing about which binary ran.
+  """
+  @spec executable(String.t() | nil) :: {:ok, String.t()} | {:error, error_reason()}
+  def executable(nil) do
+    case System.find_executable("ffprobe") do
+      nil ->
+        # Not "/info cannot answer" any more: `f:peaks` needs a probe too, and
+        # a log line naming one caller is misleading from the other.
+        Logger.error("no `ffprobe` on PATH; /info and f:peaks cannot answer")
+        {:error, :probe_failed}
+
+      path ->
+        {:ok, path}
+    end
+  end
+
+  def executable(path) when is_binary(path), do: {:ok, path}
 
   @doc """
   Maps ffprobe's decoded JSON to the §4 contract.
@@ -251,19 +306,10 @@ defmodule AudioProxy.Ffprobe do
 
   ## Running
 
-  # The input stays last, after every flag and after the whitelist, so nothing
-  # in it can be read as an option.
-  defp args(opts) do
-    @flags ++ whitelist(opts)
-  end
-
-  defp whitelist(opts) do
-    ["-protocol_whitelist", Keyword.fetch!(opts, :protocols)]
-  end
-
-  defp run(executable, input, args, timeout) do
+  # `args` already ends with the input — see `args/2`.
+  defp run(executable, args, timeout) do
     opts = [
-      args: args ++ [input],
+      args: args,
       executable: executable,
       consumer: self(),
       timeout: timeout
@@ -367,19 +413,6 @@ defmodule AudioProxy.Ffprobe do
   # Said out loud rather than folded into the 500: an image built without
   # ffprobe answers every `/info` request identically and with nothing in the
   # log to explain it, which is a long afternoon for whoever is holding it.
-  defp executable(nil) do
-    case System.find_executable("ffprobe") do
-      nil ->
-        Logger.error("no `ffprobe` on PATH; /info cannot answer")
-        {:error, :probe_failed}
-
-      path ->
-        {:ok, path}
-    end
-  end
-
-  defp executable(path) when is_binary(path), do: {:ok, path}
-
   defp demonitor(monitor), do: Process.demonitor(monitor, [:flush])
 
   ## Contract mapping

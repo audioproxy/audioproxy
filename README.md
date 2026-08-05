@@ -71,6 +71,10 @@ curl "$BASE/insecure/f:opus/br:96/t:12.5:30/fade:0.5:1/$SRC"
 # Waveform peaks to draw a player UI, 800 min/max pairs as JSON.
 curl "$BASE/insecure/f:peaks/pts:800/$SRC"
 
+# The same peaks in the compact binary form, which is what you want
+# once the pair count gets large.
+curl -o peaks.dat "$BASE/insecure/f:peaks/pts:4000/pk_fmt:dat/$SRC"
+
 # Speech, small: 64 kbps mono MP3 at 22.05 kHz.
 curl "$BASE/insecure/f:mp3/br:64/ch:1/sr:22050/$SRC"
 
@@ -89,7 +93,7 @@ curl "$BASE/insecure/info/$SRC"
 
 Each URL describes its output completely, so the same URL always means the same bytes. The first request for a variant renders it and streams it while it encodes; later requests are served from the variant bucket with `Range` support.
 
-> **Which of these work today?** The first six return audio and the last returns metadata. `f:peaks` does not yet; see the [Roadmap](#roadmap). Every option string above is checked against the parser by the test suite, so none of them are aspirational spellings.
+> **Which of these work today?** All of them: the audio formats and `info` in the `0.3.0` image above, and the two `f:peaks` examples on a build from `main` — peaks are merged but not yet released. See the [Roadmap](#roadmap). Every option string here is checked against the parser by the test suite, so none of them are aspirational spellings.
 
 ## Roadmap
 
@@ -107,9 +111,9 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 - `GET /info`, giving duration, sample rate, channels and tags, so clients can size their variant URLs to the source
 - A single container, published per release
 
-**Next (in flight)**
+**Merged, in the next release**
 
-- `f:peaks`, waveform min/max data for drawing player UIs without decoding audio in the browser
+- `f:peaks`, waveform min/max data in audiowaveform's JSON and binary formats, cached like any other variant. It is on `main` but not in the `0.3.0` image the Quick start pins.
 
 **After that**
 
@@ -329,6 +333,7 @@ AudioProxy.CacheKey.derive!("br:96/f:opus", "s3://masters/piece.wav")
 | `norm` | `ebu[:I[:TP[:LRA]]]` | Loudness normalization; targets default to `-16:-1.5:11`. v1 runs `loudnorm` single-pass, good enough for previews but not for masters (§3.2) |
 | `pts` | positive integer | Peaks: number of min/max pairs; default `800` |
 | `pk_fmt` | `json` \| `dat` | Peaks: output encoding; default `json` |
+| `ch` under `f:peaks` | `1` \| `2` | Peaks default to **mono** rather than following the source; `ch:2` gives per-channel pairs |
 | `dl` | filename | Sets `Content-Disposition: attachment` |
 | `cb` | opaque string | Cache-buster; participates in the cache key |
 
@@ -347,6 +352,44 @@ Beyond each key's own value domain, these cross-key rules are enforced:
 - A fade must fit inside the trimmed region when the trim is bounded, and a fade-out requires a bounded trim at all: its start is `duration - out`, and without a duration there is nothing to count back from. A fade-in needs no trim, since it starts at zero.
 
 Peaks add one more: `f:peaks` refuses `br`, `q`, `sr`, `bd`, `gain` and `norm`. Peaks are computed from the decoded source and respect only `t`, `ch` and `fade` (§3.3), so accepting an option that cannot change the output would hand byte-identical peaks two different cache keys. `f:peaks/br:96` is a 422.
+
+`f:peaks` is also the one format whose `ch` default is not "follow the source": with no `ch` it downmixes to mono, because a waveform UI draws one shape. That default is materialized into the cache key, so `f:peaks` and `f:peaks/ch:1` are one variant rather than two.
+
+### Waveform peaks
+
+`f:peaks` returns [audiowaveform](https://github.com/bbc/audiowaveform)-compatible data, so it drops straight into [peaks.js](https://github.com/bbc/peaks.js) and the rest of that ecosystem. There was no reason to invent a schema.
+
+`pk_fmt:json` (the default) is `Content-Type: application/json`:
+
+```json
+{
+  "version": 2,
+  "channels": 1,
+  "sample_rate": 44100,
+  "samples_per_pixel": 5513,
+  "bits": 16,
+  "length": 800,
+  "data": [-31904, 31810, -32210, 32026, "…1596 more"]
+}
+```
+
+`data` holds `length × 2 × channels` signed 16-bit integers: a minimum and a maximum per pixel, per channel, interleaved. `pk_fmt:dat` is the same numbers as `application/octet-stream` — audiowaveform's binary layout, a little-endian header of version, flags, sample rate, samples-per-pixel, length and channel count, then the pairs as `int16`. It is roughly a fifth the size of the JSON, which starts to matter past a few thousand pairs.
+
+Drawing them with peaks.js is the URL and nothing else:
+
+```js
+Peaks.init({
+  container: document.querySelector('#waveform'),
+  mediaElement: document.querySelector('audio'),
+  dataUri: {
+    json: `${BASE}/${sig}/f:peaks/pts:800/plain/local://piece.wav`,
+    // or, for the binary form:
+    // arraybuffer: `${BASE}/${sig}/f:peaks/pts:800/pk_fmt:dat/plain/local://piece.wav`
+  },
+})
+```
+
+Pick `pts` to match the pixel width you will draw at. `t` narrows the region the peaks span, so `f:peaks/t:30:15` describes the same fifteen seconds a `f:mp3/t:30:15` preview does, and peaks are cached and range-served exactly like audio variants are.
 
 The rules about `br`, `q` and `bd:32f` come from the same principle applied one layer down: ffmpeg accepts `-b:a` on a flac encode and ignores it, so `f:flac/br:320` would be two cache keys for one file. Rejecting is cheaper than storing the duplicate.
 

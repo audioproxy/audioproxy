@@ -95,6 +95,10 @@ The system SHALL map each processing option to its ffmpeg form per API doc §3: 
 - **WHEN** building `f:peaks`
 - **THEN** argv decodes to interleaved `s16le` on stdout, honouring `t`, `ch` and `fade` and encoding nothing
 
+#### Scenario: Peaks name their channel count explicitly
+- **WHEN** building `f:peaks` with no `ch`
+- **THEN** argv emits `-ac 1` rather than following the source, since the reducer must know the interleaving before it reads a byte; every other format omits `-ac` entirely when `ch` is absent
+
 ### Requirement: Content-Type mapping
 The system SHALL expose the correct Content-Type for every output format (e.g., `audio/mpeg`, `audio/ogg`, `audio/aac`, `audio/mp4`, `audio/flac`, `audio/wav`).
 

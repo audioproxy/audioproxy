@@ -82,6 +82,7 @@ defmodule AudioProxy.Options do
   @default_format :mp3
   @default_peak_count 800
   @default_peak_format :json
+  @default_peak_channels 1
   @default_norm {-16.0, -1.5, 11.0}
 
   # Lossy encoders gain nothing above 48 kHz; §3.1 caps them there.
@@ -218,10 +219,45 @@ defmodule AudioProxy.Options do
   end
 
   @doc """
+  How many min/max pairs `opts` asks for. Meaningful under `f:peaks` only.
+
+      iex> {:ok, opts} = AudioProxy.Options.parse("f:peaks")
+      iex> AudioProxy.Options.peak_count(opts)
+      800
+  """
+  @spec peak_count(t()) :: pos_integer()
+  def peak_count(%__MODULE__{peak_count: count}), do: count || @default_peak_count
+
+  @doc """
+  Which serialization `opts` asks for. Meaningful under `f:peaks` only.
+
+      iex> {:ok, opts} = AudioProxy.Options.parse("f:peaks")
+      iex> AudioProxy.Options.peak_format(opts)
+      :json
+  """
+  @spec peak_format(t()) :: peak_format()
+  def peak_format(%__MODULE__{peak_format: format}), do: format || @default_peak_format
+
+  @doc """
+  How many channels a peaks render reduces.
+
+  Unlike every other format, `f:peaks` does not follow the source when `ch` is
+  absent: it downmixes to mono. A waveform UI draws one shape, and following a
+  stereo source would double the payload for a picture almost nobody asks for.
+  `ch:2` still gets per-channel peaks.
+
+      iex> {:ok, opts} = AudioProxy.Options.parse("f:peaks")
+      iex> AudioProxy.Options.peak_channels(opts)
+      1
+  """
+  @spec peak_channels(t()) :: 1 | 2
+  def peak_channels(%__MODULE__{channels: channels}), do: channels || @default_peak_channels
+
+  @doc """
   Renders `opts` as its canonical options string — the cache-key input.
 
   Keys are sorted lexicographically, applicable defaults are materialized
-  (`f`, and `pts`/`pk_fmt` under `f:peaks`, and the `norm` targets when
+  (`f`, and `ch`/`pts`/`pk_fmt` under `f:peaks`, and the `norm` targets when
   `norm` is present), and numbers are rendered minimally (`30`, not `30.0`).
 
   The result always re-parses, and normalizing it again is byte-identical.
@@ -634,6 +670,14 @@ defmodule AudioProxy.Options do
   defp render_key("sr", %{sample_rate: nil}), do: nil
   defp render_key("sr", opts), do: "sr:" <> Integer.to_string(opts.sample_rate)
 
+  # Peaks are the one format whose channel count does not follow the source, so
+  # `ch` materializes here the way `pts` and `pk_fmt` do below: the key has to
+  # name the mono downmix, or `f:peaks` and `f:peaks/ch:1` would be two keys for
+  # one set of bytes.
+  defp render_key("ch", %{format: :peaks} = opts) do
+    "ch:" <> Integer.to_string(peak_channels(opts))
+  end
+
   defp render_key("ch", %{channels: nil}), do: nil
   defp render_key("ch", opts), do: "ch:" <> Integer.to_string(opts.channels)
 
@@ -675,15 +719,14 @@ defmodule AudioProxy.Options do
   # validation failure, and rendering the value they were given is how the
   # error names its own segment — hence the middle clause.
   defp render_key("pts", %{format: :peaks} = opts) do
-    "pts:" <> Integer.to_string(opts.peak_count || @default_peak_count)
+    "pts:" <> Integer.to_string(peak_count(opts))
   end
 
   defp render_key("pts", %{peak_count: nil}), do: nil
   defp render_key("pts", opts), do: "pts:" <> Integer.to_string(opts.peak_count)
 
   defp render_key("pk_fmt", %{format: :peaks} = opts) do
-    token = Map.fetch!(@peak_format_tokens, opts.peak_format || @default_peak_format)
-    "pk_fmt:" <> token
+    "pk_fmt:" <> Map.fetch!(@peak_format_tokens, peak_format(opts))
   end
 
   defp render_key("pk_fmt", %{peak_format: nil}), do: nil
