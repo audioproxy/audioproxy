@@ -70,11 +70,13 @@ defmodule AudioProxy.Ffmpeg.Command do
 
   ## Peaks
 
-  `f:peaks` builds raw interleaved `s16le` PCM on stdout — the input to the
-  peak reducer, not its output. Encoding and loudness options are already
-  refused for peaks by `AudioProxy.Options`; `t`, `ch` and `fade` apply,
-  since all three change the samples a waveform would be drawn from. The
-  peaks slice extends this module with the reduction itself.
+  `f:peaks` builds raw interleaved `s16le` PCM on stdout — the input to
+  `AudioProxy.Peaks`, not its output. Encoding and loudness options are already
+  refused for peaks by `AudioProxy.Options`; `t`, `ch` and `fade` apply, since
+  all three change the samples a waveform would be drawn from. `ch` is the one
+  option peaks read differently: absent, it means mono rather than "follow the
+  source", because the reducer has to know the interleaving up front and a
+  waveform UI draws one shape.
   """
 
   alias AudioProxy.Options
@@ -277,6 +279,14 @@ defmodule AudioProxy.Ffmpeg.Command do
   end
 
   defp millis(seconds), do: round(seconds * 1000)
+
+  # Peaks are the one format that does not follow the source here: with no `ch`
+  # they downmix to mono, and the argv has to say so explicitly because the
+  # reducer needs the interleaving to be the one the cache key names. See
+  # `AudioProxy.Options.peak_channels/1`.
+  defp channel_args(%Options{format: :peaks} = options) do
+    ["-ac", Integer.to_string(Options.peak_channels(options))]
+  end
 
   defp channel_args(%Options{channels: nil}), do: []
   defp channel_args(%Options{channels: channels}), do: ["-ac", Integer.to_string(channels)]

@@ -34,7 +34,7 @@ stays data; `dl` and `cb` never reach the command at all.
 | `gain` | `volume=<dB>dB` | |
 | `norm:ebu:I:TP:LRA` | `loudnorm=I=…:TP=…:LRA=…` | Single-pass (§3.2) |
 | `sr` | `aresample=<Hz>` | |
-| `ch` | `-ac 1` \| `-ac 2` | An output option, not a filter |
+| `ch` | `-ac 1` \| `-ac 2` | An output option, not a filter. Omitted, the render follows the source — except under `f:peaks`, which emits `-ac 1`; see below |
 | `br` | `-b:a <kbps>k` | Lossy formats only |
 | `q` | `-q:a` (mp3, ogg, aac, m4a) or `-compression_level` (opus, flac) | Whichever knob the codec has, bounded to its range |
 | `bd` | `-c:a pcm_s16le`/`pcm_s24le`/`pcm_f32le` (wav), `-sample_fmt s16`/`s32` (flac) | Omitted, a lossless variant follows the source's depth |
@@ -45,11 +45,42 @@ stays data; `dl` and `cb` never reach the command at all.
 | `f:m4a` | `-c:a aac -movflags empty_moov+default_base_moof -frag_duration 1000000 -f mp4` | Fragmented: plain MP4 needs a seekable output for its moov atom, and stdout is not one. Cut on duration, not `frag_keyframe` — see below |
 | `f:flac` | `-c:a flac -f flac` | |
 | `f:wav` | `-c:a pcm_s16le -f wav` | |
-| `f:peaks` | `-c:a pcm_s16le -f s16le` | Raw PCM for the peak reducer, not an encode |
+| `f:peaks` | `-c:a pcm_s16le -f s16le -ac 1` | Raw PCM for the peak reducer, not an encode. See below |
 
 Every command writes to `pipe:1` behind an explicit `-f`, since stdout has no
 filename for ffmpeg to infer a muxer from, and every command runs with
 `-nostdin -hide_banner -loglevel error` so stderr carries diagnostics only.
+
+## Why `f:peaks` runs ffmpeg twice, and why it is mono
+
+Peaks are the one format where ffmpeg does not produce the response. It
+decodes to raw interleaved `s16le` on stdout and `AudioProxy.Peaks` reduces
+those samples to `pts` min/max pairs; the PCM is folded in chunk by chunk and
+dropped, so a ten-minute source costs a few kilobytes of resident state rather
+than the tens of megabytes it decodes to.
+
+Streaming that reduction is what forces the **leading `ffprobe`**. Bucket
+boundaries are `ceil(frames / pts)` and have to be known before the first
+sample arrives; the alternative is buffering the whole decode and counting
+afterwards, which trades a header read for memory proportional to the source.
+So a peaks render is a probe and then a decode, both spawned through the same
+render pipeline — same kill discipline, same `AP_RENDER_TIMEOUT`, same stderr
+classification, which is why a 404 source fails a peaks request with the
+status it would have failed an audio one with.
+
+Probe and decode can disagree about the sample count by a frame or two, and
+neither direction is reported: extra samples fold into the final bucket, and a
+short decode leaves trailing pairs at `0, 0`. `length` is always the `pts` the
+URL asked for.
+
+The `-ac 1` is the other peaks-only rule. Every other format follows the
+source when `ch` is absent; peaks downmix, because a waveform UI draws one
+shape and following a stereo source would double the payload for a picture
+nobody asked for. The reducer also has to know the interleaving before it
+reads a byte, so "whatever the source had" is not an option the argv can leave
+open. `ch:2` still gives per-channel pairs, and the mono default is
+materialized into the cache key so `f:peaks` and `f:peaks/ch:1` are one
+variant.
 
 ## Why `m4a` fragments on duration
 

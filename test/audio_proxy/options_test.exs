@@ -310,8 +310,13 @@ defmodule AudioProxy.OptionsTest do
     end
 
     test "materializes the peaks defaults only under f:peaks" do
-      assert Options.normalize_string("f:peaks") == {:ok, "f:peaks/pk_fmt:json/pts:800"}
+      assert Options.normalize_string("f:peaks") == {:ok, "ch:1/f:peaks/pk_fmt:json/pts:800"}
       assert Options.normalize_string("f:mp3") == {:ok, "f:mp3"}
+    end
+
+    test "the peaks mono default and an explicit ch:1 are one cache key" do
+      assert Options.normalize_string("f:peaks") == Options.normalize_string("f:peaks/ch:1")
+      assert {:ok, "ch:2/f:peaks/pk_fmt:json/pts:800"} = Options.normalize_string("f:peaks/ch:2")
     end
 
     test "materializes the norm targets when norm is present" do

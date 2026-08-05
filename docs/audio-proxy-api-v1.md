@@ -97,9 +97,14 @@ No write endpoints in v1: variant write-back to S3 is a side effect of a GET ren
 | Option | Values | Notes |
 |---|---|---|
 | `pts` | integer | Number of min/max pairs (default 800) |
-| `pk_fmt` | `json` \| `dat` | JSON (audiowaveform-compatible-ish) or compact binary |
+| `pk_fmt` | `json` \| `dat` | JSON or compact binary; both are [audiowaveform](https://github.com/bbc/audiowaveform)'s formats (default `json`) |
+| `ch` | `1` \| `2` | **Default 1**, unlike every other format — peaks downmix rather than follow the source. `ch:2` gives per-channel pairs. The default is materialized into the cache key |
 
-Peaks respect `t` and `ch`, ignore encoding options. Cheap enough to render eagerly alongside any audio variant later, but v1 renders on request.
+Peaks respect `t`, `ch` and `fade`, ignore encoding options. Cheap enough to render eagerly alongside any audio variant later, but v1 renders on request.
+
+Both serializations carry the same numbers: `version` 2, `channels`, `sample_rate`, `samples_per_pixel`, `bits` (always 16), `length` (always exactly `pts`), and `length × 2 × channels` signed 16-bit values — a minimum and a maximum per pixel per channel, interleaved. `pk_fmt:json` is `application/json` with those field names; `pk_fmt:dat` is `application/octet-stream`, a little-endian header of version, flags, sample rate, samples-per-pixel, length and channel count, then the values as `int16`.
+
+Peaks are a *format*, so they participate in the cache key, the write-back and the HIT redirect exactly as audio variants do.
 
 ### 3.4 Delivery
 
