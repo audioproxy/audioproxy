@@ -1,6 +1,6 @@
 ## 0. Decide whether to build this
 
-- [ ] 0.1 **Confirm the workload exists.** The proposal is honest that this is worth building only for full-length *lossless delivery* — long-form sources with lossy outputs are fully served once `split-retention-cap` lands (a 2 h master rendered as previews retains ~480 KB; as opus, ~86 MB). Ask the prospect: full-length FLAC/WAV variants, or lossless in / lossy out? The second answer closes this change with the refusal intact, like `add-sync-render` 0.1. Everything below assumes the first
+- [x] 0.1 **Decided 2026-08-05: parked with a named trigger, not closed.** Long-form lossless delivery is anticipated ("definitely a use case for someone at some point") but not yet a served workload — by the proposal's own standard that defers the build rather than justifying it. This change stays on the board as the ready answer; the trigger is the first concrete full-length-lossless-delivery customer. Until then the honest refusal stands, and `split-retention-cap` serves the lossless-in/lossy-out case. **On pickup: re-verify the design against the then-current `RenderCoordinator`** — this change ages with the module it rewrites
 
 ## 1. The writer and its lifecycle (slice 1)
 
