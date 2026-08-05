@@ -21,6 +21,13 @@ stops being a rounding error and becomes the dominant term, which makes
 lossy full-length output a sizing decision and lossless full-length output
 something the cap refuses by design.
 
+The model is also inverted for the reader, because a formula answers the
+question an operator has only after four steps of arithmetic. A generated
+matrix gives the largest safe concurrency per workload and memory limit, with
+the formula behind it as the derivation — and generated is the operative word:
+a hand-maintained table is a second copy of the model, and the second copy is
+the one that goes stale.
+
 ## Requirements
 
 ### Requirement: A worst-case memory model is published
@@ -57,3 +64,41 @@ CI SHALL run a defined concurrent workload (including a long-form fixture) again
 #### Scenario: Drift is caught
 - **WHEN** a change makes a memory term grow beyond the documented model (e.g., a larger part buffer or an uncapped retention path)
 - **THEN** the workload job fails, forcing the model and the change to reconcile
+
+### Requirement: The concurrency decision is answered before the model is explained
+The capacity documentation SHALL open with a matrix giving maximum safe `AP_MAX_CONCURRENCY` as a function of output length, codec/bitrate and container memory limit, positioned ahead of the formula, the term table and the measured constants.
+
+#### Scenario: An operator sizes a host without arithmetic
+- **WHEN** an operator with a known host size and a known workload consults the documentation
+- **THEN** a concurrency figure is readable from a table within the first screen, without evaluating the formula
+
+#### Scenario: The derivation remains available
+- **WHEN** a reader wants to know where a cell came from
+- **THEN** the formula, the per-term mapping and the measured `R_ffmpeg` table follow the matrix and account for it
+
+### Requirement: Matrix cells are generated from the enforced model
+Every cell SHALL be computed from the published formula and the committed measured table by a script, not maintained by hand, so that the matrix cannot disagree with the model CI enforces.
+
+Because the matrix evaluates the model backwards, the two directions SHALL be checked against each other: for every published cell, that concurrency SHALL fit the cell's memory limit and one more slot SHALL NOT. An inversion that has drifted publishes a memory limit that is too small, which an operator discovers as an OOM kill.
+
+#### Scenario: Regenerated with the constants
+- **WHEN** the measured table is regenerated or a model constant changes
+- **THEN** rerunning the generator reproduces the matrix for the new values
+
+#### Scenario: The inverse is verified
+- **WHEN** the published matrix is checked against the forward model
+- **THEN** every cell is the largest concurrency its memory limit holds, and the check runs in CI without needing the image
+
+### Requirement: Unservable workloads are shown as refusals
+A workload whose single-render backlog exceeds the retention cap SHALL be marked as refused rather than assigned a concurrency figure.
+
+#### Scenario: Full-length lossless
+- **WHEN** the matrix is consulted for a 2 h `f:wav/bd:24` output against the default retention cap
+- **THEN** the cell states that the render exceeds the cap and refers to the lossless section, rather than reporting a concurrency of 1
+
+### Requirement: Knobs that do not affect the bound say so
+The documentation SHALL state which adjustable variables are absent from the matrix and why — specifically that `AP_QUEUE_SIZE` costs no meaningful memory because a queued render holds neither backlog nor subprocess, and that the retention cap bounds a single render rather than the total.
+
+#### Scenario: An operator tunes the queue for memory
+- **WHEN** the documentation is consulted about `AP_QUEUE_SIZE`
+- **THEN** it states that the queue is a latency and `429` decision rather than a memory one
