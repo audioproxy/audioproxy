@@ -14,16 +14,22 @@ makes a cache hit a claim about bytes rather than about a URL.
 
 ```elixir
 {:ok, opts} = AudioProxy.Options.parse("f:opus/br:96/t:12.5:30/fade:0.5:1")
-AudioProxy.Ffmpeg.Command.build(opts, "https://masters.example/piece.wav")
+AudioProxy.Ffmpeg.Command.build(opts, "https://masters.example/piece.wav",
+                                type: :http)
 # => ["-nostdin", "-hide_banner", "-loglevel", "error",
+#     "-protocol_whitelist", "https,tls,tcp",
 #     "-ss", "12.5", "-t", "30", "-i", "https://masters.example/piece.wav",
-#     "-vn", "-af", "afade=t=in:st=0:d=0.5,afade=t=out:st=29:d=1",
+#     "-vn", "-sn", "-dn", "-af", "afade=t=in:st=0:d=0.5,afade=t=out:st=29:d=1",
 #     "-c:a", "libopus", "-b:a", "96k", "-f", "ogg", "pipe:1"]
 ```
 
 There is no shell anywhere in this path. The argv is a flat list of complete
 arguments, so a source URL containing `;`, `$(…)` or spaces is one element and
 stays data; `dl` and `cb` never reach the command at all.
+
+The `type:` is the resolved source's own tag and it is required — see
+[Audio only, at the argv](#audio-only-at-the-argv) for what it decides and why
+there is no default.
 
 ## Option → ffmpeg mapping
 
@@ -50,6 +56,49 @@ stays data; `dl` and `cb` never reach the command at all.
 Every command writes to `pipe:1` behind an explicit `-f`, since stdout has no
 filename for ffmpeg to infer a muxer from, and every command runs with
 `-nostdin -hide_banner -loglevel error` so stderr carries diagnostics only.
+
+## Audio only, at the argv
+
+Two things appear in every argv regardless of the options, and neither comes
+from the URL:
+
+| Argument | Where | Why |
+|---|---|---|
+| `-vn -sn -dn` | after `-i`, so they bind the output | No video, subtitle or data stream is decoded, filtered or encoded, in any format and on the peaks PCM path too |
+| `-protocol_whitelist <set>` | before `-i`, so it binds the input | ffmpeg may open only the protocols the resolved source actually needs |
+
+The protocol set is a function of the source's *type*, never of the input
+string and never of configuration:
+
+| Source | Set | Reachable |
+|---|---|---|
+| `local://` | `file` | The filesystem only — no network protocol exists in this invocation |
+| `https://` | `https,tls,tcp` | The network only — no `file`, so a redirect to `file:///etc/passwd` fails to open |
+| `s3://` | `https,tls,tcp`, plus `http` when `AP_S3_ENDPOINT` is cleartext | As above; the presigned URL's scheme follows the endpoint |
+
+The two sets are disjoint by construction, which is the property that makes
+them worth having: a local render cannot fetch, a remote render cannot read
+disk, and `concat:`, `subfile:`, `data:` and the rest are reachable from
+neither. Because the set is derived from the source type, `build/3` requires
+`type:` rather than defaulting it — a default would be a guess about which side
+of that boundary a render sits on, and the wrong guess is a hole rather than a
+crash. A source type with no entry in `protocols/1` raises for the same reason.
+
+These are defence in depth. The gate that actually refuses a video source with
+`415` is an `ffprobe` run in `AudioProxy.Plugs.RenderAction`, before the
+semaphore; the flags above are what still holds if that gate is bypassed,
+reordered, or handed a source it cannot see inside. Placement matters for both:
+`-protocol_whitelist` after `-i` would bind the *output* format context and
+protect nothing, and `-vn` before `-i` would be an input option ffmpeg reads
+differently.
+
+`Command.allowed_flags/0` publishes the complete flag vocabulary, and
+`takes_value?/1` says which flags carry a value. The property suite walks a
+generated argv position by position against both, so "no URL content can become
+an ffmpeg flag" is a checked claim rather than a design intention. The walk is
+necessary rather than decorative: ogg's quality scale starts at −1, so
+`f:ogg/q:-1` renders `["-q:a", "-1"]` and a leading-hyphen check would have to
+be loosened to tolerate it.
 
 ## Why `m4a` fragments on duration
 

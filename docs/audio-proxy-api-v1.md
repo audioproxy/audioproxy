@@ -83,6 +83,10 @@ No write endpoints in v1: variant write-back to S3 is a side effect of a GET ren
 | `ch` | `1` \| `2` | Downmix (defensible defaults: >2ch → 2) |
 | `bd` | `16` \| `24` \| `32f` | Bit depth, lossless formats only; default: the source's depth, as `sr` defaults to its rate. `32f` is wav-only (flac encodes integers) |
 
+**Audio only, enforced rather than implied.** Every format above is audio, and so is every input this proxy accepts: a source carrying a genuine video stream is refused with `415`, by an `ffprobe` gate that runs before any render starts. It is a *reject*, not a strip — extracting the audio track from arbitrary video would make this a free transcoding service at video's cost profile and video's CVE exposure, which is a different product. Embedded cover art (an `attached_pic` stream, which virtually every tagged mp3, flac and m4a carries) is metadata, not video, and renders normally.
+
+Two things hold underneath that gate, for every render and independently of it. The argv disables non-audio streams (`-vn -sn -dn`), and ffmpeg runs under a `-protocol_whitelist` derived from the resolved source's type: `file` for a local source, `https,tls,tcp` for a remote one (plus `http` only where a plaintext development endpoint is configured). The two sets are disjoint, so a local render cannot reach the network, a remote one cannot read the filesystem, and neither can reach `concat:`, `subfile:` or any other pivot. No processing option and no environment variable widens either — that is the point of deriving it from the source.
+
 ### 3.2 Time-domain / preview
 
 | Option | Values | Notes |
@@ -210,12 +214,14 @@ Every response, success or error, carries an explicit `Cache-Control` — no CDN
 | `401` | Invalid/missing signature |
 | `404` | Source not found / not readable |
 | `413` | Source exceeds `AP_MAX_SRC_BYTES` |
-| `415` | Source format not decodable |
+| `415` | Source not decodable (`undecodable_source`), or contains video (`video_source` — see §3.1) |
 | `416` | `Range` unsatisfiable against a cached variant (proxy mode only) |
 | `422` | Invalid or conflicting options |
 | `429` | No render slot: the wait queue was full, or this request waited in it longer than `AP_RENDER_TIMEOUT` without reaching the front (`Retry-After` set) |
 | `500` | The render failed for a reason that is not the client's: no encoder, no space, a diagnostic the classifier does not recognise |
 | `504` | A render started and then exceeded `AP_RENDER_TIMEOUT` |
+
+The two `415`s are separate `error` values on one status because they are different verdicts: `undecodable_source` says the bytes could not be read, `video_source` says they were read and refused. A client told "not decodable" about a file every player opens would go looking for a corrupt upload.
 
 `/info` adds two rows of its own — `probe_failed` (`500`) and `probe_timeout` (`504`) — rather than reusing the render pair. The bodies name the limit an operator would raise, and `AP_RENDER_TIMEOUT` is not that limit for a probe; an error naming the wrong variable sends them to the wrong place.
 
