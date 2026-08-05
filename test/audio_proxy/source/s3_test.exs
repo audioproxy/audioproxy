@@ -4,6 +4,7 @@ defmodule AudioProxy.Source.S3Test do
 
   import AudioProxy.ConfigHelper
 
+  alias AudioProxy.ErrorJSON
   alias AudioProxy.Source
   alias AudioProxy.Source.S3
 
@@ -131,12 +132,97 @@ defmodule AudioProxy.Source.S3Test do
     end
   end
 
-  describe "the storage seam" do
-    test "reports that no backend has shipped yet, rather than crashing" do
+  describe "the storage seam classifies every failure by cause" do
+    # `AudioProxy.S3`'s whole error type, one row per shape. Enumerated here
+    # rather than sampled: the mapping *is* this slice's decision, and a shape
+    # that lost its clause would answer 500 to a live request.
+    @shapes [
+      {:not_found, :not_found},
+      {:access_denied, :not_found},
+      {{:http, 400, ""}, :not_found},
+      {{:http, 404, "<Error><Code>NoSuchBucket</Code></Error>"}, :not_found},
+      {{:http, 409, "<Error/>"}, :not_found},
+      {{:http, 500, ""}, :upstream_unavailable},
+      {{:http, 503, "<Error><Code>SlowDown</Code></Error>"}, :upstream_unavailable},
+      {{:transport, :econnrefused}, :upstream_unavailable},
+      {{:transport, :timeout}, :upstream_unavailable},
+      {:not_configured, :not_configured}
+    ]
+
+    test "each S3 error shape maps to its own reason" do
+      for {shape, reason} <- @shapes do
+        assert S3.classify(shape) == reason,
+               "expected #{inspect(shape)} to classify as #{inspect(reason)}"
+      end
+    end
+
+    test "each reason maps on to the status the API contract documents" do
+      statuses = %{not_found: 404, not_configured: 500, upstream_unavailable: 502}
+
+      for {shape, reason} <- @shapes do
+        expected = Map.fetch!(statuses, reason)
+
+        assert {^expected, _headers, _body} = ErrorJSON.render(S3.classify(shape)),
+               "expected #{inspect(shape)} to answer #{expected}"
+      end
+    end
+
+    # The property the blind 404 exists for: a bucket policy that denies HEAD
+    # must not tell a client that the object it named is there.
+    test "a denied credential answers byte-identically to a missing object" do
+      assert S3.classify(:access_denied) == S3.classify(:not_found)
+
+      assert ErrorJSON.render(S3.classify(:access_denied)) ==
+               ErrorJSON.render(S3.classify(:not_found))
+    end
+
+    # And the property this slice adds: an outage must *not* be that 404.
+    test "an outage stays distinguishable from a missing object" do
+      for shape <- [{:http, 503, ""}, {:transport, :econnrefused}] do
+        refute ErrorJSON.render(S3.classify(shape)) == ErrorJSON.render(S3.classify(:not_found))
+      end
+    end
+
+    test "an unmapped shape raises rather than picking a plausible status" do
+      # `:invalid_range` belongs to `get_stream/3`, which this module never
+      # calls. There is no catch-all, so it fails a test rather than a request.
+      #
+      # Called through `apply/3` because the set-theoretic checker is right
+      # about the direct call — `classify/1` has no clause for this — and would
+      # warn on the very thing being asserted.
+      assert_raise FunctionClauseError, fn -> apply(S3, :classify, [:invalid_range]) end
+    end
+
+    test "refuses a hand-built source with a verdict rather than raising" do
+      assert S3.stat({:s3, nil, "a.wav"}) == {:error, :not_allowed}
+      assert S3.ffmpeg_input({:s3, "masters"}) == {:error, :not_allowed}
+    end
+  end
+
+  describe "the storage seam, unconfigured" do
+    setup do
+      put_config(%{
+        s3: %{
+          region: "us-east-1",
+          access_key_id: nil,
+          secret_access_key: nil,
+          session_token: nil,
+          endpoint: nil,
+          addressing: :virtual,
+          ca_bundle: nil
+        }
+      })
+
+      :ok
+    end
+
+    test "both callbacks report an operator fault, not a missing object" do
       source = {:s3, "masters", "a.wav"}
 
-      assert S3.stat(source) == {:error, :no_backend}
-      assert S3.ffmpeg_input(source) == {:error, :no_backend}
+      assert S3.stat(source) == {:error, :not_configured}
+      assert S3.ffmpeg_input(source) == {:error, :not_configured}
+
+      assert {500, _headers, _body} = ErrorJSON.render(:not_configured)
     end
   end
 end

@@ -37,18 +37,55 @@ defmodule AudioProxy.Source.S3 do
   first anyway: an input that cannot name an object should not be scanned at
   all, and the ordering is one less thing to re-derive later.
 
-  ## Status: no backend yet
+  ## The seam
 
-  `stat/1` and `ffmpeg_input/1` answer `{:error, :no_backend}`. The SigV4
-  client and presigned-URL generation they need arrive with `add-s3-client`;
-  until then an `s3://` source parses, canonicalizes and authorizes but cannot
-  be rendered. The gap is pinned by a test, so it is a failing assertion away
-  from being forgotten rather than a crash in production.
+  `stat/1` is one `AudioProxy.S3.head/2`: the object's size answers the render
+  path's 413 before a subprocess starts, and its ETag is what `/info`'s
+  validator hashes. `ffmpeg_input/1` is one `AudioProxy.S3.presign_get/3`,
+  handed to ffmpeg as a single argv element — the source bytes never cross the
+  BEAM, and ffmpeg issues its own Range requests, so `-ss` on a two-hour master
+  reads only the bytes it needs.
+
+  Nothing is presigned at `stat/1` time. Both flows call the two callbacks
+  separately, and a presigned URL has an expiry: minting one the caller may
+  never use is a credential with a lifetime and no purpose.
+
+  ## Failures classify by cause
+
+  `AudioProxy.S3` has six error shapes and this module maps every one of them
+  explicitly, with no catch-all — an unmapped shape should crash a test rather
+  than pick a plausible status in production.
+
+      :not_found          → :not_found            404, the blind row
+      :access_denied      → :not_found            404, the blind row
+      {:http, 4xx, _}     → :not_found            404, the blind row
+      :not_configured     → :not_configured       500
+      {:http, 5xx, _}     → :upstream_unavailable 502
+      {:transport, _}     → :upstream_unavailable 502
+
+  Folding `:access_denied` into the 404 is the deliberate part. A bucket
+  policy that denies HEAD is indistinguishable from a missing object *to the
+  client*, which is the property §5's blind 404 exists to protect; the operator
+  gets the truth from the log line, which names the S3 reason, rather than from
+  a response body that would double as an existence oracle. A `4xx` that is
+  neither goes the same way: it means we asked wrongly for an object the client
+  named, and the client cannot tell that apart from the object not being there.
+
+  An outage does **not** go there. `{:transport, _}` and an upstream `5xx` say
+  nothing about whether the object exists, so answering 404 would report a
+  deletion that did not happen and edge-cache it for ten seconds, suppressing
+  the retry that would have worked. They answer 502 (`no-store`).
+
+  `:invalid_range` is unreachable — it belongs to `get_stream/3`, which this
+  module never calls — and so has no clause. If it ever appeared it would
+  raise, which is this codebase's convention for "this should be impossible".
   """
 
   @behaviour AudioProxy.Source.Type
 
   alias AudioProxy.Source.Allowlist
+
+  require Logger
 
   @typedoc "An S3 source: a bucket and an object key, both as written."
   @type t :: {:s3, String.t(), String.t()}
@@ -61,8 +98,17 @@ defmodule AudioProxy.Source.S3 do
   # The longest body that could name an object: bucket, separator, key.
   @max_body_bytes @max_bucket_bytes + 1 + @max_key_bytes
 
-  # See `reasons/0`. `:not_allowed` comes from the allowlist, the rest from here.
-  @reasons [:missing_bucket, :missing_key, :source_too_long, :no_backend, :not_allowed]
+  # See `reasons/0`. `:not_allowed` comes from the allowlist, `:not_found` and
+  # the two seam reasons from `classify/1`, the rest from `parse/1`.
+  @reasons [
+    :missing_bucket,
+    :missing_key,
+    :source_too_long,
+    :not_allowed,
+    :not_found,
+    :not_configured,
+    :upstream_unavailable
+  ]
 
   @impl true
   def scheme, do: "s3"
@@ -97,18 +143,43 @@ defmodule AudioProxy.Source.S3 do
   def authorize(_source), do: {:error, :not_allowed}
 
   @impl true
-  def stat(_source), do: {:error, :no_backend}
+  def stat({:s3, bucket, key} = source) when is_binary(bucket) and is_binary(key) do
+    case AudioProxy.S3.head(bucket, key) do
+      # Straight across: `size` is what answers 413 before ffmpeg is spawned,
+      # `etag` is what `/info`'s validator hashes. Nothing else in the object
+      # is the seam's business.
+      {:ok, %{size: size, etag: etag}} -> {:ok, %{size: size, etag: etag}}
+      {:error, reason} -> {:error, refuse(reason, source, "head")}
+    end
+  end
+
+  def stat(_source), do: {:error, :not_allowed}
 
   @impl true
-  def ffmpeg_input(_source), do: {:error, :no_backend}
+  def ffmpeg_input({:s3, bucket, key} = source) when is_binary(bucket) and is_binary(key) do
+    # One argv element, and one the BEAM never reads through: ffmpeg opens the
+    # URL itself and ranges it. `presign_get/3` defaults its expiry to
+    # `AP_PRESIGN_TTL`, so the TTL is not repeated here.
+    case AudioProxy.S3.presign_get(bucket, key) do
+      {:ok, url} -> {:ok, url}
+      {:error, reason} -> {:error, refuse(reason, source, "presign")}
+    end
+  end
+
+  def ffmpeg_input(_source), do: {:error, :not_allowed}
 
   @doc """
   Every rejection reason this type can produce.
 
   Declared rather than inferred, so a test can hold the two ends together:
-  `AudioProxy.ErrorJSON` renders a 404 only for reasons on its own list, and a
-  reason missing from it answers 500 through a `FunctionClauseError`. A new
-  reason added here without a row there fails that test instead of a request.
+  `AudioProxy.ErrorJSON` has no catch-all, so a reason with no row there
+  raises `FunctionClauseError` in production. A new reason added here without
+  a row there fails that test instead of a request.
+
+  Not all of them are 404s. `:not_configured` and `:upstream_unavailable` come
+  from the storage seam and are deliberately *not* on
+  `AudioProxy.ErrorJSON.not_found_reasons/0` — see the moduledoc's table for
+  why an outage must stay distinguishable from a missing object.
   """
   @spec reasons() :: [atom()]
   def reasons, do: @reasons
@@ -120,8 +191,51 @@ defmodule AudioProxy.Source.S3 do
   def message(:missing_bucket), do: "s3 source has no bucket"
   def message(:missing_key), do: "s3 source has no object key"
   def message(:source_too_long), do: "s3 bucket or key is longer than S3 allows"
-  def message(:no_backend), do: "s3 sources have no storage backend yet"
   def message(:not_allowed), do: "s3 bucket is not on AP_SOURCE_ALLOWLIST"
+  def message(:not_found), do: "s3 object is not there, or is not readable"
+  def message(:not_configured), do: "s3 credentials are not configured"
+  def message(:upstream_unavailable), do: "s3 could not be reached"
+
+  @doc """
+  Maps one `t:AudioProxy.S3.error/0` shape to this type's own reason.
+
+  One clause per shape, no catch-all — see the moduledoc's table for what each
+  answers and why. Public so a test can enumerate the error type exhaustively:
+  the mapping is the whole of this slice's decision, and a shape that quietly
+  lost its clause would answer 500 to a request rather than fail a test.
+  """
+  @spec classify(AudioProxy.S3.error()) :: :not_found | :not_configured | :upstream_unavailable
+  def classify(:not_found), do: :not_found
+
+  # The one collapse that matters. This answers exactly the 404 a missing
+  # object answers, byte for byte, so a client cannot use the proxy's
+  # credentials to learn what a bucket holds; the operator debugging a bucket
+  # policy reads the log line instead.
+  def classify(:access_denied), do: :not_found
+
+  # Neither 404 nor 403: we asked wrongly for an object the client named, and
+  # the client cannot tell that apart from the object not being there.
+  def classify({:http, status, _body}) when status >= 400 and status < 500, do: :not_found
+
+  def classify({:http, status, _body}) when status >= 500, do: :upstream_unavailable
+  def classify({:transport, _detail}), do: :upstream_unavailable
+  def classify(:not_configured), do: :not_configured
+
+  ## The seam's failures
+
+  # `classify/1` plus the log line that carries what the response deliberately
+  # drops. An ordinary miss is not logged — it is the most common answer this
+  # module gives, and a warning per missing object is a warning nobody reads.
+  @spec refuse(AudioProxy.S3.error(), t(), String.t()) :: atom()
+  defp refuse(:not_found, _source, _op), do: :not_found
+
+  defp refuse(reason, {:s3, bucket, key}, op) do
+    Logger.warning(
+      "s3 source: #{op} failed (bucket=#{bucket} key=#{key} reason=#{inspect(reason)})"
+    )
+
+    classify(reason)
+  end
 
   defp typed("", _key), do: {:error, :missing_bucket}
   defp typed(_bucket, ""), do: {:error, :missing_key}
