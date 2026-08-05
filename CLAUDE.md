@@ -6,7 +6,7 @@ The full API design lives in `docs/audio-proxy-api-v1.md` — read it before tou
 
 ## Worktree gate — check this before the first edit of any task
 
-**Never edit files while `main` is checked out.** Every change — feature, fix, docs, config, OpenSpec artifacts — starts on its own worktree.
+**Never edit files while `main` is checked out.** Every change — feature, fix, docs, config — starts on its own worktree. The exception is *planning*, below.
 
 Before your first write or edit of a task, run `git branch --show-current`. If it prints `main`, stop and create the worktree first:
 
@@ -16,7 +16,9 @@ wt switch --create <change-name>   # then work in ../audioproxy.<change-name>
 
 This is a precondition, not a preference. "It's only a config file", "it's just docs", and "I'll branch once I know what to change" are all violations. Reading, searching, and running the suite on `main` are fine; writing is not.
 
-The only writes permitted on `main`: resolving a merge, and the commit `/opsx:archive` produces for an already-merged change.
+**Writing a proposal is planning, and planning happens on `main`.** Creating or editing an OpenSpec change's *artifacts* — `proposal.md`, `design.md`, `tasks.md`, the delta specs under `specs/` — is a `main` activity, committed straight to `main` as `docs(openspec):`. Nothing is implemented yet, there is nothing to run, and several proposals routinely land in one commit; a worktree and a devcontainer per proposal buys isolation for work that touches no code. The worktree comes later, when `/opsx:apply` starts *implementing* the change — and from then on that change's artifacts move with it, tasks getting checked off on the branch alongside the code they describe.
+
+The other writes permitted on `main`: resolving a merge, and the commit `/opsx:archive` produces for an already-merged change.
 
 Workflow mechanics (devcontainer, ports, hooks) are under *Dev workflow* below.
 
