@@ -260,5 +260,18 @@ defmodule AudioProxy.FfprobeTest do
     test "output with no streams key at all is undecodable, not a crash" do
       assert Ffprobe.contract(%{}) == {:error, :undecodable_source}
     end
+
+    # `contract/2` is now reached from two places — `/info` and
+    # `AudioProxy.Peaks.Render` — and the peaks path turns its error into a
+    # render failure rather than a response, so a raise there is a crashed
+    # GenServer reported as "the render died without saying anything" instead
+    # of a 415. An earlier peaks-local parser had exactly that bug on exactly
+    # these shapes; this pins that this one does not. ffprobe writes none of
+    # them, which is the point: the mapping is total over its input.
+    test "a streams value of the wrong shape is undecodable, not a raise" do
+      for streams <- [%{}, "nope", nil, 42, [42], ["a string"], [nil]] do
+        assert Ffprobe.contract(%{"streams" => streams}) == {:error, :undecodable_source}
+      end
+    end
   end
 end

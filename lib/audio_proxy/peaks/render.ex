@@ -15,11 +15,15 @@ defmodule AudioProxy.Peaks.Render do
   A peaks render runs ffprobe and then ffmpeg, both as ordinary
   `AudioProxy.Ffmpeg.Render` children:
 
-    1. **Probe.** `AudioProxy.Ffmpeg.Probe` asks for the duration and sample
-       rate. Bucket boundaries are a function of the total sample count, and
-       the alternative to knowing it up front is buffering the whole decode —
-       memory instead of a header read. A probe is cheap and ranges rather
-       than transfers.
+    1. **Probe.** `AudioProxy.Ffprobe` supplies both the argv and the mapping —
+       the same ones `/info` answers with, so the duration this proxy *reports*
+       and the duration it *buckets by* cannot drift apart. What differs is who
+       runs the subprocess: `/info` blocks on `Ffprobe.probe/2` because it is a
+       request doing nothing else, while this process spawns the same argv and
+       folds the chunks in `handle_info/2`, so it stays answerable to `cancel/1`
+       throughout. Bucket boundaries are a function of the total sample count,
+       and the alternative to knowing it up front is buffering the whole decode
+       — memory instead of a header read.
     2. **Decode.** The argv `AudioProxy.Ffmpeg.Command` builds for `f:peaks`:
        raw interleaved `s16le` on stdout, trimmed and downmixed. Each chunk
        is folded into `AudioProxy.Peaks` and dropped; the PCM is never
@@ -84,8 +88,8 @@ defmodule AudioProxy.Peaks.Render do
 
   use GenServer
 
-  alias AudioProxy.{Options, Peaks}
-  alias AudioProxy.Ffmpeg.{Probe, Render, RenderSupervisor}
+  alias AudioProxy.{Ffprobe, Options, Peaks}
+  alias AudioProxy.Ffmpeg.{Render, RenderSupervisor}
 
   @typedoc """
   What a peaks render needs beyond the decode argv.
@@ -125,7 +129,7 @@ defmodule AudioProxy.Peaks.Render do
     # Resolved before a process exists, for the reason `Render.start_link/1`
     # resolves ffmpeg there: a `{:stop, _}` from `init/1` exits an already
     # linked caller, and a missing binary is a plain error tuple instead.
-    with {:ok, probe} <- Probe.executable(Keyword.get(peaks, :probe_executable)) do
+    with {:ok, probe} <- Ffprobe.executable(Keyword.get(peaks, :probe_executable)) do
       GenServer.start_link(__MODULE__, Keyword.put(opts, :probe_executable, probe))
     end
   end
@@ -172,7 +176,7 @@ defmodule AudioProxy.Peaks.Render do
 
   @impl true
   def handle_continue({:probe, input, probe_executable}, state) do
-    case start_inner(Probe.args(input), executable: probe_executable) do
+    case start_inner(Ffprobe.args(input), executable: probe_executable) do
       {:ok, inner} ->
         {:noreply, %{state | inner: inner, inner_monitor: Process.monitor(inner)}}
 
@@ -286,8 +290,15 @@ defmodule AudioProxy.Peaks.Render do
 
   # The probe's stdout, read into the reducer the decode will fill. Everything
   # that can be wrong with it is wrong here, before a decode is spawned.
+  #
+  # The mapping is `AudioProxy.Ffprobe.contract/2` — the same pure function
+  # `/info` answers with, so a duration this proxy reports and a duration it
+  # buckets by cannot disagree. It is also already total over malformed input:
+  # a `streams` that is not a list of objects is `:undecodable_source`, not a
+  # raise.
   defp probed(state) do
-    with {:ok, info} <- Probe.parse(IO.iodata_to_binary(Enum.reverse(state.probe))),
+    with {:ok, json} <- decode(IO.iodata_to_binary(Enum.reverse(state.probe))),
+         {:ok, info} <- Ffprobe.contract(json),
          {:ok, duration} <- required_duration(info) do
       frames = round(region(duration, state.options) * info.sample_rate)
 
@@ -304,6 +315,13 @@ defmodule AudioProxy.Peaks.Render do
     end
   end
 
+  defp decode(output) do
+    case JSON.decode(output) do
+      {:ok, json} when is_map(json) -> {:ok, json}
+      _otherwise -> {:error, :unreadable_probe}
+    end
+  end
+
   # A source with no audio stream, or one whose duration nothing can determine,
   # is a source peaks cannot be drawn from — permanently, and because of the
   # file rather than the server. That is a 415. See the moduledoc for why this
@@ -312,12 +330,14 @@ defmodule AudioProxy.Peaks.Render do
   # `:unreadable_probe` stays a server failure: ffprobe exited cleanly and
   # wrote something this proxy could not read, which says nothing about the
   # source and everything about the install.
-  defp probe_class(:no_audio_stream), do: :undecodable
+  defp probe_class(:undecodable_source), do: :undecodable
   defp probe_class(:unknown_duration), do: :undecodable
   defp probe_class(_reason), do: :render_failed
 
-  defp required_duration(%{duration: nil}), do: {:error, :unknown_duration}
+  # `contract/2` omits a field it cannot answer rather than reporting nil, so
+  # "no duration" is an absent key here, not a nil value.
   defp required_duration(%{duration: duration}), do: {:ok, duration}
+  defp required_duration(_info), do: {:error, :unknown_duration}
 
   # How much of the source the decode will actually produce, in seconds. The
   # trim is the same one the argv carries, applied to the probed duration; a

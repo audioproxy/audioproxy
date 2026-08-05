@@ -19,7 +19,7 @@ defmodule AudioProxy.Peaks do
 
   That is why the reducer is built from a *sample count* rather than from the
   stream (`new/2`): bucket boundaries have to be known before the first sample
-  arrives, and the count comes from `AudioProxy.Ffmpeg.Probe` running ahead of
+  arrives, and the count comes from `AudioProxy.Ffprobe` running ahead of
   the decode. `samples_per_pixel` is `ceil(frames / count)`, so the last
   bucket may be short.
 
