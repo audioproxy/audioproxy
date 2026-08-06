@@ -6,7 +6,7 @@ Transcode audio on demand, from a URL.
 
 Point it at your audio and ask for a variant by URL: a 30-second preview, a mono file for speech-to-text, a normalised podcast MP3, a 24-bit FLAC excerpt. The options are in the path, so one master can serve all of them and you generate none of them in advance. If you know [imgproxy](https://imgproxy.net), this is that, for audio.
 
-> **Status: early, `v0.3.0`.** Transcoding works end to end and you can try it in about a minute. Sources live on a mounted directory (S3-compatible object storage is in flight: the client layer shipped in 0.3.0, the source backend lands next — see [docs/s3-providers.md](docs/s3-providers.md) for what it will support); with a [variant store](#variant-store) configured, completed renders are kept and served back with `Range` support, so a variant is encoded once rather than per request. See the [Roadmap](#roadmap).
+> **Status: early, `v0.3.0`.** Transcoding works end to end and you can try it in about a minute. Sources live on a mounted directory (S3-compatible object storage is in flight: the client layer shipped in 0.3.0, and both the source backend and the `s3://` [variant store](#variant-store) are on `main` for the next release — see [docs/s3-providers.md](docs/s3-providers.md) for which providers are covered); with a [variant store](#variant-store) configured, completed renders are kept and served back with `Range` support, so a variant is encoded once rather than per request. See the [Roadmap](#roadmap).
 
 ## Quick start
 
@@ -106,7 +106,7 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 - Renders stream while they encode, from files in a mounted directory
 - Concurrent requests for the same variant share one render, with mid-render joiners catching up from the start
 - Sources on a mounted directory; the S3 client layer (SigV4, addressing styles, MinIO test harness — the plumbing the S3 source backend is built on)
-- A variant cache: completed renders persist to a store — a local directory or an S3 bucket — and are served back without rendering, with `Range` support; hits can redirect to presigned storage URLs so the proxy leaves the hot path
+- A variant cache: completed renders persist to a local directory and are served back without rendering, with `Range` support
 - A cap on simultaneous renders with a bounded wait queue, so a burst queues (and then sheds, with `Retry-After`) instead of thrashing the machine
 - `GET /info`, giving duration, sample rate, channels and tags, so clients can size their variant URLs to the source
 - A single container, published per release
@@ -115,6 +115,7 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 
 - `f:peaks`, waveform min/max data in audiowaveform's JSON and binary formats, cached like any other variant. It is on `main` but not in the `0.3.0` image the Quick start pins.
 - `s3://` sources. ffmpeg reads the object through a presigned URL, so a trim fetches only the bytes it needs, and an unreachable store answers `502` rather than a `404` that would report a deletion that did not happen. Same caveat as above: on `main`, not in the `0.3.0` image.
+- An `s3://` **variant store**, so the cache survives a restart and is shared between nodes — and with it, `AP_SERVE_MODE=redirect`, which has been the documented default all along and had no backend that could presign until now. A hit answers `302` to a short-lived storage URL and the proxy leaves the hot path entirely.
 
 **After that**
 
@@ -506,7 +507,7 @@ Note that the variables below are the full configuration surface for the design,
 | `AP_ALLOW_INSECURE` | boolean | `false` | Accept unsigned URLs (dev only) |
 | `AP_SOURCE_ALLOWLIST` | comma-separated | empty | Permitted buckets and hosts for `s3://` and `https://` sources. Empty accepts every bucket and refuses every host — see [Sources](#s3-and-https-remote-sources) |
 | `AP_LOCAL_ROOT` | existing directory | unset | Root for `local://` sources; unset disables them. Must exist at boot, and may not be `/` |
-| `AP_VARIANT_STORE` | URL (`file:///path`) | unset | Where rendered variants are written back; unset = no cache, always render. See [Variant store](#variant-store) |
+| `AP_VARIANT_STORE` | URL (`file:///path`, `s3://bucket`) | unset | Where rendered variants are written back; unset = no cache, always render. Probed for writability at boot. See [Variant store](#variant-store) |
 | `AP_MAX_CONCURRENCY` | positive integer | schedulers online | Max simultaneous ffmpeg processes. Requests that share a render share its slot, so this counts encodes, not connections |
 | `AP_QUEUE_SIZE` | non-negative integer | `32` | Requests that may wait for a slot before the next one is answered `429` with `Retry-After`. `0` means no waiting at all |
 | `AP_MAX_SRC_BYTES` | positive integer | `2000000000` | Reject larger sources with `413`; also caps the bytes a render may hold in memory. Does not apply to `/info`, which only reads headers |
@@ -571,12 +572,15 @@ A store behind a private certificate authority is reached over `https://` by poi
 Point `AP_VARIANT_STORE` at where completed renders should be kept:
 
 ```bash
-AP_VARIANT_STORE=file:///var/cache/audio_proxy AP_SERVE_MODE=proxy …
+AP_VARIANT_STORE=s3://variants …                                # object storage
+AP_VARIANT_STORE=file:///var/cache/audio_proxy AP_SERVE_MODE=proxy …   # a directory
 ```
 
-The scheme picks the backend. `file://` stores variants in a local directory, which must exist and be writable at boot; `s3://` arrives with the S3 backend. Unset means no cache: every request renders.
+The scheme picks the backend, and each is validated at boot by the operation it needs — a write, and taking it back — so a store this deployment cannot write fails the container instead of discarding every write-back in silence. `file://` names a directory that must exist and be writable. `s3://` names a bucket and nothing else: no key prefix, and the credentials are the same `AWS_*` variables [S3 credentials](#s3-credentials) covers. Unset means no cache: every request renders.
 
 With a store configured, every successful render is written back under its cache key, together with the headers it was served with — atomically, so a failed or cancelled render leaves nothing behind. It also changes what a disconnect means: the render of a variant nobody is waiting for anymore is completed into the store rather than cancelled, so the next request for it is a hit.
+
+**Prefer `s3://` if you have object storage.** The cache outlives the container, every node reads what any node rendered, and it is the only backend that can presign — which is what makes `AP_SERVE_MODE=redirect`, the default, work at all. See [Choosing a serve mode](#choosing-a-serve-mode).
 
 Two things about a `file://` store are yours to own:
 
@@ -584,6 +588,8 @@ Two things about a `file://` store are yours to own:
 - **It should live on a volume.** A store on the container's writable layer disappears with the container, taking every cached variant with it.
 
 A `file://` store is also per-node: two nodes with separate directories each render a variant once. That is the intended trade — shared caches are what `s3://` is for.
+
+An `s3://` store is unbounded in the same way, and there the lever is the bucket's own lifecycle rules rather than anything this proxy does. Worth setting one for incomplete multipart uploads too: a write-back aborts its own, but a hard kill of the container is not something it can clean up after.
 
 ### Cache semantics
 
@@ -606,7 +612,9 @@ Two ways to make a first play seekable, if you need one: request the URL once an
 
 `AP_SERVE_MODE=proxy` serves hits from the store through the proxy. It works with every backend, keeps one hostname in front of clients, and means the proxy stays in the path for the bytes.
 
-`AP_SERVE_MODE=redirect` (the default) answers a hit with a `302` to a presigned URL valid for `AP_PRESIGN_TTL` seconds, and storage serves the bytes. The proxy leaves the hot path entirely, which is the point of it. Presigning is a capability of the store's backend, so `redirect` against a `file://` store (which has no URLs to sign) is refused at boot, naming both variables; use `proxy` there.
+`AP_SERVE_MODE=redirect` (the default) answers a hit with a `302` to a presigned URL valid for `AP_PRESIGN_TTL` seconds, and storage serves the bytes. The proxy leaves the hot path entirely, which is the point of it, and the client cannot tell the difference: the variant arrives under the same `Content-Type` and `Cache-Control` a proxied hit would have sent, because the store holds the ones the write-back saved. `Range` is the store's to answer, natively.
+
+Presigning is a capability of the store's backend, so `redirect` needs an `s3://` store. Against a `file://` one — which has no URLs to sign — it is refused at boot naming both variables; use `proxy` there.
 
 Behind a CDN, prefer `proxy`. It is the mode that collaborates with an edge: one origin, cacheable immutable responses, `Range` served through the same URL the CDN already holds. `redirect` routes the media bytes around the edge to storage, so the CDN caches a `302` it must not keep (the response says `no-store` for exactly that reason: a stored redirect hands out expired URLs) and none of the audio.
 

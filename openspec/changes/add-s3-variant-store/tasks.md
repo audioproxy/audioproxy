@@ -15,13 +15,13 @@
 
 - [x] 3.1 Extract the seam assertions from the local backend's tests into one suite parameterised by backend: round-trip bytes and metadata, ranged read, miss on an absent key, failed write leaves the response intact
 - [x] 3.2 Run it against `file://` and against MinIO; leave backend-specific mechanisms (the `tmp/` sweep, the sidecar) in the local suite
-- [ ] 3.3 End-to-end redirect mode: a HIT answers `302` with `no-store`, and following the `Location` delivers the variant with the same `Content-Type` and `Cache-Control` a proxied HIT would have sent
+- [x] 3.3 End-to-end redirect mode: a HIT answers `302` with `no-store`, and following the `Location` delivers the variant with the same `Content-Type` and `Cache-Control` a proxied HIT would have sent
 
 ## 4. Docs
 
-- [ ] 4.1 README: `AP_VARIANT_STORE=s3://bucket` in the config table and the Variant store section; redirect mode is reachable, and why it is the default
-- [ ] 4.2 `docs/audio-proxy-api-v1.md` §6: drop the "S3 backend pending" hedge
-- [ ] 4.3 `docs/s3-providers.md`: note any provider whose presigned-URL or metadata behaviour differs for variant serving
+- [x] 4.1 README: `AP_VARIANT_STORE=s3://bucket` in the config table and the Variant store section; redirect mode is reachable, and why it is the default
+- [x] 4.2 `docs/audio-proxy-api-v1.md` §6: drop the "S3 backend pending" hedge
+- [x] 4.3 `docs/s3-providers.md`: note any provider whose presigned-URL or metadata behaviour differs for variant serving
 
 ## Release-gate coverage (added 2026-08-05, from the v0.3.0 post-mortem)
 
