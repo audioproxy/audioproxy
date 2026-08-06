@@ -77,8 +77,8 @@ slot would need 4143.2 MiB and does not fit, which is what makes 29 the maximum.
 `—` is a workload that does not fit at any concurrency on that limit. `> 64`
 means memory has stopped being the binding constraint and CPU has become it:
 size those from cores, not from this table. **refused** is a render whose output
-crosses the 2 GB `AP_MAX_SRC_BYTES` retention cap and is killed partway through
-— there is no concurrency at which it works, on any host. See [Long-form
+crosses the 2 GB `AP_MAX_VARIANT_BYTES` retention cap and is killed partway
+through — there is no concurrency at which it works, on any host. See [Long-form
 lossless](#3-long-form-lossless--fails-the-cap-loudly-by-design).
 
 ### How much memory a concurrency needs
@@ -139,13 +139,14 @@ scales with it. Sizing the queue is a **latency and `429` decision** (how long a
 client should wait before being told to come back), not a memory one, so it does
 not get a column here. Set it from how long your clients will tolerate waiting.
 
-**`AP_MAX_SRC_BYTES` bounds one render, not the total.** It caps the bytes a
+**`AP_MAX_VARIANT_BYTES` bounds one render, not the total.** It caps the bytes a
 *single* render may retain, which is why it decides whether a cell reads
 **refused**. It does not bound `C × B_backlog`, so it cannot be used as a
 container memory limit: eight renders each staying just under a 2 GB cap is 16 GB.
-The lever that bounds the total is `AP_MAX_CONCURRENCY`, and the cap's other job
-— rejecting oversized *sources* — pulls in the opposite direction. See
-[`AP_MAX_SRC_BYTES` does two jobs](#ap_max_src_bytes-does-two-jobs-and-they-pull-in-opposite-directions).
+The lever that bounds the total is `AP_MAX_CONCURRENCY` — raising the retention
+ceiling instead licenses every slot to reach the larger figure. `AP_MAX_SRC_BYTES`
+is not in the matrix at all: it bounds the *source*, and there is no source term
+in the model. See [Two ceilings](#two-ceilings-and-which-one-bounds-what).
 
 ## The derivation: output is the hazard, input is not
 
@@ -190,7 +191,7 @@ RAM  ≈  BEAM_base  +  T_ffmpeg  +  (C + L) × (R_ffmpeg + B_backlog + H_pipeli
 | `C` | Simultaneous ffmpeg processes | `AP_MAX_CONCURRENCY` (default: schedulers online) | your setting |
 | `L` | Completed renders still holding their backlog | `@linger` in `AudioProxy.RenderCoordinator`, **1 s** | see [Why `C` is not enough](#why-c-is-not-enough-the-linger-window) |
 | `R_ffmpeg` | Private (anonymous) peak of one ffmpeg subprocess | Measured; [table below](#measured-r_ffmpeg) | 10–18 MiB plain, 64–74 MiB with `norm` |
-| `B_backlog` | Retained output bytes for one render | `AudioProxy.RenderCoordinator.retain/2`, capped by `AP_MAX_SRC_BYTES` | `min(variant size, AP_MAX_SRC_BYTES)` |
+| `B_backlog` | Retained output bytes for one render | `AudioProxy.RenderCoordinator.retain/2`, capped by `AP_MAX_VARIANT_BYTES` | `min(variant size, AP_MAX_VARIANT_BYTES)` |
 | `H_pipeline` | Forwarded-but-unacknowledged bytes plus the port's read queue | `@high_water` in `AudioProxy.Ffmpeg.Render`, **1 MiB** | ≤ 1 MiB, and in practice far less |
 | `U` | In-flight S3 write-back uploads | Not reachable today — see [The S3 write-back term](#the-s3-write-back-term) | **0** with a `file://` store |
 | `part_size` | Bytes buffered per multipart part | `@part_size` in `AudioProxy.S3`, **5 MiB** | 5 MiB, when `U > 0` |
@@ -377,27 +378,44 @@ For preview-sized variants it is invisible. For a long-form render being joined
 late by many clients at once, it is worth knowing that the peak can briefly
 exceed the model by roughly one backlog per simultaneous joiner.
 
-## `AP_MAX_SRC_BYTES` does two jobs, and they pull in opposite directions
+## Two ceilings, and which one bounds what
 
-There is no separate backlog knob. `AP_MAX_SRC_BYTES` (default
-`2000000000` — 2 GB) is checked twice:
+There are two byte ceilings, checked at different moments against different
+things:
 
-1. Against the **source** size, before a render starts — an oversized source is
-   refused with `413`.
-2. Against the **cumulative output** bytes, inside
-   `RenderCoordinator.retain/2` — a render whose output crosses the cap is
-   killed and the request fails.
+1. **`AP_MAX_SRC_BYTES`** (default `2000000000` — 2 GB), against the **source**
+   size, before a render starts. An oversized source is refused with `413` and
+   nothing is spawned. It has nothing to say about output.
+2. **`AP_MAX_VARIANT_BYTES`** (default: whatever `AP_MAX_SRC_BYTES` resolves
+   to), against the **cumulative output** bytes, inside
+   `RenderCoordinator.retain/2`. A render whose output crosses it is killed and
+   the request fails. This is `B_backlog`'s bound, and so the ceiling that
+   decides whether a cell above reads **refused**.
 
-So lowering it to bound memory also lowers the largest source you will accept,
-and raising it to accept large masters also raises the memory one render may
-consume. A deployment serving two-hour WAV masters as MP3 previews needs the cap
-*above* 1.3 GB to accept the source, which means it is not bounding the backlog
-to anything useful, and the real bound has to come from `AP_MAX_CONCURRENCY`
-instead.
+The second exists because the first could not do both jobs at once. A catalogue
+of two-hour masters served as thirty-second previews needs the source ceiling
+*above* 1.3 GB to accept its own files — and while that number was also the
+retention cap, setting it there licensed every render to hold 1.3 GB of output,
+for a workload whose variants are 480 KB. Set `AP_MAX_VARIANT_BYTES` to what
+your outputs actually are and the two stop pulling against each other.
 
-The default is 2 GB, which is not a memory bound in any meaningful sense: with
-the default `AP_MAX_CONCURRENCY` on an 8-core host, the model's worst case is
-over 16 GB. **A deployment that has not thought about this has not been sized.**
+The default keeps them equal, so a deployment that sets neither, or only
+`AP_MAX_SRC_BYTES`, is bounded exactly where it was before the ceilings were
+separated.
+
+**Raising the retention ceiling does not buy capacity.** This is the misreading
+with consequences. It bounds *one* render while the bill is `C × B_backlog`, so
+raising it to fit one large render licenses every concurrent slot to reach that
+size. A render that fails today fails alone, legibly, with the other renders
+surviving; raise the ceiling and it succeeds, two concurrent ones exhaust the
+container, and the kernel picks the victim — which is every in-flight render
+rather than the one that misbehaved. The lever that bounds the **total** is
+`AP_MAX_CONCURRENCY`, and the matrix above is where you find out what a total
+costs.
+
+Neither default is a memory bound in any meaningful sense: at 2 GB with the
+default `AP_MAX_CONCURRENCY` on an 8-core host, the model's worst case is over
+16 GB. **A deployment that has not thought about this has not been sized.**
 
 ## Worked examples
 
@@ -464,7 +482,7 @@ coalescing benefit is not worth the RAM for your traffic, the lever is
 Two-hour masters rendered full-length as `f:wav/bd:24` at 48 kHz stereo.
 
 ```
-B_backlog   = 2.07 GB per render      — and AP_MAX_SRC_BYTES defaults to 2.0 GB
+B_backlog   = 2.07 GB per render      — and AP_MAX_VARIANT_BYTES defaults to 2.0 GB
 ```
 
 A single render exceeds the retention cap before it finishes. What happens is
@@ -472,14 +490,16 @@ not a slow degradation: `retain/2` returns an error partway through, the render
 is killed, and the request fails with
 
 ```
-render output exceeded the 2000000000-byte retention cap (AP_MAX_SRC_BYTES)
+render output exceeded the 2000000000-byte retention cap (AP_MAX_VARIANT_BYTES)
 ```
 
 This is the intended behaviour and the right one — the alternative is a
 container that runs until the kernel OOM-kills it, taking every other in-flight
 render with it. But it means **full-length lossless output is not a workload
-this architecture serves**, whatever you set the cap to: raising it to 4 GB makes
-one render succeed and two concurrent ones exhaust an 8 GiB container.
+this architecture serves**, whatever you set the cap to: raising
+`AP_MAX_VARIANT_BYTES` to 4 GB makes one render succeed and two concurrent ones
+exhaust an 8 GiB container. Raising `AP_MAX_SRC_BYTES` alone changes nothing
+here at all — the source was never the problem.
 
 What to do instead, in order of preference:
 

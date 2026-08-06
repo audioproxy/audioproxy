@@ -247,7 +247,8 @@ Mid-stream render failure after `200` is signaled by abnormal termination of the
 | `AP_VARIANT_STORE` | Variant store, scheme-tagged: `file:///path` or `s3://bucket` (S3 backend pending); unset = no cache, always render. `file://` must exist and be writable at boot |
 | `AP_MAX_CONCURRENCY` | Max simultaneous ffmpeg processes (default: CPU count). Coalesced requests share one, so this counts renders and not requests |
 | `AP_QUEUE_SIZE` | Requests that may wait for a slot before the next is answered `429` |
-| `AP_MAX_SRC_BYTES`, `AP_RENDER_TIMEOUT` | Abuse limits |
+| `AP_MAX_SRC_BYTES`, `AP_RENDER_TIMEOUT` | Abuse limits. `AP_MAX_SRC_BYTES` bounds the *source*, checked before a render starts — the `413` above |
+| `AP_MAX_VARIANT_BYTES` | Bytes one render may retain, defaulting to the effective `AP_MAX_SRC_BYTES`. Output past it kills the render; the response has already committed to `200`, so the outcome is a failed stream rather than a `413` |
 | `AP_PROBE_TIMEOUT` | Seconds an `/info` probe may take before ffprobe is killed and the request answered `504` (default: 10). Separate from `AP_RENDER_TIMEOUT` because a probe reads headers rather than decoding — see §4.3 |
 | `AP_SERVE_MODE` | `redirect` \| `proxy` |
 | `AP_PRESIGN_TTL` | Seconds a HIT's presigned URL stays valid (default: 300); redirect mode only |

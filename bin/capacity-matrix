@@ -28,7 +28,7 @@
 #
 # `B_backlog` is duration × bitrate, because a variant's size is duration ×
 # bitrate — there is no source-size term in the model, and the measured table is
-# the evidence. A workload whose single render would cross `AP_MAX_SRC_BYTES`
+# the evidence. A workload whose single render would cross `AP_MAX_VARIANT_BYTES`
 # gets no number at all: that render is killed partway through, so printing a
 # concurrency for it would describe a deployment that fails on its first request.
 
@@ -207,7 +207,7 @@ def legend
     "`> #{CONCURRENCY_CEILING}` means memory has stopped being the binding " \
     "constraint and CPU has become it: size those from cores, not from this table. " \
     "**#{REFUSED}** is a render whose output crosses the " \
-    "#{DEFAULT_MAX_SRC_BYTES / 1_000_000_000} GB `AP_MAX_SRC_BYTES` retention cap " \
+    "#{DEFAULT_MAX_VARIANT_BYTES / 1_000_000_000} GB `AP_MAX_VARIANT_BYTES` retention cap " \
     "and is killed partway through — there is no concurrency at which it works, on " \
     "any host. See " \
     "[Long-form lossless](#3-long-form-lossless--fails-the-cap-loudly-by-design)."

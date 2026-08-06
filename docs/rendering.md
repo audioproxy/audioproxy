@@ -197,10 +197,13 @@ backlogged, or neither. The consumer writes the backlog, then the live chunks.
 
 **Retention is the memory bound.** The bytes are held anyway (the variant-cache
 slice tees the same ones to storage), so what stops a render growing without
-limit is a cap: output past `AP_MAX_SRC_BYTES` fails the render for every
-subscriber. That is a source-size limit doing double duty, which is honest for
-preview-sized outputs and is the reason the FIFO escalation above is written
-down — spooling instead of retaining changes nothing in the contract.
+limit is a cap: output past `AP_MAX_VARIANT_BYTES` fails the render for every
+subscriber. That ceiling is the variant's own, separate from `AP_MAX_SRC_BYTES`
+and defaulting to it, so a deployment can accept long masters and still bound
+one render's retention to a preview's worth of bytes. The breach is only
+knowable once the response has committed to `200`, so it is a failed stream
+rather than a `413` — which is the reason the FIFO escalation above is written
+down; spooling instead of retaining changes nothing in the contract.
 
 Three ways a coordinator ends, differing in what happens to the key:
 

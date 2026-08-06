@@ -14,7 +14,7 @@
 
 ## 3. The model and the documents
 
-- [ ] 3.1 `bin/capacity_model.rb`: the refusal test follows the retention ceiling; rename the constant to match what it now means
-- [ ] 3.2 Regenerate the matrix (`bin/capacity-matrix --write docs/capacity.md`) and confirm no cell moves — the default makes the two numbers equal, so a moved cell means the resolution is wrong
-- [ ] 3.3 `docs/capacity.md`: "`AP_MAX_SRC_BYTES` does two jobs" becomes the section on two ceilings and which one bounds what; state plainly that raising the retention ceiling licenses every slot to reach it, so the lever for the total is `AP_MAX_CONCURRENCY`
-- [ ] 3.4 `README.md` configuration table: the new row, and the existing row loses the "also caps the bytes a render may hold in memory" clause it no longer owns
+- [x] 3.1 `bin/capacity_model.rb`: the refusal test follows the retention ceiling; rename the constant to match what it now means
+- [x] 3.2 Regenerate the matrix (`bin/capacity-matrix --write docs/capacity.md`) and confirm no cell moves — the default makes the two numbers equal, so a moved cell means the resolution is wrong
+- [x] 3.3 `docs/capacity.md`: "`AP_MAX_SRC_BYTES` does two jobs" becomes the section on two ceilings and which one bounds what; state plainly that raising the retention ceiling licenses every slot to reach it, so the lever for the total is `AP_MAX_CONCURRENCY`
+- [x] 3.4 `README.md` configuration table: the new row, and the existing row loses the "also caps the bytes a render may hold in memory" clause it no longer owns
