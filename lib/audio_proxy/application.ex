@@ -60,6 +60,10 @@ defmodule AudioProxy.Application do
     children =
       [
         AudioProxy.Semaphore,
+        # Reads the semaphore's depth, so it starts behind it — and ahead of
+        # the listener, because `/ready` must have somewhere to ask on the
+        # first accepted connection.
+        AudioProxy.Readiness,
         AudioProxy.VariantStore.Tee.supervisor(),
         AudioProxy.Ffmpeg.RenderSupervisor
       ] ++
