@@ -217,12 +217,83 @@ defmodule AudioProxy.ConfigTest do
       assert error.message =~ "AP_VARIANT_STORE"
     end
 
-    test "s3:// is refused until its backend lands, naming the variable" do
+    test "an s3:// URL parses to the object store" do
+      # `build!/1` does not probe the bucket — that is `load!/1`'s job and it
+      # needs a network — so this is the parse, and only the parse.
+      assert Config.build!(%{"AP_VARIANT_STORE" => "s3://variants"}).variant_store ==
+               {:s3, "variants"}
+    end
+
+    test "an s3:// URL with a key prefix aborts rather than silently ignoring it" do
       error =
-        assert_raise Error, fn -> Config.build!(%{"AP_VARIANT_STORE" => "s3://variants"}) end
+        assert_raise Error, fn ->
+          Config.build!(%{"AP_VARIANT_STORE" => "s3://variants/renders"})
+        end
 
       assert error.message =~ "AP_VARIANT_STORE"
-      assert error.message =~ "s3://"
+      assert error.message =~ "key prefix"
+    end
+
+    test "an s3:// URL with a query or fragment aborts rather than dropping it" do
+      for suffix <- ["?x=1", "#frag"] do
+        error =
+          assert_raise Error, fn ->
+            Config.build!(%{"AP_VARIANT_STORE" => "s3://variants#{suffix}"})
+          end
+
+        assert error.message =~ "AP_VARIANT_STORE"
+        assert error.message =~ "query or fragment"
+      end
+    end
+
+    test "an s3:// URL carrying credentials aborts, and the message does not echo them" do
+      # Silently dropping them would look to an operator like credentials
+      # supplied and behave like credentials omitted — the same reasoning
+      # AP_S3_ENDPOINT's userinfo refusal is built on.
+      error =
+        assert_raise Error, fn ->
+          Config.build!(%{"AP_VARIANT_STORE" => "s3://AKIAEXAMPLE:topsecret@variants"})
+        end
+
+      assert error.message =~ "AP_VARIANT_STORE"
+      assert error.message =~ "AWS_ACCESS_KEY_ID"
+      refute error.message =~ "topsecret"
+    end
+
+    test "an s3:// URL with a port aborts rather than addressing somewhere else" do
+      error =
+        assert_raise Error, fn ->
+          Config.build!(%{"AP_VARIANT_STORE" => "s3://variants:9000"})
+        end
+
+      assert error.message =~ "AP_VARIANT_STORE"
+      assert error.message =~ "AP_S3_ENDPOINT"
+    end
+
+    test "an s3:// URL naming no bucket aborts" do
+      error = assert_raise Error, fn -> Config.build!(%{"AP_VARIANT_STORE" => "s3://"}) end
+
+      assert error.message =~ "AP_VARIANT_STORE"
+      assert error.message =~ "bucket"
+    end
+
+    test "a bucket name S3 cannot have aborts at boot, not at the first signature" do
+      error = assert_raise Error, fn -> Config.build!(%{"AP_VARIANT_STORE" => "s3://ab"}) end
+
+      assert error.message =~ "AP_VARIANT_STORE"
+      assert error.message =~ "3"
+    end
+
+    test "redirect serving against an s3:// store is admitted, unchanged validator" do
+      # The whole reason `AP_SERVE_MODE`'s documented default has been
+      # unreachable: no shipped backend could presign. Both the explicit and
+      # the defaulted mode, since the validator reads the effective one.
+      for env <- [%{}, %{"AP_SERVE_MODE" => "redirect"}] do
+        config = Config.build!(Map.put(env, "AP_VARIANT_STORE", "s3://variants"))
+
+        assert config.serve_mode == :redirect
+        assert config.variant_store == {:s3, "variants"}
+      end
     end
 
     test "the two-slash file URL typo is caught as such, not as a missing directory" do

@@ -170,6 +170,37 @@ costs more round trips against every provider here, because there is no
 in-memory streaming read in the S3 client and a read is assembled from
 sequential ranged GETs. Use it when you cannot redirect clients to storage.
 
+### What a variant store needs from a provider
+
+A bucket used for `AP_VARIANT_STORE` is doing more than holding bytes, and
+three behaviours are load-bearing. None of them is exotic — all three are in
+the S3 API every provider on this page implements — but a redirect fails
+*visibly to the client* when one is missing, so they are worth checking against
+a provider not listed here.
+
+1. **Object metadata survives the write and comes back on the read.** The
+   proxy stores each variant's `Content-Type` and `Cache-Control` as the
+   object's own headers and its ETag as `x-amz-meta-etag`, then reads them back
+   with a HEAD. A store that drops user metadata, or that overrides
+   `Content-Type` with a guess of its own, turns every hit into a miss — the
+   proxy treats an object without all three as not-a-variant rather than
+   serving a player headers it invented.
+2. **A presigned GET returns those headers, and honours `Range`.** In redirect
+   mode the client fetches the object with no proxy in the path, so what the
+   provider sends *is* the response: same `Content-Type` and `Cache-Control` a
+   proxied hit would have carried, and `206` for a `Range` the proxy is no
+   longer there to slice.
+3. **The credentials can write and delete.** At boot the proxy writes a small
+   object under `.audio-proxy-boot-probe/` and removes it, so a bucket that
+   refuses writes fails the container instead of discarding every write-back in
+   silence. A read-only key will not boot with an `s3://` store — which is the
+   intent, but it is the one thing on this list that fails *immediately* rather
+   than at first render.
+
+No provider on this page is known to diverge on any of the three. That is not
+the same as tested: MinIO is what CI runs against, here as everywhere else on
+this page.
+
 ## Limitations worth knowing before you commit
 
 **One endpoint for the whole deployment.** `AP_S3_ENDPOINT` is global, so

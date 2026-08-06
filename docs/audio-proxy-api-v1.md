@@ -258,7 +258,7 @@ Mid-stream render failure after `200` is signaled by abnormal termination of the
 | `AP_ALLOW_INSECURE` | Accept unsigned URLs (dev only) |
 | `AP_SOURCE_ALLOWLIST` | Comma-separated bucket/host patterns; unset accepts every bucket and refuses every host (§1) |
 | `AP_LOCAL_ROOT` | Root directory for `local://` sources; unset = local sources disabled. Must exist at boot |
-| `AP_VARIANT_STORE` | Variant store, scheme-tagged: `file:///path` or `s3://bucket` (S3 backend pending); unset = no cache, always render. `file://` must exist and be writable at boot |
+| `AP_VARIANT_STORE` | Variant store, scheme-tagged: `file:///path` or `s3://bucket`; unset = no cache, always render. Either scheme is proved writable at boot by performing a write and removing it — a directory that does not exist or refuses writes, or a bucket that is unreachable or refuses one, fails the container. `s3://` names a bucket only — a key prefix, a port or embedded credentials are refused rather than ignored |
 | `AP_MAX_CONCURRENCY` | Max simultaneous ffmpeg processes (default: CPU count). Coalesced requests share one, so this counts renders and not requests |
 | `AP_QUEUE_SIZE` | Requests that may wait for a slot before the next is answered `429` |
 | `AP_MAX_SRC_BYTES`, `AP_RENDER_TIMEOUT` | Abuse limits. `AP_MAX_SRC_BYTES` bounds the *source*, checked before a render starts — the `413` above |

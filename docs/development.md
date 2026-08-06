@@ -146,6 +146,17 @@ suite for the reason [Releases](#releases) gives: v0.3.0's notes announced S3
 rendering that no check exercised, and a release gate that cannot see S3 cannot
 catch that.
 
+The **`s3://` variant store** gets the same treatment, and one assertion no unit
+suite can make: a render is teed into a MinIO bucket, the same URL comes back as
+a `HIT` with a declared length and `Accept-Ranges`, and then the container that
+rendered it is *removed* and a second one — in `redirect` mode against the same
+bucket — answers `302` to a presigned store URL that the shipped ffprobe decodes
+to the fixture's duration. The cache outliving the process that filled it is the
+difference between this backend and `file://`, and it needs two containers to
+show. Reaching `/health` at all is already part of the claim: the boot probe
+writes and deletes under a reserved key prefix, so a bucket that refused writes
+would never get that far.
+
 ## Continuous integration
 
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on every push to
@@ -155,7 +166,7 @@ catch that.
 |---|---|---|---|
 | `test` | — | `mix format --check-formatted`, `mix compile --warnings-as-errors`, starts MinIO, then `mix test --include integration --include minio` | No external *binaries* — the untagged + `:integration` suite must pass on a bare runner |
 | `image-ffmpeg` | `test` | Builds the `test` and `runtime` stages, then `mix test --only ffmpeg` inside the image | Asserts the two stages carry the *same* ffmpeg build, and that its major matches [`VERSIONS.md`](../VERSIONS.md) |
-| `smoke` | `test` | Builds the release image, runs [`bin/smoke-image`](../bin/smoke-image) | Boot, health, an end-to-end render off a read-only mount, an `s3://` render against MinIO (and `502` once the store is gone), a signed percent-escaped URL over h2c, config validation, SIGTERM during a render |
+| `smoke` | `test` | Builds the release image, runs [`bin/smoke-image`](../bin/smoke-image) | Boot, health, an end-to-end render off a read-only mount, an `s3://` render against MinIO (and `502` once the store is gone), an `s3://` variant store served proxied and then redirected from a second container, a signed percent-escaped URL over h2c, config validation, SIGTERM during a render |
 | `capacity` | `test` | Runs [`bin/capacity-matrix --verify`](../bin/capacity-matrix), then builds the release image and runs [`bin/check-capacity`](../bin/check-capacity) twice | Drives a concurrent workload (two-hour source included) and asserts cgroup `memory.peak` stays inside the model [`docs/capacity.md`](capacity.md) publishes; the second run is the guard's own red-path check. The `--verify` step needs no image and checks the other direction — that every cell of that document's decision matrix really is the largest concurrency its column's memory limit holds |
 | `publish` | `smoke`, `image-ffmpeg`, `capacity` | Pushes to GHCR | Never runs for a pull request; see [Releases](#releases) |
 

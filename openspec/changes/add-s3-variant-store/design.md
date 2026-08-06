@@ -41,4 +41,8 @@ Alternative considered: probe with a HEAD on a nonexistent key, which proves cre
 
 ## Open Questions
 
-- Whether an upstream 5xx from the *store* should surface as `add-s3-source-backend`'s 502 or stay invisible. It splits by path: on a HIT lookup the honest answer is to treat it as a miss and render, since the render still produces correct bytes; in proxy mode mid-stream there is no status left to send. Resolve with the tests in front of us rather than here.
+- ~~Whether an upstream 5xx from the *store* should surface as `add-s3-source-backend`'s 502 or stay invisible.~~ — resolved in implementation, and by path as expected. The seam has two error values (`:not_found`, `:invalid_range`), so a lookup failure has nowhere else to go: every other failure becomes a miss and the request renders, which is honest because the render produces correct bytes whatever the cache did. Failing a request because the *cache* is unreachable would turn a degraded store into an outage.
+
+  What was not obvious beforehand is that "invisible" was the wrong second option. The failure is invisible *to the client* and loud to the operator: `Source.S3.classify/1` — reused rather than restated — says whether it was a miss, a misconfiguration or an outage, and anything that is not an ordinary miss is logged at warning with the bucket and key. "Every request is a MISS" is not a symptom anyone can debug from outside.
+
+  Mid-stream in proxy mode needed no decision after all: `AudioProxy.S3.get_stream/3` raises there, the response head is already sent, and §5's signal is an abnormal close.
