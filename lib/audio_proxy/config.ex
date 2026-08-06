@@ -32,6 +32,8 @@ defmodule AudioProxy.Config do
   | `AP_SERVE_MODE` | `redirect` \\| `proxy` | `:redirect` |
   | `AP_PRESIGN_TTL` | positive integer (seconds) | `300` |
   | `AP_LOG_LEVEL` | `debug` \\| `info` \\| `warning` \\| `error` | `:info` |
+  | `AP_METRICS_BIND` | IP address literal | `127.0.0.1` |
+  | `AP_METRICS_PORT` | positive integer | `9568` |
   | `AP_S3_ENDPOINT` | `http(s)://host[:port]` | unset (`nil`) — AWS proper |
 
   The listener port is read from `AP_PORT`, falling back to `PORT` (which the
@@ -98,6 +100,17 @@ defmodule AudioProxy.Config do
   # `no-store`, so nothing needs it to outlive the redirect it arrived in.
   @default_presign_ttl 300
 
+  # The scrape endpoint is unsigned, so the bind address *is* its access
+  # control (API doc §2). Loopback by default: a sidecar scraper and a
+  # `kubectl port-forward` both reach it, and nothing else does. Widening it to
+  # `0.0.0.0` is a deliberate act with a network policy behind it, not
+  # something an operator arrives at by leaving a variable unset.
+  @default_metrics_bind {127, 0, 0, 1}
+
+  # The port the Prometheus project's own allocation list reserves for a
+  # generic exporter, so a scrape config written from habit finds it.
+  @default_metrics_port 9568
+
   # Logger's own levels, narrowed to the four an operator has a reason to pick.
   # `:notice` and friends exist in OTP's scale but nothing here emits them, so
   # offering them would only be a way to configure a level with no meaning.
@@ -139,6 +152,8 @@ defmodule AudioProxy.Config do
           serve_mode: :redirect | :proxy,
           presign_ttl: pos_integer(),
           log_level: :debug | :info | :warning | :error,
+          metrics_bind: :inet.ip_address(),
+          metrics_port: pos_integer(),
           s3: s3()
         }
 
@@ -240,6 +255,8 @@ defmodule AudioProxy.Config do
       serve_mode: enum(env, "AP_SERVE_MODE", @serve_modes, :redirect),
       presign_ttl: integer(env, "AP_PRESIGN_TTL", @default_presign_ttl, :positive),
       log_level: enum(env, "AP_LOG_LEVEL", @log_levels, @default_log_level),
+      metrics_bind: ip(env, "AP_METRICS_BIND", @default_metrics_bind),
+      metrics_port: integer(env, "AP_METRICS_PORT", @default_metrics_port, :positive),
       s3: s3(env)
     })
   end
@@ -697,6 +714,29 @@ defmodule AudioProxy.Config do
           raise Error,
                 "#{var} must name a readable file, got: #{inspect(value)} (#{inspect(reason)})"
       end
+    end
+  end
+
+  # An address literal, never a hostname. A bind address has to name an
+  # interface this host actually has, and resolving a name to one would make
+  # the access control of an unsigned endpoint depend on DNS — which can
+  # change under a running process, and which an operator reading the variable
+  # cannot check. `:inet.parse_address/1` takes both families, so an IPv6
+  # deployment writes `::1` and gets loopback.
+  defp ip(env, var, default) do
+    case fetch(env, var) do
+      nil ->
+        default
+
+      value ->
+        case :inet.parse_address(String.to_charlist(value)) do
+          {:ok, address} ->
+            address
+
+          {:error, :einval} ->
+            raise Error,
+                  "#{var} must be an IP address literal, not a hostname (127.0.0.1, 0.0.0.0, ::1), got: #{inspect(value)}"
+        end
     end
   end
 
