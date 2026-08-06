@@ -285,7 +285,7 @@ more render — by output format and by whether `norm` (single-pass `loudnorm`,
 the heaviest filter the API offers) is applied. Shared library text is `T_ffmpeg`
 above and is deliberately not in these figures. Produced by
 `bin/measure-ffmpeg-rss` against the ffmpeg the runtime image ships; see
-[Regenerating this table](#regenerating-this-table).
+[Regenerating these tables](#regenerating-these-tables).
 
 <!-- rss-table:begin -->
 

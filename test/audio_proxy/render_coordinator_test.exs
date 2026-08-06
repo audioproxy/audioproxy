@@ -297,7 +297,7 @@ defmodule AudioProxy.RenderCoordinatorTest do
       assert retried.bytes == @paced_bytes
     end
 
-    test "output past the retention cap fails the render for everyone" do
+    test "output past the retention cap fails the render" do
       # Well under what `emit` below produces, so the cap is what stops it.
       put_config(%{max_variant_bytes: 100})
 
