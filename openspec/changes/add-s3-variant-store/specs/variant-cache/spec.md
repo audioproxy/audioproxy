@@ -16,8 +16,12 @@ The system SHALL address the variant store through a storage behaviour selected 
 - **THEN** every request renders (200 chunked) and nothing is written back
 
 #### Scenario: Unusable store value fails at boot
-- **WHEN** `AP_VARIANT_STORE` names an unknown scheme, a `file://` path that does not exist or is not writable, or an `s3://` bucket that is unreachable or refuses a write
-- **THEN** the container exits nonzero with an error naming the variable
+- **WHEN** `AP_VARIANT_STORE` names an unknown scheme, a `file://` path that does not exist or is not writable, or an `s3://` bucket that is unreachable, refuses a write, or refuses to remove what it just accepted
+- **THEN** the container exits nonzero with an error naming the variable, and a refused write and a refused removal say which one happened — the second leaves an object behind and needs a different permission granted
+
+#### Scenario: A store URL that says more than the scheme supports fails at boot
+- **WHEN** an `s3://` value carries a key prefix, a port, embedded credentials, a query or a fragment
+- **THEN** the container exits nonzero rather than ignoring the part it cannot honour, and an error naming credentials does not echo them
 
 ### Requirement: Serve mode must be supported by the store
 The system SHALL treat redirect serving as a capability of the configured backend, and SHALL refuse at boot to run a serve mode the store cannot satisfy. The `s3://` backend SHALL declare the presign capability, which is what makes `AP_SERVE_MODE=redirect` — the documented default — reachable.
