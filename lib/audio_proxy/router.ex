@@ -87,6 +87,16 @@ defmodule AudioProxy.Router do
     |> send_resp(ready_status(ready?), "")
   end
 
+  # `/metrics` is served on its own listener (`AudioProxy.Metrics.Router`), and
+  # saying so here is the only way this listener answers what it means. Without
+  # the route it would match the signed one below with an empty `rest`, and an
+  # operator who pointed a scraper at the wrong port would get a 401 about a
+  # signature — a message about the wrong problem entirely. It is also the
+  # honest status: the scrape surface is genuinely not here.
+  match "/metrics", via: [:get, :head] do
+    not_found(conn)
+  end
+
   get "/:sig/*rest" do
     conn
     |> assign(:endpoint_class, :render)
@@ -102,6 +112,10 @@ defmodule AudioProxy.Router do
   end
 
   match _ do
+    not_found(conn)
+  end
+
+  defp not_found(conn) do
     conn
     |> assign(:endpoint_class, :unknown)
     |> assign(:error_class, :not_found)
