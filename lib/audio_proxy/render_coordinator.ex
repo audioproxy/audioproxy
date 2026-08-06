@@ -73,13 +73,25 @@ defmodule AudioProxy.RenderCoordinator do
 
   Because the bytes are held anyway, the pipeline is acknowledged the moment a
   chunk arrives, and the pipeline's own high-water mark stops being the bound.
-  What bounds this instead is `AP_MAX_SRC_BYTES`: a render whose output passes
-  it fails for every subscriber rather than growing without limit. That ceiling
-  is a source-size limit doing double duty, which is honest for the
-  preview-sized outputs v1 targets and is the reason the escalation is written
-  down — the named-pipe (FIFO) pattern in `AudioProxy.Ffmpeg.Render`'s
-  moduledoc spools instead of retaining, and nothing in the contract above
-  changes when it lands.
+  What bounds this instead is `AP_MAX_VARIANT_BYTES`: a render whose output
+  passes it fails for every subscriber rather than growing without limit. It is
+  a ceiling on the *variant*, separate from `AP_MAX_SRC_BYTES`'s ceiling on the
+  source, so a deployment can accept two-hour masters and still bound one
+  render's retention to a preview's worth of bytes. It defaults to the
+  effective `AP_MAX_SRC_BYTES`, so a deployment that sets neither is bounded
+  exactly where it was before the two were separated.
+
+  The breach is only detectable once the response has committed to `200` and
+  begun streaming, so it is a failed request rather than a `413` — the source
+  ceiling stays the only one enforced before a render starts. That is the
+  reason the escalation is written down: the named-pipe (FIFO) pattern in
+  `AudioProxy.Ffmpeg.Render`'s moduledoc spools instead of retaining, and
+  nothing in the contract above changes when it lands.
+
+  Raising the ceiling does not buy capacity. It bounds one render while the
+  bill is `AP_MAX_CONCURRENCY × backlog`, so raising it licenses every slot to
+  reach the larger figure — which turns one killed render into an exhausted
+  container. `docs/capacity.md` has the arithmetic.
 
   ## Teardown
 
@@ -615,14 +627,14 @@ defmodule AudioProxy.RenderCoordinator do
 
   defp retain(state, data) do
     bytes = state.bytes + byte_size(data)
-    limit = Config.get(:max_src_bytes)
+    limit = Config.get(:max_variant_bytes)
 
     if bytes > limit do
       {:error,
        %{
          class: :render_failed,
          exit_status: nil,
-         detail: "render output exceeded the #{limit}-byte retention cap (AP_MAX_SRC_BYTES)"
+         detail: "render output exceeded the #{limit}-byte retention cap (AP_MAX_VARIANT_BYTES)"
        }}
     else
       {:ok, %{state | backlog: [data | state.backlog], bytes: bytes}}

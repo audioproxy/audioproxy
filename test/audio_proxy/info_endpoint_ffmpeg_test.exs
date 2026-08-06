@@ -70,6 +70,7 @@ defmodule AudioProxy.InfoEndpointFfmpegTest do
       allow_insecure: false,
       local_root: root,
       max_src_bytes: 2_000_000_000,
+      max_variant_bytes: 2_000_000_000,
       probe_timeout: 30
     })
 

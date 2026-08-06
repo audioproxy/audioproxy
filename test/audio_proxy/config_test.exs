@@ -19,6 +19,7 @@ defmodule AudioProxy.ConfigTest do
                max_concurrency: System.schedulers_online(),
                queue_size: 32,
                max_src_bytes: 2_000_000_000,
+               max_variant_bytes: 2_000_000_000,
                render_timeout: 300,
                probe_timeout: 10,
                serve_mode: :redirect,
@@ -61,6 +62,39 @@ defmodule AudioProxy.ConfigTest do
       assert config.max_src_bytes == 1_048_576
       assert config.render_timeout == 90
       assert config.presign_ttl == 60
+    end
+
+    test "AP_MAX_VARIANT_BYTES defaults to the effective AP_MAX_SRC_BYTES" do
+      # The upgrade path. An operator who raised the source ceiling to accept
+      # large masters keeps the retention bound they have today, rather than
+      # being tightened to the shipped 2 GB default behind their back.
+      config = Config.build!(%{"AP_MAX_SRC_BYTES" => "3000000000"})
+
+      assert config.max_src_bytes == 3_000_000_000
+      assert config.max_variant_bytes == 3_000_000_000
+    end
+
+    test "AP_MAX_VARIANT_BYTES set below the source ceiling is the retention bound" do
+      # The split the change exists for: accept big inputs, produce small
+      # outputs. The two numbers are independent once both are named.
+      config =
+        Config.build!(%{
+          "AP_MAX_SRC_BYTES" => "3000000000",
+          "AP_MAX_VARIANT_BYTES" => "268435456"
+        })
+
+      assert config.max_src_bytes == 3_000_000_000
+      assert config.max_variant_bytes == 268_435_456
+    end
+
+    test "AP_MAX_VARIANT_BYTES above the source ceiling is allowed" do
+      # Not a contradiction: a source of unknown size passes the stat check, so
+      # a retention bound above the source ceiling is a coherent thing to want
+      # and there is nothing to refuse.
+      config =
+        Config.build!(%{"AP_MAX_SRC_BYTES" => "1000", "AP_MAX_VARIANT_BYTES" => "2000"})
+
+      assert config.max_variant_bytes == 2000
     end
 
     test "AP_QUEUE_SIZE accepts zero (no waiting, straight to 429)" do
@@ -523,7 +557,7 @@ defmodule AudioProxy.ConfigTest do
     end
 
     for var <-
-          ~w(AP_MAX_CONCURRENCY AP_MAX_SRC_BYTES AP_RENDER_TIMEOUT AP_PRESIGN_TTL AP_PORT PORT) do
+          ~w(AP_MAX_CONCURRENCY AP_MAX_SRC_BYTES AP_MAX_VARIANT_BYTES AP_RENDER_TIMEOUT AP_PRESIGN_TTL AP_PORT PORT) do
       test "#{var} must be a positive integer" do
         for value <- ~w(0 -1 abc 1.5 12kb) do
           error = assert_raise Error, fn -> Config.build!(%{unquote(var) => value}) end

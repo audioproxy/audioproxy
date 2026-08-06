@@ -27,7 +27,7 @@ defmodule AudioProxy.RenderCoordinatorTest do
   @deadline 5_000
 
   setup do
-    put_config(%{max_src_bytes: 2_000_000_000})
+    put_config(%{max_src_bytes: 2_000_000_000, max_variant_bytes: 2_000_000_000})
     reset_coordinators()
     :ok
   end
@@ -299,16 +299,70 @@ defmodule AudioProxy.RenderCoordinatorTest do
 
     test "output past the retention cap fails the render for everyone" do
       # Well under what `emit` below produces, so the cap is what stops it.
-      put_config(%{max_src_bytes: 100})
+      put_config(%{max_variant_bytes: 100})
 
       key = unique_key()
       result = subscribe_and_collect(key, ["emit", "4096"])
 
       assert {:error, %{class: :render_failed, detail: detail}} = result.outcome
-      assert detail =~ "AP_MAX_SRC_BYTES"
+      assert detail =~ "AP_MAX_VARIANT_BYTES"
+      assert detail =~ "100-byte"
 
       # Failed cleanly: no subprocess left behind, and the key is free again.
       assert %{status: :miss} = subscribe_and_collect(key, ["emit", "10"])
+    end
+
+    test "the cap is a ceiling, not a fence: output of exactly it survives" do
+      # The threshold, stated on both sides. `@paced` produces exactly
+      # `@paced_bytes`, so a cap of that size is the last value that passes and
+      # one byte less is the first that does not — which is what makes "the
+      # same threshold as before the split" a checkable claim rather than a
+      # hope about a 2 GB number nothing in this suite can reach.
+      put_config(%{max_variant_bytes: byte_size(@paced_bytes)})
+      assert subscribe_and_collect(unique_key(), @paced).outcome == :ok
+
+      put_config(%{max_variant_bytes: byte_size(@paced_bytes) - 1})
+
+      assert {:error, %{class: :render_failed}} =
+               subscribe_and_collect(unique_key(), @paced).outcome
+    end
+
+    test "the source ceiling no longer bounds retention" do
+      # The point of the split. A source ceiling far below the output is now
+      # simply irrelevant here — it is spent in `Plugs.RenderAction`, against
+      # the source, before this coordinator exists.
+      put_config(%{max_src_bytes: 10, max_variant_bytes: 2_000_000_000})
+
+      assert subscribe_and_collect(unique_key(), @paced).outcome == :ok
+    end
+
+    test "a breach fails every attached subscriber and releases the key" do
+      put_config(%{max_variant_bytes: 100})
+
+      key = unique_key()
+
+      results =
+        1..5
+        |> Task.async_stream(fn _ -> subscribe_and_collect(key, ["emit", "4096"]) end,
+          max_concurrency: 5,
+          timeout: @deadline
+        )
+        |> Enum.map(fn {:ok, result} -> result end)
+
+      # One render, five subscribers, five failures: nobody is left holding a
+      # truncated stream that never terminates.
+      assert [_one_render] = Enum.uniq(Enum.map(results, & &1.render))
+
+      for result <- results do
+        assert {:error, %{class: :render_failed, detail: detail}} = result.outcome
+        assert detail =~ "AP_MAX_VARIANT_BYTES"
+        assert result.terminal_messages == 1
+      end
+
+      # And the key went with the render, so the next request renders afresh
+      # rather than joining a corpse.
+      put_config(%{max_variant_bytes: 2_000_000_000})
+      assert %{status: :miss, outcome: :ok} = subscribe_and_collect(key, ["emit", "10"])
     end
   end
 

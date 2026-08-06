@@ -7,8 +7,9 @@ defmodule AudioProxy.Plugs.RenderAction do
   `AudioProxy.Source.stat/1` answers a missing (or non-regular, or
   gone-unreadable) source with the same generic 404 as an unauthorized one,
   and a source whose size exceeds `AP_MAX_SRC_BYTES` with 413. A source of
-  unknown size passes — `AP_MAX_SRC_BYTES` is then the render pipeline's byte
-  cap, per the `AudioProxy.Source.Type` contract.
+  unknown size passes — what bounds it then is `AP_MAX_VARIANT_BYTES`, the
+  render pipeline's cap on retained *output*, per the
+  `AudioProxy.Source.Type` contract.
 
   Then the render: `AudioProxy.Source.ffmpeg_input/1` says what ffmpeg should
   read, `AudioProxy.Ffmpeg.Command.build/2` says how, and

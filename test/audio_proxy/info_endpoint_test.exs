@@ -44,6 +44,7 @@ defmodule AudioProxy.InfoEndpointTest do
       allow_insecure: false,
       local_root: tmp_dir,
       max_src_bytes: 2_000_000_000,
+      max_variant_bytes: 2_000_000_000,
       # Short enough that the timeout test is not the slowest in the suite,
       # long enough that a loaded machine does not trip it spuriously.
       probe_timeout: 1

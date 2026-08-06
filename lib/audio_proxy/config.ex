@@ -24,6 +24,7 @@ defmodule AudioProxy.Config do
   | `AP_MAX_CONCURRENCY` | positive integer | `System.schedulers_online/0` |
   | `AP_QUEUE_SIZE` | non-negative integer | `32` |
   | `AP_MAX_SRC_BYTES` | positive integer | `2_000_000_000` |
+  | `AP_MAX_VARIANT_BYTES` | positive integer | the effective `AP_MAX_SRC_BYTES` |
   | `AP_RENDER_TIMEOUT` | positive integer (seconds) | `300` |
   | `AP_PROBE_TIMEOUT` | positive integer (seconds) | `10` |
   | `AP_SERVE_MODE` | `redirect` \\| `proxy` | `:redirect` |
@@ -110,6 +111,7 @@ defmodule AudioProxy.Config do
           max_concurrency: pos_integer(),
           queue_size: non_neg_integer(),
           max_src_bytes: pos_integer(),
+          max_variant_bytes: pos_integer(),
           render_timeout: pos_integer(),
           probe_timeout: pos_integer(),
           serve_mode: :redirect | :proxy,
@@ -159,6 +161,14 @@ defmodule AudioProxy.Config do
   """
   @spec build!(map()) :: t()
   def build!(env) when is_map(env) do
+    # Resolved before the map so `AP_MAX_VARIANT_BYTES` can fall back to the
+    # *effective* source ceiling rather than to the shipped default: an operator
+    # who already raised `AP_MAX_SRC_BYTES` to accept large masters keeps the
+    # retention bound they have today instead of being silently tightened.
+    # Resolving here, once, also keeps the coordinator's hot path reading one
+    # number with no fallback logic in it.
+    max_src_bytes = integer(env, "AP_MAX_SRC_BYTES", @default_max_src_bytes, :positive)
+
     validate!(%{
       port: port(env),
       key: hex(env, "AP_KEY", @min_key_bytes),
@@ -169,7 +179,8 @@ defmodule AudioProxy.Config do
       variant_store: store(env, "AP_VARIANT_STORE"),
       max_concurrency: integer(env, "AP_MAX_CONCURRENCY", System.schedulers_online(), :positive),
       queue_size: integer(env, "AP_QUEUE_SIZE", @default_queue_size, :non_negative),
-      max_src_bytes: integer(env, "AP_MAX_SRC_BYTES", @default_max_src_bytes, :positive),
+      max_src_bytes: max_src_bytes,
+      max_variant_bytes: integer(env, "AP_MAX_VARIANT_BYTES", max_src_bytes, :positive),
       render_timeout: integer(env, "AP_RENDER_TIMEOUT", @default_render_timeout, :positive),
       probe_timeout: integer(env, "AP_PROBE_TIMEOUT", @default_probe_timeout, :positive),
       serve_mode: enum(env, "AP_SERVE_MODE", @serve_modes, :redirect),

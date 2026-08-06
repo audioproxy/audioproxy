@@ -36,7 +36,8 @@ defmodule AudioProxy.RequestLoggingIntegrationTest do
       salt: @salt,
       allow_insecure: false,
       local_root: tmp_dir,
-      max_src_bytes: 2_000_000_000
+      max_src_bytes: 2_000_000_000,
+      max_variant_bytes: 2_000_000_000
     })
 
     bandit =

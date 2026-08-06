@@ -48,9 +48,11 @@ defmodule AudioProxy.Source.Type do
 
   `size` is `nil` when the backing store genuinely does not know it — an
   origin that answers a HEAD without `Content-Length`, say. That is not an
-  error: `AP_MAX_SRC_BYTES` is then enforced downstream by the render byte
-  cap, and refusing outright would make the proxy less capable than the
-  ffmpeg it drives.
+  error: the render byte cap (`AP_MAX_VARIANT_BYTES`) still bounds what such a
+  source can cost, one render's retained output at a time, and refusing
+  outright would make the proxy less capable than the ffmpeg it drives. What
+  goes unenforced is only `AP_MAX_SRC_BYTES` itself, which needs a size to
+  compare against.
 
   `etag` is whatever that store can offer as a version marker — an S3 ETag, a
   size-and-mtime hash for a local file — and feeds conditional requests on
