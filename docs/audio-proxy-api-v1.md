@@ -61,10 +61,13 @@ Example:
 | `GET /{sig}/{options}/{source}` | Rendered audio variant (the core resource) |
 | `GET /{sig}/info/{source}` | Probe metadata as JSON (no processing options) |
 | `GET /{sig}/f:peaks/…/{source}` | Waveform peaks (a *format*, not a separate resource — see §3.3) |
-| `GET /health` | Liveness/readiness (unsigned) |
+| `GET /health` | Liveness (unsigned) — `200` whatever the load; a busy proxy is a working proxy |
+| `GET /ready` | Readiness (unsigned) — `200` while the node should receive new work, `503` once queue depth reaches `AP_READY_QUEUE_THRESHOLD`, recovering at half of it. Body: `{"status": "ready"\|"not_ready", "queued": n, "threshold": n}` |
 | `GET /metrics` | Prometheus metrics (unsigned, bind-address-restricted) |
 | `GET /hls/{sig}/{options}/{source}/index.m3u8` | **Reserved for v2** — segmented streaming |
 | `GET /hls/{sig}/{options}/{source}/seg-{n}.m4s` | **Reserved for v2** |
+
+**`/ready`'s `503` is a verdict, not an error**, and three consequences follow from that. Its body is `{"status", "queued", "threshold"}` rather than the `{"error", "message"}` envelope of §5 — a client generated from the error table must not expect that shape here. It carries no `Retry-After`, unlike the `429` that backpressure produces: a balancer reading this reroutes to another node immediately rather than waiting, so the header would be advice nobody acts on. And it reports live capacity numbers to an unsigned caller, which is deliberate — they are what make a failing probe diagnosable — but it does mean `/ready` is the one unsigned endpoint that discloses current load, and an operator who cares can strip the body at the edge without affecting the status.
 
 No write endpoints in v1: variant write-back to S3 is a side effect of a GET render, not a client-facing API. Methods other than GET answer `404`, everywhere: the signed space is GET-only, and a `405` would confirm a route's shape without telling a client anything useful.
 
@@ -213,7 +216,7 @@ Both begin delivering before the variant is complete or fully read. What a clien
 
 Every response, success or error, carries an explicit `Cache-Control` — no CDN negative-caching default ever decides retention:
 
-- Errors: `404`/`413`/`415` → `max-age=10` (verdicts about the current source bytes; a re-upload changes them), `401`/`422` → `max-age=60` (pure functions of the URL; only a deploy changes them), `416`/`429`/`5xx` → `no-store` (transient, or — for `416` — dependent on a request header no `Vary` declares). The `502` row inherits that rather than inventing it, and the inheritance is the point: a store outage is exactly the failure that must not be cached, since the retry it suppresses is the one that would have worked. `/health` and the unmatched-route `404` state theirs too (`no-store` and `max-age=10`).
+- Errors: `404`/`413`/`415` → `max-age=10` (verdicts about the current source bytes; a re-upload changes them), `401`/`422` → `max-age=60` (pure functions of the URL; only a deploy changes them), `416`/`429`/`5xx` → `no-store` (transient, or — for `416` — dependent on a request header no `Vary` declares). The `502` row inherits that rather than inventing it, and the inheritance is the point: a store outage is exactly the failure that must not be cached, since the retry it suppresses is the one that would have worked. `/health`, `/ready` and the unmatched-route `404` state theirs too (`no-store`, `no-store` and `max-age=10`).
 - **Conditional requests**: an `If-None-Match` matching the URL-derived `ETag` answers `304` with `ETag` and `Cache-Control`, no body, no render, no storage access. Placed after signature verification — never an existence oracle for unsigned probes.
 - **HEAD** on signed endpoints answers the status and headers a `GET` would, through the full check chain including the source stat, with an empty body and no render subprocess. Errors as `GET`, bodiless. No `X-Audio-Proxy`: that header reports a render's outcome, and none ran. It deliberately does **not** consult the variant cache, so it reports the render path's framing even where a `GET` would answer a HIT's, or a `302`; making HEAD the one request whose answer depends on cache state would invite clients to build on exactly what the framing contract above tells them not to.
 - **Range on a MISS is ignored**: the full `200` chunked stream, no `Accept-Ranges`, no `206`/`416` (RFC 9110 §14.2 permits ignoring `Range`). `206` semantics belong to cached variants — served by the proxy or by storage, per the serve mode.
@@ -261,6 +264,7 @@ Mid-stream render failure after `200` is signaled by abnormal termination of the
 | `AP_VARIANT_STORE` | Variant store, scheme-tagged: `file:///path` or `s3://bucket`; unset = no cache, always render. Either scheme is proved writable at boot by performing a write and removing it — a directory that does not exist or refuses writes, or a bucket that is unreachable or refuses one, fails the container. `s3://` names a bucket only — a key prefix, a port or embedded credentials are refused rather than ignored |
 | `AP_MAX_CONCURRENCY` | Max simultaneous ffmpeg processes (default: CPU count). Coalesced requests share one, so this counts renders and not requests |
 | `AP_QUEUE_SIZE` | Requests that may wait for a slot before the next is answered `429` |
+| `AP_READY_QUEUE_THRESHOLD` | Queue depth at which `/ready` answers `503`, recovering at half of it rounded down (default: half `AP_QUEUE_SIZE` rounded down, minimum 1; `0` disables, as does `AP_QUEUE_SIZE=0`). Refused above `AP_QUEUE_SIZE`, where it could never trip |
 | `AP_MAX_SRC_BYTES`, `AP_RENDER_TIMEOUT` | Abuse limits. `AP_MAX_SRC_BYTES` bounds the *source*, checked before a render starts — the `413` above |
 | `AP_MAX_VARIANT_BYTES` | Bytes one render may retain, defaulting to the effective `AP_MAX_SRC_BYTES`. Output past it kills the render; the response has already committed to `200`, so the outcome is a failed stream rather than a `413` |
 | `AP_PROBE_TIMEOUT` | Seconds an `/info` probe may take before ffprobe is killed and the request answered `504` (default: 10). Separate from `AP_RENDER_TIMEOUT` because a probe reads headers rather than decoding — see §4.3 |

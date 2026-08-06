@@ -36,10 +36,11 @@ defmodule AudioProxy.LogHandler do
 
   2xx–4xx at info: a client error is a normal outcome for a public endpoint
   and an operator paging on 401s would learn to ignore the log. 5xx and
-  timeouts at warning — those are the proxy's fault. `/health` at debug,
-  filtered here by endpoint class: a liveness probe every second would
-  otherwise be the entire log, and splitting the router to avoid it would buy
-  the same silence for more moving parts.
+  timeouts at warning — those are the proxy's fault. `/health` and `/ready` at
+  debug, filtered here by endpoint class: probes every second would otherwise
+  be the entire log, and splitting the router to avoid it would buy the same
+  silence for more moving parts. That covers `/ready`'s 503 too — a node
+  declining work is the mechanism doing its job, not an incident.
 
   `AP_LOG_LEVEL` sets the floor (`AudioProxy.Config`), so `warning` silences
   the happy path wholesale.
@@ -270,7 +271,10 @@ defmodule AudioProxy.LogHandler do
   defp request_level(conn) do
     cond do
       not is_integer(conn.status) -> :warning
-      conn.assigns[:endpoint_class] == :health -> :debug
+      # Both probes are polled every few seconds per node; at info they would
+      # be most of the log. A `/ready` 503 is deliberately not promoted past
+      # this — it is the endpoint working, not the node in trouble.
+      conn.assigns[:endpoint_class] in [:health, :ready] -> :debug
       conn.status >= 500 -> :warning
       true -> :info
     end

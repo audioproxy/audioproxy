@@ -510,6 +510,7 @@ Note that the variables below are the full configuration surface for the design,
 | `AP_VARIANT_STORE` | URL (`file:///path`, `s3://bucket`) | unset | Where rendered variants are written back; unset = no cache, always render. Probed for writability at boot. See [Variant store](#variant-store) |
 | `AP_MAX_CONCURRENCY` | positive integer | schedulers online | Max simultaneous ffmpeg processes. Requests that share a render share its slot, so this counts encodes, not connections |
 | `AP_QUEUE_SIZE` | non-negative integer | `32` | Requests that may wait for a slot before the next one is answered `429` with `Retry-After`. `0` means no waiting at all |
+| `AP_READY_QUEUE_THRESHOLD` | non-negative integer, ≤ `AP_QUEUE_SIZE` | half `AP_QUEUE_SIZE`, rounded down (min 1) | Queue depth at which `/ready` answers `503`; it recovers again at half the threshold, rounded down. `0` disables the check, which is what a single node wants. See [Health and readiness](#health-and-readiness) |
 | `AP_MAX_SRC_BYTES` | positive integer | `2000000000` | Reject larger sources with `413`, before any render starts. Does not apply to `/info`, which only reads headers |
 | `AP_MAX_VARIANT_BYTES` | positive integer | the effective `AP_MAX_SRC_BYTES` | Cap the bytes one render may hold in memory; output past it kills the render and fails the request mid-stream. Set it below `AP_MAX_SRC_BYTES` to accept large sources while producing small outputs. Raising it does **not** buy capacity — it bounds one render, so every concurrent slot may reach it; the lever for the total is `AP_MAX_CONCURRENCY`. See [docs/capacity.md](docs/capacity.md) |
 | `AP_RENDER_TIMEOUT` | positive integer | `300` | Seconds a render may take before ffmpeg is killed and the request answered `504`. Raise it for full-length transcodes of long masters; the default suits previews. See [docs/rendering.md](docs/rendering.md) |
@@ -633,7 +634,7 @@ The proxy is built to sit behind a CDN without special configuration on either s
 | `416` | `no-store` | The only response whose body depends on a request header, and nothing here sends `Vary: Range` |
 | `429`, `500`, `502`, `504` | `no-store` | Transient — caching a transient failure amplifies it (`429` carries `Retry-After`, and a cached `502` would suppress the retry that would have worked) |
 | `200` from `/info` | `public, max-age=3600` | Not `immutable`, and not a year: the metadata describes a source somebody may re-upload, so caches must be able to revalidate it. See [Asking what a source is](#asking-what-a-source-is) |
-| `/health` | `no-store` | Liveness is only worth anything fresh |
+| `/health`, `/ready` | `no-store` | Liveness is only worth anything fresh, and a stored readiness verdict is advice about a load level that has since moved |
 
 The error rows are a deliberate relaxation, worth knowing if you operate a shared cache: without them every response would carry Plug's `max-age=0, private, must-revalidate`, so errors were previously not cacheable at all and never shareable. Dropping `private` is safe here because an error body is a pure function of the URL — no cookies, no auth headers, nothing per-user in it. The practical effect is that a hot 404 or a bad-signature storm is absorbed at the edge instead of reaching the origin every time. If you need the old behavior for a specific deployment, an edge rule overriding `Cache-Control` on 4xx is the place to do it; the proxy has no knob for it by design.
 
@@ -642,6 +643,32 @@ Three behaviors round out the CDN-facing surface:
 - **Revalidation costs no render.** A request whose `If-None-Match` matches the variant's `ETag` answers `304` before the proxy touches storage or spawns anything — the ETag derives from the URL alone. The signature still gates: an unsigned request is `401`, matching validator or not. On `/info` the validator comes from the source object rather than the URL, so revalidating there costs one `stat` and still no probe.
 - **HEAD works.** `HEAD` on a signed URL runs every check a `GET` runs — signature, options, source authorization and stat — with an empty body and no render. Errors answer as `GET` does, bodiless. `HEAD /health` works too. Two caveats if you use it to validate URLs. Because it neither decodes nor probes, it cannot report a source ffmpeg would reject or one that turns out to be video, so a `HEAD` can answer `200` where the `GET` answers either `415`; everything decidable without a subprocess (`401`, `404`, `413`, `422`) matches the `GET` exactly. And it does not consult the variant cache, so it reports the render path's framing, never a hit's `content-length` or its `302`.
 - **`Range` on an uncached variant is ignored.** A `Range` header on a variant that has to be rendered gets the full `200` chunked stream (RFC 9110 permits this), with no `Accept-Ranges` and no `206`. Range serving belongs to cached variants: a hit answers `206` in proxy mode, or redirects to storage that serves it natively. A range no byte of a cached variant can satisfy is a `416`; one this proxy does not implement (several ranges at once, a unit other than `bytes`) is ignored, and answers the whole variant rather than failing. See [Cache semantics](#cache-semantics).
+
+## Health and readiness
+
+Two unsigned endpoints, and they are not interchangeable:
+
+| | Question it answers | What a failure means |
+|---|---|---|
+| `GET /health` | Is this running? | Restart it |
+| `GET /ready` | Should this node be sent new work? | Route elsewhere; do **not** restart |
+
+`/health` is pure liveness and is unaffected by load: a node with a full queue still answers `200`, because a busy proxy is a working proxy.
+
+`/ready` reports how deep the render queue is:
+
+```console
+$ curl -s localhost:4000/ready
+{"status":"ready","queued":0,"threshold":16}
+```
+
+It answers `503` once queue depth reaches `AP_READY_QUEUE_THRESHOLD`, and `200` again once depth has fallen to half of it, rounded down. The gap between those two marks is deliberate — it means one busy period produces one not-ready period, rather than a node flipping in and out of the pool on every poll. Both endpoints support `HEAD`, and both are `no-store`.
+
+On Kubernetes, point `livenessProbe` at `/health` and `readinessProbe` at `/ready`. Pointing a liveness probe at `/ready` restarts containers for being busy, which is the one mistake this pair exists to let you avoid.
+
+Set `AP_READY_QUEUE_THRESHOLD=0` on a single node: there is nowhere to route to, so shedding buys nothing. The default, half of `AP_QUEUE_SIZE`, is for fleets.
+
+Running more than one node — the shared variant store it requires, load balancer recipes, Kubernetes and Fly.io wiring — is [docs/scaling.md](docs/scaling.md).
 
 ## Logs
 
@@ -696,5 +723,6 @@ Elixir with Plug and [Bandit](https://github.com/mtrudel/bandit), and no Phoenix
 | [VERSIONS.md](VERSIONS.md) | What the image is built from: Debian, Elixir/OTP and ffmpeg pins, why not Alpine, and how to bump one |
 | [docs/ffmpeg-arguments.md](docs/ffmpeg-arguments.md) | How options become ffmpeg arguments: filter order, per-format flags, known gaps |
 | [docs/rendering.md](docs/rendering.md) | How a render runs: the subprocess, the chunk stream, coalescing, buffering and lifecycle guarantees |
+| [docs/scaling.md](docs/scaling.md) | Running more than one node: the shared variant store it requires, what duplicate renders cost, load balancer recipes, Kubernetes probes and autoscaling, Fly.io, Docker Swarm |
 | [docs/capacity.md](docs/capacity.md) | How much memory a container needs: a concurrency-per-memory-limit matrix, then the formula behind it, measured per-format costs, long-form worked examples, and what the CI guard asserts |
 | `openspec/specs/` | Capability specs for what is built; `openspec/changes/` holds what is planned |

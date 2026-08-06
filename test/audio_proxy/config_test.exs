@@ -18,6 +18,7 @@ defmodule AudioProxy.ConfigTest do
                variant_store: nil,
                max_concurrency: System.schedulers_online(),
                queue_size: 32,
+               ready_queue_threshold: 16,
                max_src_bytes: 2_000_000_000,
                max_variant_bytes: 2_000_000_000,
                render_timeout: 300,
@@ -99,6 +100,35 @@ defmodule AudioProxy.ConfigTest do
 
     test "AP_QUEUE_SIZE accepts zero (no waiting, straight to 429)" do
       assert Config.build!(%{"AP_QUEUE_SIZE" => "0"}).queue_size == 0
+    end
+
+    test "AP_READY_QUEUE_THRESHOLD defaults to half the queue, whatever the queue is" do
+      assert Config.build!(%{"AP_QUEUE_SIZE" => "64"}).ready_queue_threshold == 32
+      assert Config.build!(%{"AP_QUEUE_SIZE" => "8"}).ready_queue_threshold == 4
+
+      # Floored, but never to zero: a queue that can hold anything gets a
+      # threshold that can trip.
+      assert Config.build!(%{"AP_QUEUE_SIZE" => "1"}).ready_queue_threshold == 1
+    end
+
+    test "AP_QUEUE_SIZE of zero disables readiness, since there is no depth to read" do
+      assert Config.build!(%{"AP_QUEUE_SIZE" => "0"}).ready_queue_threshold == 0
+    end
+
+    test "AP_READY_QUEUE_THRESHOLD accepts zero (readiness disabled)" do
+      assert Config.build!(%{"AP_READY_QUEUE_THRESHOLD" => "0"}).ready_queue_threshold == 0
+    end
+
+    test "AP_READY_QUEUE_THRESHOLD is refused above AP_QUEUE_SIZE — it could never trip" do
+      assert_raise Error, ~r/AP_READY_QUEUE_THRESHOLD \(9\).*AP_QUEUE_SIZE \(8\)/, fn ->
+        Config.build!(%{"AP_QUEUE_SIZE" => "8", "AP_READY_QUEUE_THRESHOLD" => "9"})
+      end
+    end
+
+    test "AP_READY_QUEUE_THRESHOLD is refused when negative" do
+      assert_raise Error, ~r/AP_READY_QUEUE_THRESHOLD must be a non-negative integer/, fn ->
+        Config.build!(%{"AP_READY_QUEUE_THRESHOLD" => "-1"})
+      end
     end
 
     test "hex key and salt are decoded to binaries" do

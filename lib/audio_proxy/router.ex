@@ -2,12 +2,15 @@ defmodule AudioProxy.Router do
   @moduledoc """
   Top-level HTTP router.
 
-  `/health` is unsigned liveness. Everything else in the signed URL space — the
-  render endpoint and `/info`, which share a route — is dispatched to a
-  pipeline that verifies the signature before any other processing; an unsigned
-  or badly-signed request is a 401 from there, and anything that matches no
-  route at all is the JSON 404 below. The `metrics` route from
-  `docs/audio-proxy-api-v1.md` §2 arrives with its own slice.
+  `/health` is unsigned liveness and `/ready` unsigned readiness — the first
+  says the VM is up, the second says this node should be sent new work (see
+  `AudioProxy.Readiness`, and `docs/scaling.md` for how to wire them).
+  Everything else in the signed URL space — the render endpoint and `/info`,
+  which share a route — is dispatched to a pipeline that verifies the
+  signature before any other processing; an unsigned or badly-signed request
+  is a 401 from there, and anything that matches no route at all is the JSON
+  404 below. The `metrics` route from `docs/audio-proxy-api-v1.md` §2 arrives
+  with its own slice.
 
   The signed route binds `:sig` and `rest` for dispatch only. Neither binding
   is read downstream: the signature covers the raw request path, which
@@ -31,6 +34,7 @@ defmodule AudioProxy.Router do
   use Plug.Router
 
   alias AudioProxy.Plugs.RenderPipeline
+  alias AudioProxy.Readiness
 
   @render_pipeline RenderPipeline.init([])
 
@@ -57,6 +61,32 @@ defmodule AudioProxy.Router do
     |> send_resp(200, "")
   end
 
+  # Readiness, not liveness: a 503 here means "route elsewhere", never
+  # "restart me". `no-store` for the same reason `/health` has it — a cached
+  # verdict is advice about a load level that has since moved.
+  get "/ready" do
+    %{ready?: ready?, queued: queued, threshold: threshold} = Readiness.check()
+
+    conn
+    |> assign(:endpoint_class, :ready)
+    |> put_resp_header("cache-control", "no-store")
+    |> send_json(ready_status(ready?), %{
+      status: if(ready?, do: "ready", else: "not_ready"),
+      queued: queued,
+      threshold: threshold
+    })
+  end
+
+  head "/ready" do
+    %{ready?: ready?} = Readiness.check()
+
+    conn
+    |> assign(:endpoint_class, :ready)
+    |> put_resp_content_type("application/json")
+    |> put_resp_header("cache-control", "no-store")
+    |> send_resp(ready_status(ready?), "")
+  end
+
   get "/:sig/*rest" do
     conn
     |> assign(:endpoint_class, :render)
@@ -78,6 +108,9 @@ defmodule AudioProxy.Router do
     |> put_resp_header("cache-control", AudioProxy.ErrorJSON.cache_control(404))
     |> send_json(404, %{error: "not_found", message: "No such resource"})
   end
+
+  defp ready_status(true), do: 200
+  defp ready_status(false), do: 503
 
   defp send_json(conn, status, body) do
     conn

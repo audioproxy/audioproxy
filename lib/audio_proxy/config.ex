@@ -23,6 +23,7 @@ defmodule AudioProxy.Config do
   | `AP_VARIANT_STORE` | scheme-tagged URL (`file:///path`, `s3://bucket`) | unset (`nil`) — no variant cache |
   | `AP_MAX_CONCURRENCY` | positive integer | `System.schedulers_online/0` |
   | `AP_QUEUE_SIZE` | non-negative integer | `32` |
+  | `AP_READY_QUEUE_THRESHOLD` | non-negative integer, ≤ `AP_QUEUE_SIZE` | half the queue, floored, min 1 (`0` disables) |
   | `AP_MAX_SRC_BYTES` | positive integer | `2_000_000_000` |
   | `AP_MAX_VARIANT_BYTES` | positive integer | the effective `AP_MAX_SRC_BYTES` |
   | `AP_RENDER_TIMEOUT` | positive integer (seconds) | `300` |
@@ -116,6 +117,7 @@ defmodule AudioProxy.Config do
           variant_store: AudioProxy.VariantStore.config() | nil,
           max_concurrency: pos_integer(),
           queue_size: non_neg_integer(),
+          ready_queue_threshold: non_neg_integer(),
           max_src_bytes: pos_integer(),
           max_variant_bytes: pos_integer(),
           render_timeout: pos_integer(),
@@ -182,6 +184,12 @@ defmodule AudioProxy.Config do
     # number with no fallback logic in it.
     max_src_bytes = integer(env, "AP_MAX_SRC_BYTES", @default_max_src_bytes, :positive)
 
+    # Read ahead of the map for the same shape of reason: the default for
+    # `AP_READY_QUEUE_THRESHOLD` is a fraction of the queue, and a fixed number
+    # would be unreachable under a small queue and trip far too late under a
+    # large one.
+    queue_size = integer(env, "AP_QUEUE_SIZE", @default_queue_size, :non_negative)
+
     validate!(%{
       port: port(env),
       key: hex(env, "AP_KEY", @min_key_bytes),
@@ -191,7 +199,14 @@ defmodule AudioProxy.Config do
       local_root: directory(env, "AP_LOCAL_ROOT"),
       variant_store: store(env, "AP_VARIANT_STORE"),
       max_concurrency: integer(env, "AP_MAX_CONCURRENCY", System.schedulers_online(), :positive),
-      queue_size: integer(env, "AP_QUEUE_SIZE", @default_queue_size, :non_negative),
+      queue_size: queue_size,
+      ready_queue_threshold:
+        integer(
+          env,
+          "AP_READY_QUEUE_THRESHOLD",
+          default_ready_queue_threshold(queue_size),
+          :non_negative
+        ),
       max_src_bytes: max_src_bytes,
       max_variant_bytes: integer(env, "AP_MAX_VARIANT_BYTES", max_src_bytes, :positive),
       render_timeout: integer(env, "AP_RENDER_TIMEOUT", @default_render_timeout, :positive),
@@ -236,6 +251,14 @@ defmodule AudioProxy.Config do
   def s3_addressing_styles, do: @s3_addressing_styles
 
   ## Parsers
+
+  # Half the queue: deep enough that a node shrugging off a burst is not
+  # instantly ejected, shallow enough that the orchestrator learns about the
+  # backlog well before the queue is full and requests start becoming 429s.
+  # A queue of zero has no depth to measure, so readiness is disabled rather
+  # than permanently tripped by a gauge that can only ever read `0`.
+  defp default_ready_queue_threshold(0), do: 0
+  defp default_ready_queue_threshold(queue_size), do: max(1, div(queue_size, 2))
 
   defp port(env) do
     cond do
@@ -561,11 +584,38 @@ defmodule AudioProxy.Config do
 
   defp probe_store!(config), do: config
 
+  # Every cross-field rule, in one place. Each stage takes the whole config and
+  # returns it, so adding one is adding a line here rather than another clause
+  # on a function that was already matching on two unrelated keys.
+  defp validate!(config) do
+    config
+    |> validate_redirect_presign!()
+    |> validate_ready_queue_threshold!()
+  end
+
+  # Cross-field: the semaphore never queues more than `AP_QUEUE_SIZE` waiters,
+  # so a threshold above it is a readiness check that can never trip. Refused
+  # at boot rather than left to be discovered as a `/ready` that answered 200
+  # through an outage.
+  defp validate_ready_queue_threshold!(
+         %{ready_queue_threshold: threshold, queue_size: queue_size} = config
+       ) do
+    if threshold > queue_size do
+      raise Error,
+            "AP_READY_QUEUE_THRESHOLD (#{threshold}) must not exceed AP_QUEUE_SIZE (#{queue_size}) — " <>
+              "queue depth cannot reach it, so /ready could never report the node as unready"
+    end
+
+    config
+  end
+
   # Cross-field: redirect serving is a 302 to a presigned variant URL, which
   # only a backend with the `:presign` capability can produce. Refused at boot
   # — naming both variables, since either can resolve it — rather than failing
   # on every HIT.
-  defp validate!(%{serve_mode: :redirect, variant_store: {scheme, _} = store} = config) do
+  defp validate_redirect_presign!(
+         %{serve_mode: :redirect, variant_store: {scheme, _} = store} = config
+       ) do
     backend = AudioProxy.VariantStore.backend_for(store)
 
     if :presign in backend.capabilities() do
@@ -577,7 +627,7 @@ defmodule AudioProxy.Config do
     end
   end
 
-  defp validate!(config), do: config
+  defp validate_redirect_presign!(config), do: config
 
   # Checked here rather than on the request path so that a container pointed at
   # a directory that is not mounted fails to boot, instead of answering every
