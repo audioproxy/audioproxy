@@ -24,4 +24,4 @@ AI agents are increasingly the ones integrating APIs — generating signed URLs,
 
 - New: `priv/llms/llms.txt`, `priv/llms/llms-full.txt` (or module attributes), routes in the router, drift-guard tests.
 - Modified: CLAUDE.md conventions section.
-- Depends on: `add-options-parser` and `add-render-endpoint` (the parser keys and error table the drift guards check against). Position: post-MVP, any time after slice 11 (`add-docker-release`).
+- Depends on: the options parser and error table (merged) that the drift guards check against. Position: **after `add-metrics-endpoint` and `add-ready-endpoint`, before `add-hex-publishing`** — the drift guards cover option keys and error codes but not the endpoint list or config table, so llms content written before those two endpoints would go stale with no test failing. Landing last-but-one means the content is born complete.

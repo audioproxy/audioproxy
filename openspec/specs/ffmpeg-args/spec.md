@@ -23,9 +23,25 @@ and only validated numbers ever reach it.
 
 The builder deliberately knows nothing it cannot derive from the options and
 the source's own properties — it runs no probe and reads no bytes. Where a
-decision genuinely needs the source (a lossless default bit depth), the source
-metadata is an explicit argument with a documented fallback, not an implicit
-dependency.
+decision genuinely needs the source (a lossless default bit depth, the input
+protocol set), the source metadata is an explicit argument with a documented
+fallback or no fallback at all, never an implicit dependency.
+
+Two things appear in every argv regardless of the options, and neither is
+derivable from the URL: the non-audio streams are disabled, and ffmpeg's input
+protocols are restricted to what the resolved source actually needs. Both are
+defence in depth behind the `audio-only-policy` gate rather than the policy
+itself — they are what still holds if that gate is bypassed, reordered, or
+handed a source it cannot see inside. Their *placement* is load-bearing in a way
+that is easy to lose in a refactor: the whitelist precedes `-i` so it binds the
+input format context, and the disable flags follow it so they bind the output.
+
+The flag vocabulary is published rather than implicit, because "no URL content
+can become an ffmpeg flag" is only worth stating if something checks it. What
+makes the check possible is knowing which flags take a value: a bare leading
+hyphen cannot distinguish the flag `-t` from the *value* `-1` that `f:ogg/q:-1`
+legitimately renders, so a check built on that distinction alone would have to
+be loosened until it caught nothing.
 
 ## Requirements
 
@@ -98,6 +114,61 @@ The system SHALL map each processing option to its ffmpeg form per API doc §3: 
 #### Scenario: Peaks name their channel count explicitly
 - **WHEN** building `f:peaks` with no `ch`
 - **THEN** argv emits `-ac 1` rather than following the source, since the reducer must know the interleaving before it reads a byte; every other format omits `-ac` entirely when `ch` is absent
+
+### Requirement: Non-audio streams are disabled in every argv
+The command builder SHALL include `-vn`, `-sn`, and `-dn` in every render argument vector (audio and peaks modes alike), regardless of options, so no video, subtitle, or data stream can ever be decoded, filtered, or encoded.
+
+#### Scenario: Flags present for every format
+- **WHEN** argv is built for each supported output format and for PCM/peaks extraction
+- **THEN** `-vn`, `-sn`, and `-dn` are present in each
+
+#### Scenario: The flags bind the output
+- **WHEN** any argv is built
+- **THEN** the three flags appear *after* `-i`, where ffmpeg reads them as output options; before it they would be input options with different meaning
+
+#### Scenario: No video encoder or filter is reachable
+- **WHEN** argv is built for every supported format with every filter option present
+- **THEN** no video codec, video filter or stream-mapping token appears
+
+### Requirement: Input protocol whitelist in every argv
+The command builder SHALL include `-protocol_whitelist` before the input in every argument vector, with the minimal set for the **resolved source's type**: `file` for local sources; `https,tls,tcp` for HTTPS sources; the same for S3 sources, plus `http` only where a cleartext `AP_S3_ENDPOINT` is configured, since a presigned URL carries its endpoint's scheme.
+
+The set SHALL be derived from the source type and never from the input string, a processing option, or a dedicated environment variable — a knob would reopen what this closes. A source type with no protocol set SHALL raise rather than inherit one.
+
+#### Scenario: Whitelist precedes input
+- **WHEN** any argv is built
+- **THEN** `-protocol_whitelist` appears as an input option (before `-i`) with the source type's set
+
+#### Scenario: Local sources cannot reach the network
+- **WHEN** argv is built for a local source
+- **THEN** the whitelist is exactly `file` — no network protocol is available to the invocation
+
+#### Scenario: Remote sources cannot reach the filesystem
+- **WHEN** argv is built for an HTTPS or S3 source
+- **THEN** the whitelist contains no `file` entry, whatever the configured endpoint
+
+#### Scenario: A cleartext development endpoint is the one widening
+- **WHEN** argv is built for an S3 source and `AP_S3_ENDPOINT` names an `http://` endpoint
+- **THEN** the whitelist gains `http` and nothing else, because every presigned URL that deployment mints is cleartext
+
+#### Scenario: The source type is required
+- **WHEN** an argv is built without a resolved source type
+- **THEN** it raises rather than defaulting, since a default would guess which side of the network/filesystem boundary the render sits on
+
+### Requirement: Flag allowlist is introspectable
+The command builder SHALL expose the complete set of flags it can ever emit, and for each whether it is followed by a value, so the argv-allowlist property test compares against a published set rather than a hardcoded copy.
+
+#### Scenario: Allowlist covers reality
+- **WHEN** argv is built for randomly generated valid options (property test)
+- **THEN** every token in a flag position is a member of the published allowlist
+
+#### Scenario: The allowlist excludes non-audio flags
+- **WHEN** the published set is inspected
+- **THEN** it contains no video codec, video filter, or stream-mapping flag
+
+#### Scenario: A value is not mistaken for a flag
+- **WHEN** an option renders a negative value (`f:ogg/q:-1` emits `["-q:a", "-1"]`)
+- **THEN** the value is recognized as the argument to its flag rather than reported as an unknown flag
 
 ### Requirement: Content-Type mapping
 The system SHALL expose the correct Content-Type for every output format (e.g., `audio/mpeg`, `audio/ogg`, `audio/aac`, `audio/mp4`, `audio/flac`, `audio/wav`).
