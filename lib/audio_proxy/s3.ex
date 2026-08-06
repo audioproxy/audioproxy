@@ -1,6 +1,6 @@
 defmodule AudioProxy.S3 do
   @moduledoc """
-  The four S3 operations this proxy needs, over `ex_aws_s3`.
+  The five S3 operations this proxy needs, over `ex_aws_s3`.
 
   Not a general S3 client and not on the way to becoming one. An
   object-storage deployment needs exactly this much:
@@ -13,6 +13,11 @@ defmodule AudioProxy.S3 do
     * `put_stream/4` — write a variant back, streaming, without knowing its
       length in advance (a render's output length is not known until it ends).
     * `get_stream/3` — read a variant back for proxy-mode serving.
+    * `delete/2` — remove one object. Nothing on the request path deletes
+      anything; this exists for `AudioProxy.Config`'s boot-time writability
+      probe, which proves a variant bucket accepts writes by performing one
+      and then taking it back. A probe that only wrote would leave a small
+      object behind on every restart.
 
   ## Why a facade and not `ExAws.S3` at the call sites
 
@@ -240,6 +245,28 @@ defmodule AudioProxy.S3 do
     # cancelled. Reached only for a raise *before* the upload is initiated —
     # once it is, `multipart/4` owns the abort.
     exception -> {:error, exception}
+  end
+
+  @doc """
+  Removes an object.
+
+  A delete of a key that is not there is `:ok` — S3 answers 204 either way,
+  and the caller wanted the object gone rather than an inventory of what was
+  there first.
+  """
+  @spec delete(bucket(), key()) :: :ok | {:error, error()}
+  def delete(bucket, key) do
+    if configured?(), do: delete_object(bucket, key), else: {:error, :not_configured}
+  end
+
+  defp delete_object(bucket, key) do
+    bucket
+    |> ExAws.S3.delete_object(key)
+    |> request()
+    |> case do
+      {:ok, _response} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   @doc """

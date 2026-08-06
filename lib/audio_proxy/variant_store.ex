@@ -10,7 +10,7 @@ defmodule AudioProxy.VariantStore do
 
       scheme     module                          slice
       file://    AudioProxy.VariantStore.Local   add-variant-store
-      s3://      (arrives with add-s3-client)
+      s3://      AudioProxy.VariantStore.S3      add-s3-variant-store
 
   The shape deliberately mirrors `AudioProxy.Source.Type`: one module per
   scheme, five callbacks, and a new backend is a registration rather than an
@@ -45,8 +45,9 @@ defmodule AudioProxy.VariantStore do
   write errored — must leave nothing readable under the key. Each backend
   implements that with whatever its storage offers: the local backend stages
   into a temp file inside the store and `File.rename/2`s on completion; the
-  S3 backend will use multipart complete/abort. `c:head/1` answering `{:ok,
-  _}` therefore always means the whole variant, with its metadata.
+  S3 backend gets it from the protocol, since an object does not exist until
+  its upload completes and a failed multipart is aborted. `c:head/1` answering
+  `{:ok, _}` therefore always means the whole variant, with its metadata.
   """
 
   alias AudioProxy.Config
@@ -90,7 +91,7 @@ defmodule AudioProxy.VariantStore do
   `{:module, backend}` is the test seam described at `backend_for/1`, not a
   value any environment can produce.
   """
-  @type config :: {:file, Path.t()} | {:module, module()}
+  @type config :: {:file, Path.t()} | {:s3, String.t()} | {:module, module()}
 
   @doc "Reports whether the variant named by `key` is stored, whole, with its metadata."
   @callback head(key()) :: {:ok, entry()} | {:error, :not_found}
@@ -137,12 +138,15 @@ defmodule AudioProxy.VariantStore do
   """
   @spec backend_for(config()) :: module()
   def backend_for({:file, _root}), do: AudioProxy.VariantStore.Local
+  def backend_for({:s3, _bucket}), do: AudioProxy.VariantStore.S3
 
   # A backend that names itself. `AudioProxy.Config` never produces this shape
   # — `AP_VARIANT_STORE` is a URL, and every scheme maps to a module above — so
   # it is not configuration surface. It is the seam the serving path is tested
-  # through: `:presign` is a capability no shipped backend has until the S3
-  # one lands, and redirect mode would otherwise ship unexercised.
+  # through, without a store: the `s3://` backend can presign for real, but
+  # only against a running MinIO, and the redirect branch's own behaviour —
+  # the `no-store`, the TTL it passes down, the proxy-instead fallback when a
+  # presign fails — is not S3's to demonstrate.
   def backend_for({:module, module}) when is_atom(module), do: module
 
   @doc "The configured backend module. Callers must check `configured?/0` first."

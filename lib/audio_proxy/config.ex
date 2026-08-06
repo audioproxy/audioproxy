@@ -20,7 +20,7 @@ defmodule AudioProxy.Config do
   | `AP_ALLOW_INSECURE` | boolean | `false` |
   | `AP_SOURCE_ALLOWLIST` | comma-separated list | `[]` |
   | `AP_LOCAL_ROOT` | existing directory, not `/` | unset (`nil`) — local sources disabled |
-  | `AP_VARIANT_STORE` | scheme-tagged URL (`file:///path`) | unset (`nil`) — no variant cache |
+  | `AP_VARIANT_STORE` | scheme-tagged URL (`file:///path`, `s3://bucket`) | unset (`nil`) — no variant cache |
   | `AP_MAX_CONCURRENCY` | positive integer | `System.schedulers_online/0` |
   | `AP_QUEUE_SIZE` | non-negative integer | `32` |
   | `AP_MAX_SRC_BYTES` | positive integer | `2_000_000_000` |
@@ -96,6 +96,12 @@ defmodule AudioProxy.Config do
   # variable.
   @s3_addressing_styles [:virtual, :path]
 
+  # The key prefix the `s3://` boot probe writes under. Neither the leading
+  # dot nor the slash is in `AudioProxy.CacheKey`'s alphabet, and
+  # `AudioProxy.VariantStore.S3` refuses anything that is not a cache key — so
+  # this names an object no variant can ever be stored as.
+  @store_probe_prefix ".audio-proxy-boot-probe/"
+
   @truthy ~w(1 true yes on)
   @falsy ~w(0 false no off)
 
@@ -146,7 +152,7 @@ defmodule AudioProxy.Config do
   """
   @spec load!(map()) :: t()
   def load!(env \\ System.get_env()) do
-    env |> build!() |> put_all()
+    env |> build!() |> put_all() |> probe_store!()
   end
 
   @doc """
@@ -156,6 +162,13 @@ defmodule AudioProxy.Config do
   nothing to `:persistent_term`; it does touch the filesystem where a value
   *is* a filesystem claim — `AP_LOCAL_ROOT` must be an existing directory,
   and a `file://` variant store is probed for writability.
+
+  It does **not** touch the network. An `s3://` variant store is parsed and
+  shape-checked here and probed by `load!/1`, after the config is stored —
+  because the probe is an S3 request, and `AudioProxy.S3` reads its
+  credentials, endpoint and addressing from the very map being built. The
+  asymmetry with the `file://` probe is that one: a path is provable from
+  itself, a bucket is not.
   """
   @spec build!(map()) :: t()
   def build!(env) when is_map(env) do
@@ -296,16 +309,36 @@ defmodule AudioProxy.Config do
           raise Error,
                 "#{var} file URLs take three slashes (file:///path); #{inspect(value)} reads #{inspect(host)} as a host"
 
-        {:ok, %URI{scheme: "s3"}} ->
+        # The same refusal as the `file://` branch above, for the same reason:
+        # a query or fragment means nothing to a bucket, and dropping one
+        # silently would leave the operator believing it did something.
+        {:ok, %URI{scheme: "s3", query: query, fragment: fragment}}
+        when is_binary(query) or is_binary(fragment) ->
           raise Error,
-                "#{var} does not support s3:// yet (the S3 backend is a separate slice); use file:///path"
+                "#{var} must be a bare bucket URL with no query or fragment, got: #{inspect(value)}"
+
+        {:ok, %URI{scheme: "s3", host: bucket, path: path}}
+        when is_binary(bucket) and bucket != "" and path in [nil, "", "/"] ->
+          {:s3, bucket!(var, value, bucket)}
+
+        # A key prefix would have to be prepended to every cache key and
+        # stripped from every lookup, and nothing here does either — so
+        # `s3://bucket/variants` would quietly cache into `bucket` and ignore
+        # the half the operator wrote it for.
+        {:ok, %URI{scheme: "s3", host: bucket}} when is_binary(bucket) and bucket != "" ->
+          raise Error,
+                "#{var} s3 URLs name a bucket and nothing else (s3://bucket); a key prefix is not supported, got: #{inspect(value)}"
+
+        {:ok, %URI{scheme: "s3"}} ->
+          raise Error, "#{var} must name a bucket (s3://bucket), got: #{inspect(value)}"
 
         {:ok, %URI{scheme: scheme}} ->
           raise Error,
-                "#{var} must be a scheme-tagged URL (file:///path), got scheme #{inspect(scheme)} in #{inspect(value)}"
+                "#{var} must be a scheme-tagged URL (file:///path or s3://bucket), got scheme #{inspect(scheme)} in #{inspect(value)}"
 
         {:error, _part} ->
-          raise Error, "#{var} must be a scheme-tagged URL (file:///path), got: #{inspect(value)}"
+          raise Error,
+                "#{var} must be a scheme-tagged URL (file:///path or s3://bucket), got: #{inspect(value)}"
       end
     end
   end
@@ -426,6 +459,48 @@ defmodule AudioProxy.Config do
               "#{var} must name a writable directory, got: #{inspect(value)} (#{inspect(reason)})"
     end
   end
+
+  # S3's own bounds, checked here so a typo fails at boot naming the variable
+  # rather than three layers down as a signature the store rejects. The
+  # character set is left to the store: the rules differ between AWS and its
+  # compatibles, and refusing a name a store would have accepted is worse than
+  # forwarding one it will not.
+  defp bucket!(_var, _value, bucket) when byte_size(bucket) in 3..63, do: bucket
+
+  defp bucket!(var, value, _bucket) do
+    raise Error, "#{var} bucket names are 3–63 characters, got: #{inspect(value)}"
+  end
+
+  # The `s3://` half of "validated at boot by the operation the store actually
+  # needs". Runs from `load!/1` rather than `build!/1` — see `build!/1` for
+  # why — and does what the `file://` branch does with a probe file: write,
+  # then take it back, so a bucket that is reachable and readable but refuses
+  # writes fails the container instead of discarding every write-back in
+  # silence.
+  #
+  # The key is outside the cache-key alphabet, so the probe cannot collide
+  # with a variant however unlucky the timing.
+  defp probe_store!(%{variant_store: {:s3, bucket}} = config) do
+    unless AudioProxy.S3.configured?() do
+      raise Error,
+            "AP_VARIANT_STORE=s3://#{bucket} needs AWS credentials — set AWS_ACCESS_KEY_ID, " <>
+              "AWS_SECRET_ACCESS_KEY and AWS_REGION, or use a file:/// store"
+    end
+
+    key = @store_probe_prefix <> Integer.to_string(System.unique_integer([:positive]))
+
+    with :ok <- AudioProxy.S3.put_stream(bucket, key, []),
+         :ok <- AudioProxy.S3.delete(bucket, key) do
+      config
+    else
+      {:error, reason} ->
+        raise Error,
+              "AP_VARIANT_STORE must name a bucket this deployment can write, and " <>
+                "s3://#{bucket} refused the boot probe (#{inspect(reason)})"
+    end
+  end
+
+  defp probe_store!(config), do: config
 
   # Cross-field: redirect serving is a 302 to a presigned variant URL, which
   # only a backend with the `:presign` capability can produce. Refused at boot
