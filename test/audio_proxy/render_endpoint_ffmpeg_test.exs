@@ -69,6 +69,7 @@ defmodule AudioProxy.RenderEndpointFfmpegTest do
       allow_insecure: false,
       local_root: root,
       max_src_bytes: 2_000_000_000,
+      max_variant_bytes: 2_000_000_000,
       render_timeout: 60
     })
 

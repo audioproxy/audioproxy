@@ -50,6 +50,7 @@ defmodule AudioProxy.VariantCacheStreamTest do
       allow_insecure: false,
       local_root: tmp_dir,
       max_src_bytes: 2_000_000_000,
+      max_variant_bytes: 2_000_000_000,
       variant_store: {:file, store},
       serve_mode: :proxy
     })

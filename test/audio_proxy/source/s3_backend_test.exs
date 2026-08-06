@@ -86,6 +86,7 @@ defmodule AudioProxy.Source.S3BackendTest do
       allow_insecure: false,
       presign_ttl: 900,
       max_src_bytes: 2_000_000_000,
+      max_variant_bytes: 2_000_000_000,
       # Empty is "everything": the proxy's own credentials are the first gate,
       # and the allowlist is `AudioProxy.Source.AllowlistTest`'s subject.
       source_allowlist: [],

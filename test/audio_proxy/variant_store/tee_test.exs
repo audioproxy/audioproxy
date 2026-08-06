@@ -35,7 +35,12 @@ defmodule AudioProxy.VariantStore.TeeTest do
   @deadline 5_000
 
   setup %{tmp_dir: tmp_dir} do
-    put_config(%{max_src_bytes: 2_000_000_000, variant_store: {:file, tmp_dir}})
+    put_config(%{
+      max_src_bytes: 2_000_000_000,
+      max_variant_bytes: 2_000_000_000,
+      variant_store: {:file, tmp_dir}
+    })
+
     reset_coordinators()
     {:ok, root: tmp_dir}
   end

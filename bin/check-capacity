@@ -213,10 +213,13 @@ def start_server(fixtures)
     "-e", "AP_LOCAL_ROOT=/fixtures",
     "-e", "AP_ALLOW_INSECURE=true",
     "-e", "AP_MAX_CONCURRENCY=#{MAX_CONCURRENCY}",
-    # Above the largest source and the largest variant, so the cap is not what
-    # this run is testing. The retention path has its own tests; the guard is
-    # about the model holding when nothing trips.
+    # Both ceilings above the largest source and the largest variant, so
+    # neither cap is what this run is testing. The retention path has its own
+    # tests; the guard is about the model holding when nothing trips. The
+    # variant ceiling is set explicitly rather than left to its default, so the
+    # run still says what it means if that default ever changes.
     "-e", "AP_MAX_SRC_BYTES=4000000000",
+    "-e", "AP_MAX_VARIANT_BYTES=4000000000",
     "-e", "AP_RENDER_TIMEOUT=900",
     "-p", "127.0.0.1::4000",
     "-v", "#{fixtures}:/fixtures:ro",

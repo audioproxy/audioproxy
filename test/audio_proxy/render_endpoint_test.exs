@@ -53,7 +53,8 @@ defmodule AudioProxy.RenderEndpointTest do
       salt: @salt,
       allow_insecure: false,
       local_root: tmp_dir,
-      max_src_bytes: 2_000_000_000
+      max_src_bytes: 2_000_000_000,
+      max_variant_bytes: 2_000_000_000
     })
 
     # Every request below is its own render unless the test says otherwise —
@@ -151,6 +152,22 @@ defmodule AudioProxy.RenderEndpointTest do
       put_config(%{max_src_bytes: byte_size(@piece_content)})
 
       assert render(signed("/f:mp3/plain/local://piece.wav")).status == 200
+    end
+
+    test "a large source with a small variant ceiling is accepted, then killed" do
+      # The split, stated end to end: the source ceiling admits the file, and
+      # what refuses the request is the *output* crossing its own ceiling. The
+      # outcome is a render failure, not the 413 the source ceiling produces —
+      # nothing was wrong with the source.
+      put_config(%{
+        max_src_bytes: byte_size(@piece_content),
+        max_variant_bytes: byte_size(@payload) - 1
+      })
+
+      conn = render(signed("/f:mp3/plain/local://piece.wav"))
+
+      assert conn.status == 500
+      assert JSON.decode!(conn.resp_body)["error"] == "render_failed"
     end
 
     test "a malformed escape in a signed request is the generic 404, never a bare 400" do

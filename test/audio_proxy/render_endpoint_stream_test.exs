@@ -50,6 +50,7 @@ defmodule AudioProxy.RenderEndpointStreamTest do
       allow_insecure: false,
       local_root: tmp_dir,
       max_src_bytes: 2_000_000_000,
+      max_variant_bytes: 2_000_000_000,
       # One second, so the pre-stream timeout is a test and not a coffee break.
       render_timeout: 1
     })
@@ -126,6 +127,25 @@ defmodule AudioProxy.RenderEndpointStreamTest do
 
       refute RawHttp.complete?(response.body),
              "a failed render completed its stream, so the client believes it got the whole file"
+    end
+
+    test "a retention breach is a torn-down stream, never a 413", %{port: port} do
+      # `AP_MAX_VARIANT_BYTES` cannot be a status code and this is why: the
+      # dribbler's first chunk commits the response to `200` before the second
+      # crosses the ceiling. 413 belongs to the source ceiling, which is spent
+      # before a render starts; here the honest outcome is an abnormal close.
+      put_config(%{max_variant_bytes: byte_size(@payload) + 1})
+
+      response = "/f:mp3/plain/local://dribble.wav" |> request(port) |> RawHttp.read(@deadline)
+
+      # The status line is the whole "never a 413" claim: it is already `200`
+      # and spent. (Not `refute head =~ "413"` — an ETag is a hex digest and
+      # one of them will eventually contain those three characters.)
+      assert response.head =~ "http/1.1 200 ok"
+      assert RawHttp.dechunk(response.body) =~ @payload
+
+      refute RawHttp.complete?(response.body),
+             "a render killed at the retention bound completed its stream"
     end
   end
 

@@ -90,6 +90,7 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
       allow_insecure: false,
       local_root: root,
       max_src_bytes: 2_000_000_000,
+      max_variant_bytes: 2_000_000_000,
       render_timeout: 60,
       variant_store: {:file, store},
       serve_mode: :proxy

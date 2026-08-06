@@ -50,9 +50,12 @@ module CapacityModel
   # resident. Short renders are the other case — see `linger_backlogs`.
   LINGER_BACKLOGS = 1
 
-  # `AP_MAX_SRC_BYTES`'s default, which is also the retention cap: a render
-  # whose cumulative output crosses it is killed and the request fails.
-  DEFAULT_MAX_SRC_BYTES = 2_000_000_000
+  # `AP_MAX_VARIANT_BYTES`'s default: the retention cap, which a render's
+  # cumulative output crossing gets it killed and the request failed. It
+  # defaults to the effective `AP_MAX_SRC_BYTES` — the same 2 GB when neither
+  # is set — but it is the retention ceiling that decides a refusal, and the
+  # source ceiling has nothing to say about output.
+  DEFAULT_MAX_VARIANT_BYTES = 2_000_000_000
 
   # The boundary in the linger argument. A render that finishes in well under a
   # second turns its slot over inside the linger window, so a whole second's
@@ -116,11 +119,11 @@ module CapacityModel
     [slots, 0].max
   end
 
-  # A render whose output crosses `AP_MAX_SRC_BYTES` is killed partway through
-  # and the request fails, so this workload has no concurrency figure — it has a
-  # refusal. See "Long-form lossless" in docs/capacity.md.
-  def refused?(backlog_bytes, max_src_bytes = DEFAULT_MAX_SRC_BYTES)
-    backlog_bytes > max_src_bytes
+  # A render whose output crosses `AP_MAX_VARIANT_BYTES` is killed partway
+  # through and the request fails, so this workload has no concurrency figure —
+  # it has a refusal. See "Long-form lossless" in docs/capacity.md.
+  def refused?(backlog_bytes, max_variant_bytes = DEFAULT_MAX_VARIANT_BYTES)
+    backlog_bytes > max_variant_bytes
   end
 
   # `R_ffmpeg`, read out of the published table rather than restated — so a

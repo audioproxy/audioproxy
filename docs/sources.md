@@ -395,8 +395,10 @@ render and info flows need from a source, and the only two things they need.
 Size and ETag material answer 404/413 before a subprocess starts; the ffmpeg
 input is a path for a local source and a URL for a remote one, always a single
 argv element and never a shell string. `size` may be `nil` when the backing
-store genuinely does not know it; that is not an error, and `AP_MAX_SRC_BYTES`
-is then enforced downstream by the render byte cap.
+store genuinely does not know it; that is not an error. What still bounds such
+a source is the render byte cap, `AP_MAX_VARIANT_BYTES`, one render's retained
+output at a time — `AP_MAX_SRC_BYTES` itself goes unenforced, having no size to
+compare against.
 
 Declaring the seam alongside the rest of the contract is what makes a new
 backend a registration rather than an edit to the render and info flows.
