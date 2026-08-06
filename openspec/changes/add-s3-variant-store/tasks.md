@@ -25,4 +25,4 @@
 
 ## Release-gate coverage (added 2026-08-05, from the v0.3.0 post-mortem)
 
-- [ ] R.1 Extend the container smoke suite: a MISS teed to a MinIO variant store and the same URL served as a HIT (proxy mode) and a `302` (redirect mode) — the release gate could not see S3 at all, which is how v0.3.0's notes shipped claims no check demonstrated
+- [x] R.1 Extend the container smoke suite: a MISS teed to a MinIO variant store and the same URL served as a HIT (proxy mode) and a `302` (redirect mode) — the release gate could not see S3 at all, which is how v0.3.0's notes shipped claims no check demonstrated

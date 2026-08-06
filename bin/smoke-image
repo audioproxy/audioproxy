@@ -57,6 +57,9 @@ SALT = SecureRandom.hex(16)
 MINIO_IMAGE = "minio/minio:RELEASE.2025-04-22T22-12-26Z"
 MC_IMAGE = "minio/mc:RELEASE.2025-04-16T18-13-26Z"
 S3_BUCKET = "masters"
+# The variant cache's own bucket. Separate from the source bucket on purpose:
+# a deployment that shares one would hide a backend writing where it reads.
+S3_VARIANT_BUCKET = "variants"
 S3_ACCESS_KEY = "minioadmin"
 S3_SECRET_KEY = "minioadmin"
 # Reached by container alias on a suite-private network, so it is the same
@@ -446,6 +449,159 @@ ensure
   sh("docker", "network", "rm", network) if network
 end
 
+# The variant cache, end to end through the shipped image and a real store:
+# render once, find the bytes in the bucket, get them back without rendering,
+# and — after the container that rendered them is gone — get a 302 to the store
+# that decodes.
+#
+# Same reason as check_s3_source: the release gate could not see S3 at all, and
+# v0.3.0's notes announced an S3 variant bucket and redirect serving while
+# Config still refused `s3://` at boot. Both claims now have a check.
+#
+# What only this level can show, and the ExUnit `:minio` suite cannot: that the
+# cache survives the container. The redirect container is a *second* container
+# reading a bucket the first one filled, which is the whole difference between
+# this store and the `file://` one.
+def check_s3_variant_store(fixtures)
+  network = "audio-proxy-smoke-#{SecureRandom.hex(4)}"
+  sh!("docker", "network", "create", network)
+
+  minio = docker_run(
+    "--network", network, "--network-alias", "minio",
+    "-e", "MINIO_ROOT_USER=#{S3_ACCESS_KEY}",
+    "-e", "MINIO_ROOT_PASSWORD=#{S3_SECRET_KEY}",
+    MINIO_IMAGE, "server", "/data"
+  )
+
+  ready = wait_until(timeout: 60) { mc(network, alias_set) }
+  check "MinIO becomes reachable" do
+    ready
+  end
+
+  created = mc(network, "#{alias_set} && mc mb --ignore-existing store/#{S3_VARIANT_BUCKET}")
+  check "the #{S3_VARIANT_BUCKET} bucket is created" do
+    created
+  end
+
+  env = {
+    "AP_ALLOW_INSECURE" => "true",
+    "AP_S3_ENDPOINT" => S3_URL,
+    "AWS_ACCESS_KEY_ID" => S3_ACCESS_KEY,
+    "AWS_SECRET_ACCESS_KEY" => S3_SECRET_KEY,
+    "AWS_REGION" => "us-east-1",
+    "AP_VARIANT_STORE" => "s3://#{S3_VARIANT_BUCKET}"
+  }
+
+  path = "/insecure/f:mp3/br:128/plain/local://tone%20one.wav"
+
+  cid = start_server(fixtures, extra_env: env.merge("AP_SERVE_MODE" => "proxy"),
+                               docker_args: ["--network", network])
+  port = published_port(cid)
+
+  # The boot probe writes and deletes under a reserved prefix, so reaching
+  # /health at all is already the bucket proving it accepts writes.
+  check "a container with an s3:// variant store reaches /health" do
+    await_health(cid, port)
+  end
+
+  Dir.mktmpdir do |out|
+    miss = File.join(out, "miss.mp3")
+    headers, ok = curl("http://127.0.0.1:#{port}#{path}", miss)
+
+    check "the first request renders (MISS, chunked)" do
+      ok && headers.first.include?("200") &&
+        headers.any? { |h| h.downcase.start_with?("x-audio-proxy: miss") } &&
+        headers.any? { |h| h.downcase.start_with?("transfer-encoding: chunked") }
+    end
+
+    # The write-back is a subscriber to the render, not part of the response, so
+    # it finishes after the last byte reaches the client. Polling the bucket is
+    # the honest way to wait for it.
+    # `test -n "$(…)"` rather than piping to `grep`: the mc image carries mc, a
+    # shell, and very little else — `grep` is not in it, so a grep-based probe
+    # fails every poll and reports an empty bucket that is not empty. Caught
+    # because the HIT below passed while this said the object had never landed.
+    stored = wait_until(timeout: 60) do
+      mc(network, %(#{alias_set} > /dev/null && test -n "$(mc ls store/#{S3_VARIANT_BUCKET})"))
+    end
+    check "the render is teed to the bucket" do
+      stored
+    end
+
+    hit = File.join(out, "hit.mp3")
+    headers, ok = curl("http://127.0.0.1:#{port}#{path}", hit)
+
+    check "the same URL is then a HIT, served from the store" do
+      ok && headers.first.include?("200") &&
+        headers.any? { |h| h.downcase.start_with?("x-audio-proxy: hit") }
+    end
+    check "the HIT declares a length and accepts ranges" do
+      headers.any? { |h| h.downcase.start_with?("content-length:") } &&
+        headers.any? { |h| h.downcase.start_with?("accept-ranges: bytes") }
+    end
+    check "the HIT is byte-identical to the render it replaced" do
+      File.binread(hit) == File.binread(miss)
+    end
+
+    duration = probe_duration(hit)
+    check "the HIT decodes to #{FIXTURE_SECONDS}s (got #{duration.round(3)})" do
+      (duration - FIXTURE_SECONDS).abs <= DURATION_TOLERANCE
+    end
+
+    # A second container, same bucket: the cache outliving the process that
+    # filled it is the property a `file://` store does not have.
+    docker_rm(cid)
+    cid = start_server(fixtures, extra_env: env.merge("AP_SERVE_MODE" => "redirect"),
+                                 docker_args: ["--network", network])
+    port = published_port(cid)
+
+    check "a second container boots in redirect mode against the same store" do
+      await_health(cid, port)
+    end
+
+    redirected = File.join(out, "redirect.txt")
+    headers, = curl("http://127.0.0.1:#{port}#{path}", redirected)
+    location = headers.find { |h| h.downcase.start_with?("location:") }&.split(": ", 2)&.last
+
+    check "a HIT in redirect mode is a 302 to the store" do
+      headers.first.include?("302") &&
+        headers.any? { |h| h.downcase.start_with?("x-audio-proxy: hit") } &&
+        location.to_s.start_with?(S3_URL)
+    end
+    check "the redirect is not cached — its Location expires" do
+      headers.any? { |h| h.downcase.start_with?("cache-control: no-store") }
+    end
+
+    # Followed from inside the network, because the presigned URL names the
+    # store by its container alias. ffprobe rather than curl for a reason
+    # beyond convenience: a signed URL that returned an error document would
+    # still be a 200 to curl, and a duration cannot be faked by one.
+    duration = probe_duration_url(network, location.to_s)
+    check "following the Location decodes to #{FIXTURE_SECONDS}s (got #{duration.round(3)})" do
+      (duration - FIXTURE_SECONDS).abs <= DURATION_TOLERANCE
+    end
+  end
+ensure
+  # Ordering and placement as in check_s3_source: containers off the network
+  # before the network goes, all of it here rather than on the happy path.
+  docker_rm(cid) if cid
+  docker_rm(minio) if minio
+  sh("docker", "network", "rm", network) if network
+end
+
+# The `mc` preamble every invocation needs, kept in one place because it carries
+# the credentials and repeating it invites them drifting apart.
+def alias_set = "mc alias set store #{S3_URL} #{S3_ACCESS_KEY} #{S3_SECRET_KEY}"
+
+# ffprobe from a container on the store's network, so a presigned URL naming
+# `minio` resolves. The image's own ffprobe, which is the binary under test.
+def probe_duration_url(network, url)
+  out = sh!("docker", "run", "--rm", "--network", network, "--entrypoint", "ffprobe", IMAGE,
+            "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=nw=1:nk=1", url)
+  Float(out.strip)
+end
+
 # One `mc` invocation on the store's network. Returns whether it succeeded, so
 # it doubles as the readiness probe: MinIO answering an `alias set` is a better
 # "up" signal than a health endpoint that returns before the object API does.
@@ -718,6 +874,7 @@ begin
     step("fixtures") { generate_fixtures(fixtures) }
     step("render (insecure, read-only mount)") { check_render(fixtures) }
     step("render from an s3:// source") { check_s3_source(fixtures) }
+    step("s3:// variant store, proxied and redirected") { check_s3_variant_store(fixtures) }
     step("read-only fixture mount") { check_readonly_mount(fixtures) }
     step("signed URL over h2c") { check_signed_h2c(fixtures) }
     step("runtime configuration") { check_config(fixtures) }

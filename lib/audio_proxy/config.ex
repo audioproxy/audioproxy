@@ -465,6 +465,11 @@ defmodule AudioProxy.Config do
   # character set is left to the store: the rules differ between AWS and its
   # compatibles, and refusing a name a store would have accepted is worse than
   # forwarding one it will not.
+  #
+  # The name arrives lowercased, because `URI` lowercases a host and this one is
+  # written as one. Bucket names are lowercase everywhere a bucket can be
+  # created today, so the only value this loses is a legacy uppercase AWS name
+  # from before 2018 — and that one cannot be addressed virtual-hosted either.
   defp bucket!(_var, _value, bucket) when byte_size(bucket) in 3..63, do: bucket
 
   defp bucket!(var, value, _bucket) do
@@ -486,6 +491,15 @@ defmodule AudioProxy.Config do
             "AP_VARIANT_STORE=s3://#{bucket} needs AWS credentials — set AWS_ACCESS_KEY_ID, " <>
               "AWS_SECRET_ACCESS_KEY and AWS_REGION, or use a file:/// store"
     end
+
+    # The probe is a real S3 request, and a real S3 request needs the `:httpc`
+    # profile `AudioProxy.S3.HttpClient` drives — which `AudioProxy.Application`
+    # starts *after* this, because it sizes the pool from the config being built
+    # here. Starting it is idempotent, so asking for it rather than depending on
+    # boot order is cheaper than the ordering constraint: without this the probe
+    # exits with `noproc` from inside `:gen_server.call`, and the container dies
+    # with a stack trace instead of the message this function exists to print.
+    AudioProxy.S3.HttpClient.setup!(config.max_concurrency)
 
     key = @store_probe_prefix <> Integer.to_string(System.unique_integer([:positive]))
 
