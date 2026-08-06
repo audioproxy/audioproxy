@@ -67,6 +67,8 @@ Example:
 | `GET /hls/{sig}/{options}/{source}/index.m3u8` | **Reserved for v2** — segmented streaming |
 | `GET /hls/{sig}/{options}/{source}/seg-{n}.m4s` | **Reserved for v2** |
 
+**`/ready`'s `503` is a verdict, not an error**, and three consequences follow from that. Its body is `{"status", "queued", "threshold"}` rather than the `{"error", "message"}` envelope of §5 — a client generated from the error table must not expect that shape here. It carries no `Retry-After`, unlike the `429` that backpressure produces: a balancer reading this reroutes to another node immediately rather than waiting, so the header would be advice nobody acts on. And it reports live capacity numbers to an unsigned caller, which is deliberate — they are what make a failing probe diagnosable — but it does mean `/ready` is the one unsigned endpoint that discloses current load, and an operator who cares can strip the body at the edge without affecting the status.
+
 No write endpoints in v1: variant write-back to S3 is a side effect of a GET render, not a client-facing API. Methods other than GET answer `404`, everywhere: the signed space is GET-only, and a `405` would confirm a route's shape without telling a client anything useful.
 
 ---
@@ -262,7 +264,7 @@ Mid-stream render failure after `200` is signaled by abnormal termination of the
 | `AP_VARIANT_STORE` | Variant store, scheme-tagged: `file:///path` or `s3://bucket`; unset = no cache, always render. Either scheme is proved writable at boot by performing a write and removing it — a directory that does not exist or refuses writes, or a bucket that is unreachable or refuses one, fails the container. `s3://` names a bucket only — a key prefix, a port or embedded credentials are refused rather than ignored |
 | `AP_MAX_CONCURRENCY` | Max simultaneous ffmpeg processes (default: CPU count). Coalesced requests share one, so this counts renders and not requests |
 | `AP_QUEUE_SIZE` | Requests that may wait for a slot before the next is answered `429` |
-| `AP_READY_QUEUE_THRESHOLD` | Queue depth at which `/ready` answers `503`, recovering at half of it (default: half `AP_QUEUE_SIZE`; `0` disables). Refused above `AP_QUEUE_SIZE`, where it could never trip |
+| `AP_READY_QUEUE_THRESHOLD` | Queue depth at which `/ready` answers `503`, recovering at half of it rounded down (default: half `AP_QUEUE_SIZE` rounded down, minimum 1; `0` disables, as does `AP_QUEUE_SIZE=0`). Refused above `AP_QUEUE_SIZE`, where it could never trip |
 | `AP_MAX_SRC_BYTES`, `AP_RENDER_TIMEOUT` | Abuse limits. `AP_MAX_SRC_BYTES` bounds the *source*, checked before a render starts — the `413` above |
 | `AP_MAX_VARIANT_BYTES` | Bytes one render may retain, defaulting to the effective `AP_MAX_SRC_BYTES`. Output past it kills the render; the response has already committed to `200`, so the outcome is a failed stream rather than a `413` |
 | `AP_PROBE_TIMEOUT` | Seconds an `/info` probe may take before ffprobe is killed and the request answered `504` (default: 10). Separate from `AP_RENDER_TIMEOUT` because a probe reads headers rather than decoding — see §4.3 |

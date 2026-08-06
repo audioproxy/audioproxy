@@ -64,9 +64,9 @@ $ curl -si localhost:4000/ready | head -1
 HTTP/1.1 503 Service Unavailable
 ```
 
-The node trips to `503` once the semaphore's wait queue reaches `AP_READY_QUEUE_THRESHOLD`, and recovers only once depth falls back to **half** of it. That lower recovery mark is hysteresis, and it is the whole reason the endpoint is trustworthy: without it a node hovering at the threshold would flip on every poll, and a fleet under uniform load hovers *together*, so every node would flip together and the balancer would briefly have an empty pool. With it, one excursion above the threshold produces exactly one not-ready period.
+The node trips to `503` once the semaphore's wait queue reaches `AP_READY_QUEUE_THRESHOLD`, and recovers only once depth falls back to **half** of it, rounded down — a threshold of 5 recovers at a depth of 2, and a threshold of 1 recovers only at an empty queue. That lower recovery mark is hysteresis, and it is the whole reason the endpoint is trustworthy: without it a node hovering at the threshold would flip on every poll, and a fleet under uniform load hovers *together*, so every node would flip together and the balancer would briefly have an empty pool. With it, one excursion above the threshold produces exactly one not-ready period.
 
-`AP_READY_QUEUE_THRESHOLD` defaults to half of `AP_QUEUE_SIZE` — deep enough that a node shrugging off a burst is not ejected for it, shallow enough that the orchestrator learns about the backlog well before the queue fills and requests start becoming `429`s. Setting it to `0` disables the check, and `/ready` becomes a second liveness endpoint; that is the right setting for a single node, where there is nowhere else to route. A value above `AP_QUEUE_SIZE` is refused at boot, because queue depth could never reach it.
+`AP_READY_QUEUE_THRESHOLD` defaults to half of `AP_QUEUE_SIZE`, rounded down but never below 1 for a queue that can hold anything — deep enough that a node shrugging off a burst is not ejected for it, shallow enough that the orchestrator learns about the backlog well before the queue fills and requests start becoming `429`s. Setting it to `0` disables the check, and `/ready` becomes a second liveness endpoint; that is the right setting for a single node, where there is nowhere else to route. A value above `AP_QUEUE_SIZE` is refused at boot, because queue depth could never reach it.
 
 Both probes are logged at `debug`, so polling them every few seconds does not drown the log. A `/ready` 503 is not promoted to a warning: it is the mechanism working.
 
@@ -142,7 +142,12 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "310"
 ```
 
-Note that `upstream-hash-by` bypasses the readiness-driven pool in the sense that matters: a hashed request goes to *its* backend, so a node that is unready still receives the URLs that hash to it (it will queue them, or `429` them). Hashing and readiness answer different questions, and running both means renders coalesce while genuinely overloaded nodes still shed. If you want readiness to move traffic, use least-connections.
+**Hashing and readiness compose here, and do not in the plain-nginx recipe above.** The difference is where the backend list comes from, and it is worth being exact about because the two look identical in the config:
+
+- **ingress-nginx** builds its upstream from the Service's *ready* endpoints. A pod that fails its readiness probe is removed from those endpoints, so it leaves the hash ring too, and the keys that hashed to it remap to pods that are ready. Readiness moves traffic exactly as it would under least-connections; hashing just decides *which* ready pod. Note the corollary: because the ring changes when a pod goes unready, some keys land on a node that has not rendered them, which is the reshuffle cost paid early. That is the correct trade — a duplicate render is cheaper than a queued one.
+- **A static nginx `upstream` block** (the recipe above) polls nothing. nginx OSS has passive health checks only; active HTTP health checks are an nginx Plus feature. So `/ready` has no reader, and a node answering `503` keeps receiving its hashed share until it fails outright. If you want readiness to move traffic in front of a static upstream, something has to consume it — nginx Plus, or a service-discovery layer that rewrites the upstream and reloads.
+
+That asymmetry is the practical argument for running this on Kubernetes or Fly rather than behind a hand-rolled nginx: the readiness signal is only worth what the thing in front of it does with it.
 
 ## Kubernetes
 
@@ -237,15 +242,22 @@ Swarm's `healthcheck` is also liveness-shaped: a container failing it is restart
 
 If you want either least-connections or URI hashing on Swarm, put nginx in front of the service and use the recipe above, with the proxy service on an overlay network and nginx as the only published port. That is a real component to run and monitor; it is worth it if you have hot URLs and it is not otherwise.
 
+The image already ships a `HEALTHCHECK` against `/health`, so the common case needs no `healthcheck:` block at all:
+
 ```yaml
 services:
   proxy:
-    image: audio_proxy
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:4000/health"]
-      interval: 10s
+    image: ghcr.io/audioproxy/audioproxy:0.3.0
     deploy:
       replicas: 3
+```
+
+Override it only to change the cadence, and keep it pointed at `/health`:
+
+```yaml
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:4000/health"]
+      interval: 10s
 ```
 
 ## Sizing a fleet

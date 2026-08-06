@@ -510,7 +510,7 @@ Note that the variables below are the full configuration surface for the design,
 | `AP_VARIANT_STORE` | URL (`file:///path`, `s3://bucket`) | unset | Where rendered variants are written back; unset = no cache, always render. Probed for writability at boot. See [Variant store](#variant-store) |
 | `AP_MAX_CONCURRENCY` | positive integer | schedulers online | Max simultaneous ffmpeg processes. Requests that share a render share its slot, so this counts encodes, not connections |
 | `AP_QUEUE_SIZE` | non-negative integer | `32` | Requests that may wait for a slot before the next one is answered `429` with `Retry-After`. `0` means no waiting at all |
-| `AP_READY_QUEUE_THRESHOLD` | non-negative integer, ≤ `AP_QUEUE_SIZE` | half `AP_QUEUE_SIZE` | Queue depth at which `/ready` answers `503`; it recovers again at half the threshold. `0` disables the check, which is what a single node wants. See [Health and readiness](#health-and-readiness) |
+| `AP_READY_QUEUE_THRESHOLD` | non-negative integer, ≤ `AP_QUEUE_SIZE` | half `AP_QUEUE_SIZE`, rounded down (min 1) | Queue depth at which `/ready` answers `503`; it recovers again at half the threshold, rounded down. `0` disables the check, which is what a single node wants. See [Health and readiness](#health-and-readiness) |
 | `AP_MAX_SRC_BYTES` | positive integer | `2000000000` | Reject larger sources with `413`, before any render starts. Does not apply to `/info`, which only reads headers |
 | `AP_MAX_VARIANT_BYTES` | positive integer | the effective `AP_MAX_SRC_BYTES` | Cap the bytes one render may hold in memory; output past it kills the render and fails the request mid-stream. Set it below `AP_MAX_SRC_BYTES` to accept large sources while producing small outputs. Raising it does **not** buy capacity — it bounds one render, so every concurrent slot may reach it; the lever for the total is `AP_MAX_CONCURRENCY`. See [docs/capacity.md](docs/capacity.md) |
 | `AP_RENDER_TIMEOUT` | positive integer | `300` | Seconds a render may take before ffmpeg is killed and the request answered `504`. Raise it for full-length transcodes of long masters; the default suits previews. See [docs/rendering.md](docs/rendering.md) |
@@ -662,7 +662,7 @@ $ curl -s localhost:4000/ready
 {"status":"ready","queued":0,"threshold":16}
 ```
 
-It answers `503` once queue depth reaches `AP_READY_QUEUE_THRESHOLD`, and `200` again once depth has fallen to half of it. The gap between those two marks is deliberate — it means one busy period produces one not-ready period, rather than a node flipping in and out of the pool on every poll. Both endpoints support `HEAD`, and both are `no-store`.
+It answers `503` once queue depth reaches `AP_READY_QUEUE_THRESHOLD`, and `200` again once depth has fallen to half of it, rounded down. The gap between those two marks is deliberate — it means one busy period produces one not-ready period, rather than a node flipping in and out of the pool on every poll. Both endpoints support `HEAD`, and both are `no-store`.
 
 On Kubernetes, point `livenessProbe` at `/health` and `readinessProbe` at `/ready`. Pointing a liveness probe at `/ready` restarts containers for being busy, which is the one mistake this pair exists to let you avoid.
 
