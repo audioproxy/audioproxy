@@ -123,7 +123,16 @@ defmodule AudioProxy.ReadinessTest do
     end
 
     test "an unreachable latch answers ready rather than raising" do
-      assert %{ready?: true} = Readiness.check(:no_such_readiness_server)
+      assert %{ready?: true, queued: 0} = Readiness.check(:no_such_readiness_server)
+    end
+
+    test "the fallback reports the configured threshold, not the disabled sentinel" do
+      # `0` is what "readiness is switched off" looks like in the body, so
+      # reporting it for a latch that is merely unreachable would tell an
+      # operator the one thing that is certainly untrue.
+      put_config(%{ready_queue_threshold: 7})
+
+      assert %{ready?: true, threshold: 7} = Readiness.check(:no_such_readiness_server)
     end
   end
 

@@ -275,11 +275,16 @@ defmodule AudioProxy.Semaphore do
   @doc """
   Current occupancy and the limits it is measured against.
 
-  For tests and for a health check; nothing on the render path reads it.
+  For tests and for `AudioProxy.Readiness`; nothing on the render path reads it.
+
+  `timeout` is exposed because the readiness probe has a budget an orchestrator
+  set — a probe that waits the default five seconds for a wedged semaphore has
+  already failed, whatever it eventually answers. Callers with no deadline of
+  their own should leave it alone.
   """
-  @spec stats(GenServer.server()) :: stats()
-  def stats(server \\ @name) do
-    GenServer.call(server, :stats)
+  @spec stats(GenServer.server(), timeout()) :: stats()
+  def stats(server \\ @name, timeout \\ 5_000) do
+    GenServer.call(server, :stats, timeout)
   end
 
   ## Server

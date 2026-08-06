@@ -34,8 +34,15 @@ defmodule AudioProxy.Readiness do
 
   A wrongly-unready fleet is an outage; a wrongly-ready node just queues. So
   every uncertainty here resolves to ready — an unreadable depth (a semaphore
-  that is restarting, say) reads as `0`, and a `check/1` that cannot reach
-  this server at all answers ready rather than raising into the probe.
+  that is restarting, say) reads as `0`, and a `check/1` that cannot reach this
+  server at all answers ready rather than raising into the probe.
+
+  Both reads are bounded well inside a probe's own deadline, so "too slow"
+  resolves the same way "unreachable" does rather than by making the
+  orchestrator wait. What the fallback does *not* invent is the threshold: it
+  reports the configured one, because `0` is the value that means the check is
+  disabled and answering it here would misreport a broken latch as a
+  switched-off one.
 
   ## State lives here, not in the probe
 
@@ -51,6 +58,18 @@ defmodule AudioProxy.Readiness do
   alias AudioProxy.Semaphore
 
   @name __MODULE__
+
+  # A probe has a deadline its orchestrator set — Kubernetes' `timeoutSeconds`
+  # defaults to one second — so waiting `GenServer.call/3`'s default five for a
+  # wedged process would blow that budget whatever the answer turned out to be.
+  # The depth read is the inner call and gets the tighter bound; the outer one
+  # leaves the server room to make it and still answer.
+  #
+  # A caller that gives up is not a caller that stopped the work: the server
+  # still finishes the sample and still advances the latch, so the *next* probe
+  # sees a current verdict rather than a stale one.
+  @depth_timeout 1_000
+  @check_timeout 2_000
 
   @typedoc """
   What `check/1` answers.
@@ -90,11 +109,19 @@ defmodule AudioProxy.Readiness do
   """
   @spec check(GenServer.server()) :: verdict()
   def check(server \\ @name) do
-    GenServer.call(server, :check)
+    GenServer.call(server, :check, @check_timeout)
   catch
-    # Fail toward ready: an unreachable latch must not eject a node that is
-    # otherwise serving, and the supervisor is already restarting it.
-    :exit, _reason -> %{ready?: true, queued: 0, threshold: 0}
+    # Fail toward ready: an unreachable or too-slow latch must not eject a node
+    # that is otherwise serving, and the supervisor is already restarting it.
+    #
+    # `threshold` is read from config rather than reported as `0`, even though
+    # nothing sampled it. `0` is the value that *means* "readiness disabled",
+    # so answering it here would tell an operator reading the body that someone
+    # had switched the check off — the one explanation that is certainly wrong.
+    # The configured number is the honest answer to "what would have tripped
+    # this", and `Config.get/1` is a `:persistent_term` read that cannot fail
+    # the way the call just did.
+    :exit, _reason -> %{ready?: true, queued: 0, threshold: threshold()}
   end
 
   ## Server
@@ -110,7 +137,7 @@ defmodule AudioProxy.Readiness do
 
   @impl true
   def handle_call(:check, _from, state) do
-    threshold = Config.get(:ready_queue_threshold)
+    threshold = threshold()
     queued = depth(state.semaphore)
     tripped? = latch(state.tripped?, queued, threshold)
 
@@ -131,8 +158,10 @@ defmodule AudioProxy.Readiness do
   # empty queue, which is the only depth below it.
   defp latch(true, queued, threshold), do: queued > div(threshold, 2)
 
+  defp threshold, do: Config.get(:ready_queue_threshold)
+
   defp depth(semaphore) do
-    Semaphore.stats(semaphore).queued
+    Semaphore.stats(semaphore, @depth_timeout).queued
   catch
     :exit, _reason -> 0
   end

@@ -90,6 +90,25 @@ defmodule AudioProxy.ReadyEndpointTest do
       assert get_resp_header(conn, "content-type") == ["application/json; charset=utf-8"]
       assert get_resp_header(conn, "cache-control") == ["no-store"]
     end
+
+    test "matches the GET while tripped too, which is the status that matters" do
+      # An orchestrator probing with HEAD has to see the 503, or the endpoint
+      # is only correct for the case that needed no endpoint.
+      put_config(%{ready_queue_threshold: 2, max_concurrency: 1, queue_size: 4})
+
+      [_holder, first, second] = for _ <- 1..3, do: start_requester()
+
+      conn = request(:head, "/ready")
+
+      assert conn.status == 503
+      assert conn.resp_body == ""
+      assert get_resp_header(conn, "cache-control") == ["no-store"]
+
+      drop(first)
+      drop(second)
+
+      assert request(:head, "/ready").status == 200
+    end
   end
 
   ## Helpers

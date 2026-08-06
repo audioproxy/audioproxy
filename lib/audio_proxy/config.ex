@@ -23,7 +23,7 @@ defmodule AudioProxy.Config do
   | `AP_VARIANT_STORE` | scheme-tagged URL (`file:///path`, `s3://bucket`) | unset (`nil`) — no variant cache |
   | `AP_MAX_CONCURRENCY` | positive integer | `System.schedulers_online/0` |
   | `AP_QUEUE_SIZE` | non-negative integer | `32` |
-  | `AP_READY_QUEUE_THRESHOLD` | non-negative integer, ≤ `AP_QUEUE_SIZE` | half the queue (`0` disables) |
+  | `AP_READY_QUEUE_THRESHOLD` | non-negative integer, ≤ `AP_QUEUE_SIZE` | half the queue, floored, min 1 (`0` disables) |
   | `AP_MAX_SRC_BYTES` | positive integer | `2_000_000_000` |
   | `AP_MAX_VARIANT_BYTES` | positive integer | the effective `AP_MAX_SRC_BYTES` |
   | `AP_RENDER_TIMEOUT` | positive integer (seconds) | `300` |
