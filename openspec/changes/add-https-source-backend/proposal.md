@@ -4,7 +4,7 @@
 
 ## What Changes
 
-- HTTPS `stat/1`: HEAD request → size + ETag material; an origin that withholds `Content-Length` is reported as existing with unknown size (the render byte cap enforces `AP_MAX_SRC_BYTES` post-hoc); failures and 4xx/5xx map to not-found.
+- HTTPS `stat/1`: HEAD request → size + ETag material; an origin that withholds `Content-Length` is reported as existing with unknown size (the render byte cap, `AP_MAX_VARIANT_BYTES`, bounds what such a source can cost post-hoc — `AP_MAX_SRC_BYTES` has no size to compare against and goes unenforced); failures and 4xx/5xx map to not-found.
 - HTTPS `ffmpeg_input/1`: the canonical URL — ffmpeg does its own fetching.
 - Replaces the HTTPS "no backend" stub and its pinning test; the S3 stub stays until `add-s3-client`.
 
