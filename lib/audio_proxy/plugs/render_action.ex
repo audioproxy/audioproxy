@@ -289,9 +289,18 @@ defmodule AudioProxy.Plugs.RenderAction do
       # One span per *request*, not per render: a coalesced request delivered
       # its own bytes over its own connection, and an operator reading the log
       # is reading requests.
+      format = conn.assigns.options.format
+
+      # The other half of `AudioProxy.VariantCache`'s hit count, emitted here
+      # rather than at the store lookup above because this is where the answer
+      # becomes one of §5's three: a lookup that missed and then failed to get
+      # a slot is a 429 with no `X-Audio-Proxy` at all, and counting it would
+      # put requests in the denominator that were never told anything.
+      Telemetry.cache_lookup(%{status: status, format: format})
+
       span =
         Telemetry.render_start(%{
-          format: conn.assigns.options.format,
+          format: format,
           source: Source.canonical(source),
           cache_status: status
         })

@@ -251,7 +251,18 @@ defmodule AudioProxy.VariantCache do
     |> put_resp_header("etag", metadata.etag)
   end
 
-  defp mark_hit(conn), do: put_resp_header(conn, "x-audio-proxy", "HIT")
+  # The one place that says "this response is a HIT", so it is also the one
+  # place that counts one. Every path that reaches it has committed — the
+  # presign came back, the store handed over a stream, or the range was
+  # refused against a variant that is demonstrably there — which is what keeps
+  # the entry evicted between `head/1` and the read out of the hit count: that
+  # request falls through to a render and is counted as a `:miss` by the
+  # action instead.
+  defp mark_hit(conn) do
+    AudioProxy.Telemetry.cache_lookup(%{status: :hit, format: conn.assigns.options.format})
+
+    put_resp_header(conn, "x-audio-proxy", "HIT")
+  end
 
   ## Range
 
