@@ -41,15 +41,22 @@ defmodule AudioProxy.VariantStore.S3 do
   ETag itself — so it travels as `x-amz-meta-etag` and is read back off the
   HEAD.
 
-  An object missing any of the three is reported as a miss rather than served
-  with a guess. `head/1` answering `{:ok, _}` means *this* module wrote the
-  object, whole; a stray object under a 64-hex key is not a variant.
+  An object missing any of the three — or carrying it empty — is reported as a
+  miss rather than served with a guess, by `head/1` and `get_stream/2` alike.
+  Both, deliberately: a callback that answered from any object under the key
+  while the other called it absent would be the two disagreeing about whether
+  the key is stored, and `get_stream/2` pays a `head/1` to avoid it. So
+  `head/1` answering `{:ok, _}` means *this* module wrote the object, whole; a
+  stray object under a 64-hex key is not a variant to either callback.
 
   ## Failures are misses, and the store's failures are the operator's
 
-  The seam has two error values — `:not_found` and `:invalid_range` — so every
-  other way S3 can fail arrives at a caller that can only render. That is the
-  right answer on a lookup: a render produces correct bytes whatever the cache
+  The read side of the seam has two error values — `:not_found` and
+  `:invalid_range` — so every other way S3 can fail arrives at a caller that
+  can only render. (`put_stream/3` is wider: it also answers `:invalid_key`,
+  and hands back whatever `AudioProxy.S3` returned, because the tee that calls
+  it reports failures rather than recovering from them.) Collapsing reads to a
+  miss is the right answer: a render produces correct bytes whatever the cache
   did, and failing a request because the *cache* is unreachable would turn a
   degraded store into an outage.
 
@@ -60,6 +67,10 @@ defmodule AudioProxy.VariantStore.S3 do
   bucket and key. An operator reading "every request is a MISS" needs the line
   that says the store answered 403.
 
+  Reused with exactly one row read differently, and `classify/1` below is where
+  and why: a 404 means something different to a store the operator configured
+  than to a source the client named.
+
   Write failures are different only in who hears about them:
   `AudioProxy.VariantStore.Tee` already treats the write-back as best-effort
   and reports `[:audio_proxy, :variant_store, :write_failure]`, so this module
@@ -69,7 +80,7 @@ defmodule AudioProxy.VariantStore.S3 do
 
   @behaviour AudioProxy.VariantStore
 
-  alias AudioProxy.{Config, S3}
+  alias AudioProxy.{Config, LogHandler, S3}
 
   require Logger
 
@@ -98,14 +109,23 @@ defmodule AudioProxy.VariantStore.S3 do
 
   @impl true
   def get_stream(key, range) do
-    if valid_key?(key) do
+    # `head/1` first, and it is not redundant. Without it this callback answers
+    # from any object under the key — `AudioProxy.S3.get_stream/3` reads a size
+    # and streams — so a stray object that is not a variant would come back as
+    # bytes here while `head/1` calls it a miss, which is the two callbacks
+    # disagreeing about whether the same key is stored.
+    # `AudioProxy.VariantStore.Local` avoids it structurally by re-running its
+    # own `head/1`, and this does the same thing for the same reason.
+    #
+    # It costs a round trip: the facade heads again to resolve the range. Paid
+    # only in proxy mode, which is already the mode that moves every byte
+    # through the BEAM, and never in redirect mode, which is the default.
+    with {:ok, _entry} <- head(key) do
       case S3.get_stream(bucket(), key, range) do
         {:ok, stream} -> {:ok, stream}
         {:error, :invalid_range} -> {:error, :invalid_range}
         {:error, reason} -> miss(reason, key, "get")
       end
-    else
-      {:error, :not_found}
     end
   end
 
@@ -147,22 +167,55 @@ defmodule AudioProxy.VariantStore.S3 do
   defp miss(reason, key, op) do
     Logger.warning(
       "s3 variant store: #{op} failed, treating as a miss " <>
-        "(bucket=#{bucket()} key=#{key} reason=#{inspect(reason)} " <>
-        "class=#{AudioProxy.Source.S3.classify(reason)})"
+        "(bucket=#{bucket()} key=#{key} reason=#{LogHandler.redact(inspect(reason))} " <>
+        "class=#{classify(reason)})"
     )
 
     {:error, :not_found}
   end
 
+  # `AudioProxy.Source.S3.classify/1`'s table, with one row this layer has to
+  # read differently.
+  #
+  # A 404 in this shape is *not* a missing object: `AudioProxy.S3.translate/1`
+  # turns those into `:not_found` and keeps `{:http, 404, _}` for the single
+  # case it went out of its way to preserve — the bucket itself is gone.
+  # `classify/1` maps every 4xx to `:not_found`, which is right for a source the
+  # *client* named (it cannot tell a denied object from an absent one) and wrong
+  # for a store the *operator* configured, where "the bucket is missing" and
+  # "nothing is cached yet" are the two things a log line has to keep apart.
+  #
+  # On the read paths that reach `miss/3` it is currently unreachable, and the
+  # reason is worth knowing rather than rediscovering: **a HEAD response carries
+  # no body**, so the `NoSuchBucket` code never arrives, and `translate/1` has
+  # nothing to match on. `head/1` is a HEAD, and `AudioProxy.S3.get_stream/3`
+  # opens with one too — so a missing bucket reads as an ordinary miss on both,
+  # and only a write surfaces it (as `{:http, 404, NoSuchBucket}` to the tee,
+  # which reports it as a write failure). `AudioProxy.VariantStore.S3Test` pins
+  # that asymmetry.
+  #
+  # The clause stays anyway: it is one line, the shape is one `AudioProxy.S3`
+  # genuinely produces, and a mapping that is wrong only when something else
+  # changes is a trap rather than a saving.
+  defp classify({:http, 404, _body}), do: :not_configured
+  defp classify(reason), do: AudioProxy.Source.S3.classify(reason)
+
   # All three or nothing: an object without them was not written by this
   # module, and serving it would mean inventing headers the redirect path
   # cannot correct.
+  # Empty is as absent as missing, and the guard says so: `upload_opts/1` casts
+  # every metadata value with `to_string/1`, so a `nil` etag that violated
+  # `t:AudioProxy.VariantStore.metadata/0` would be written as `""` and read
+  # back as a variant with no ETag. The local backend's JSON sidecar refuses a
+  # nil outright, and this is where the two would otherwise part company.
   defp metadata(%{
          content_type: content_type,
          cache_control: cache_control,
          metadata: %{@etag_metadata => etag}
        })
-       when is_binary(content_type) and is_binary(cache_control) and is_binary(etag) do
+       when is_binary(content_type) and content_type != "" and
+              is_binary(cache_control) and cache_control != "" and
+              is_binary(etag) and etag != "" do
     {:ok, %{content_type: content_type, cache_control: cache_control, etag: etag}}
   end
 

@@ -317,6 +317,25 @@ defmodule AudioProxy.Config do
           raise Error,
                 "#{var} must be a bare bucket URL with no query or fragment, got: #{inspect(value)}"
 
+        # Refused for the sharper version of the query/fragment reason, and the
+        # same one `s3_endpoint/2` gives twenty lines down: S3 credentials come
+        # from the AWS variables and nothing reads userinfo, so
+        # `s3://KEY:SECRET@bucket` would look to an operator like credentials
+        # supplied and behave like credentials omitted — failing later as a
+        # signature error that names nothing. The message does not echo the
+        # value, so a boot failure cannot put a secret in a log.
+        {:ok, %URI{scheme: "s3", userinfo: userinfo}} when is_binary(userinfo) ->
+          raise Error,
+                "#{var} must not carry credentials — S3 credentials come from AWS_ACCESS_KEY_ID " <>
+                  "and AWS_SECRET_ACCESS_KEY, and userinfo here would be silently ignored"
+
+        # A port names an endpoint, and the endpoint is `AP_S3_ENDPOINT`'s.
+        # Accepting one here would drop it and address the store somewhere else
+        # entirely.
+        {:ok, %URI{scheme: "s3", port: port}} when is_integer(port) ->
+          raise Error,
+                "#{var} s3 URLs name a bucket only; a port belongs in AP_S3_ENDPOINT, got: #{inspect(value)}"
+
         {:ok, %URI{scheme: "s3", host: bucket, path: path}}
         when is_binary(bucket) and bucket != "" and path in [nil, "", "/"] ->
           {:s3, bucket!(var, value, bucket)}
@@ -503,14 +522,29 @@ defmodule AudioProxy.Config do
 
     key = @store_probe_prefix <> Integer.to_string(System.unique_integer([:positive]))
 
-    with :ok <- AudioProxy.S3.put_stream(bucket, key, []),
-         :ok <- AudioProxy.S3.delete(bucket, key) do
-      config
-    else
+    # Not a `with`: the two failures are different failures and an operator
+    # needs to be told which one happened. A refused *write* means the bucket
+    # cannot back a variant store at all. A refused *delete* means it can — the
+    # write worked — and that this probe just left an object behind, which a
+    # crashloop would repeat once per attempt. Saying "refused the boot probe"
+    # for both would send someone to check write permissions that are fine.
+    case AudioProxy.S3.put_stream(bucket, key, []) do
+      :ok ->
+        case AudioProxy.S3.delete(bucket, key) do
+          :ok ->
+            config
+
+          {:error, reason} ->
+            raise Error,
+                  "AP_VARIANT_STORE=s3://#{bucket} accepted the boot probe and would not let it " <>
+                    "be removed (#{inspect(reason)}); the object is still at #{key} and these " <>
+                    "credentials need DeleteObject as well as PutObject"
+        end
+
       {:error, reason} ->
         raise Error,
               "AP_VARIANT_STORE must name a bucket this deployment can write, and " <>
-                "s3://#{bucket} refused the boot probe (#{inspect(reason)})"
+                "s3://#{bucket} refused the boot probe write (#{inspect(reason)})"
     end
   end
 

@@ -76,8 +76,32 @@ defmodule AudioProxy.VariantStore.S3Test do
       # A 64-hex object that this module did not write — a stray copy, another
       # tool's upload. Serving it would mean inventing the headers a redirect
       # cannot correct, so it reads as absent.
+      #
+      # By *both* read callbacks. `get_stream/2` answered with the bytes until
+      # it was made to run `head/1` first: `AudioProxy.S3.get_stream/3` reads a
+      # size and streams, and a size is something a stray object has. The local
+      # backend never had the gap, which is what made it a divergence rather
+      # than a bug — and what the assertion below pins.
       key = key()
       :ok = S3.put_stream(@bucket, key, ["not a variant"])
+
+      assert {:error, :not_found} = VariantStore.head(key)
+      assert {:error, :not_found} = VariantStore.get_stream(key, nil)
+      assert {:error, :not_found} = VariantStore.get_stream(key, {0, 4})
+    end
+
+    test "metadata present but empty is as absent as missing" do
+      # `upload_opts/1` casts with `to_string/1`, so a nil etag that broke the
+      # metadata contract would land as "" and read back as a variant with no
+      # ETag. The local backend's sidecar refuses a nil outright.
+      key = key()
+
+      :ok =
+        S3.put_stream(@bucket, key, ["bytes"],
+          content_type: "audio/ogg",
+          cache_control: "public, max-age=31536000, immutable",
+          metadata: %{"etag" => to_string(nil)}
+        )
 
       assert {:error, :not_found} = VariantStore.head(key)
     end
@@ -134,6 +158,40 @@ defmodule AudioProxy.VariantStore.S3Test do
         capture_log(fn -> assert {:error, :not_found} = VariantStore.get_stream(key(), nil) end)
 
       assert log =~ "treating as a miss"
+    end
+  end
+
+  describe "a bucket that is gone" do
+    setup do
+      AudioProxy.ConfigHelper.put_config(%{
+        variant_store: {:s3, "no-such-bucket-#{System.unique_integer([:positive])}"}
+      })
+
+      :ok
+    end
+
+    test "reads as a cold cache, silently, because a HEAD carries no body" do
+      # Not the outcome anyone would choose, and not something this layer can
+      # repair: S3 answers a missing bucket and a missing object with the same
+      # bodyless 404 on HEAD, so the NoSuchBucket code that distinguishes them
+      # is never on the wire. `AudioProxy.S3Test` pins the same fact one layer
+      # down. Both read paths open with a HEAD, so both are affected.
+      log =
+        capture_log(fn ->
+          assert {:error, :not_found} = VariantStore.head(key())
+          assert {:error, :not_found} = VariantStore.get_stream(key(), nil)
+        end)
+
+      refute log =~ "s3 variant store"
+    end
+
+    test "and the write-back is where it becomes visible" do
+      # A PUT does carry an error body, so this is the one operation that can
+      # tell an operator the bucket is missing. It goes to the tee as a write
+      # failure rather than through `miss/3` — which is why the 404 row in this
+      # module's `classify/1` is insurance rather than a live path.
+      assert {:error, {:http, 404, body}} = VariantStore.put_stream(key(), ["x"], @metadata)
+      assert body =~ "NoSuchBucket"
     end
   end
 

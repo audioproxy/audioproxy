@@ -212,6 +212,30 @@ defmodule AudioProxy.ConfigTest do
       end
     end
 
+    test "an s3:// URL carrying credentials aborts, and the message does not echo them" do
+      # Silently dropping them would look to an operator like credentials
+      # supplied and behave like credentials omitted — the same reasoning
+      # AP_S3_ENDPOINT's userinfo refusal is built on.
+      error =
+        assert_raise Error, fn ->
+          Config.build!(%{"AP_VARIANT_STORE" => "s3://AKIAEXAMPLE:topsecret@variants"})
+        end
+
+      assert error.message =~ "AP_VARIANT_STORE"
+      assert error.message =~ "AWS_ACCESS_KEY_ID"
+      refute error.message =~ "topsecret"
+    end
+
+    test "an s3:// URL with a port aborts rather than addressing somewhere else" do
+      error =
+        assert_raise Error, fn ->
+          Config.build!(%{"AP_VARIANT_STORE" => "s3://variants:9000"})
+        end
+
+      assert error.message =~ "AP_VARIANT_STORE"
+      assert error.message =~ "AP_S3_ENDPOINT"
+    end
+
     test "an s3:// URL naming no bucket aborts" do
       error = assert_raise Error, fn -> Config.build!(%{"AP_VARIANT_STORE" => "s3://"}) end
 
