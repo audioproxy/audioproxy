@@ -82,8 +82,9 @@ defmodule AudioProxy.Config do
   @default_probe_timeout 10
 
   # `AP_MAX_PROBE_CONCURRENCY`'s default, as a multiple of the render cap. A
-  # probe turns out to cost ~45 ms, a good part of it contended CPU — measured in
-  # change's `design.md`, and mostly dynamic linking rather than the header read
+  # probe turns out to cost ~45 ms, a good part of it contended CPU — measured
+  # in `openspec/changes/archive/2026-08-07-bound-probe-concurrency/design.md`,
+  # and mostly dynamic linking rather than the header read
   # — so probes and renders do compete for the same cores, and a ceiling has to
   # be some function of how many there are. Four times the render cap puts the
   # default past the measured throughput knee while keeping the two pools

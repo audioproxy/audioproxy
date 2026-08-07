@@ -14,8 +14,9 @@ defmodule AudioProxy.ProbeLimiter do
 
   There is no wait queue, and that is the whole difference from
   `AudioProxy.Semaphore`. `acquire/0` either takes a slot or refuses; nobody
-  ever waits for one. The measurements in `bound-probe-concurrency`'s
-  `design.md` are the reason. A probe is about 45 ms of wall clock, some of it
+  ever waits for one. The measurements in
+  `openspec/changes/archive/2026-08-07-bound-probe-concurrency/design.md`
+  are the reason. A probe is about 45 ms of wall clock, some of it
   contended CPU, and the degradation past saturation is gradual — at 512 in
   flight a box holds a fifteenth of its file descriptors and a thirtieth of its
   process table while per-probe latency goes from 78 ms to six seconds. Nothing
