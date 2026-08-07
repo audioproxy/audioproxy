@@ -708,7 +708,25 @@ Elixir with Plug and [Bandit](https://github.com/mtrudel/bandit), and no Phoenix
 
 ## License
 
-[Apache-2.0](LICENSE). The container images additionally distribute Debian packages (ffmpeg among them) under their own licenses; how the images comply is tracked in [`add-image-license-compliance`](openspec/changes/add-image-license-compliance) until it lands.
+[Apache-2.0](LICENSE) for the proxy itself. ffmpeg is invoked as a subprocess, so nothing about its licensing reaches this source tree.
+
+The published image is a separate question, because it is a distribution. It ships Debian's packages, ffmpeg among them, and Debian builds ffmpeg with `--enable-gpl`; handing those binaries to someone carries the GPL's obligations. Two things ride in the image to meet them:
+
+- **The license notices**, at `/usr/share/doc/<package>/copyright`, exactly as Debian ships them.
+- **The corresponding source**, listed in `/usr/share/audioproxy/SOURCES.txt`: every installed package at its exact version, with the [snapshot.debian.org](https://snapshot.debian.org) URL for the source that binary was built from. That archive is version-exact and permanent, so a link still resolves to the source behind *this* image long after the suite has moved on.
+
+Read either straight out of the image:
+
+```bash
+docker run --rm --entrypoint cat ghcr.io/audioproxy/audioproxy:latest /usr/share/audioproxy/SOURCES.txt
+docker run --rm --entrypoint cat ghcr.io/audioproxy/audioproxy:latest /usr/share/doc/ffmpeg/copyright
+```
+
+Both are checked in CI on every build (present, complete, and resolving), so an image that reaches the registry has them.
+
+Should a listed source ever become unreachable, the offer stands: open an issue at [github.com/audioproxy/audioproxy](https://github.com/audioproxy/audioproxy/issues) and the corresponding source for that image will be provided, for three years from the date it was published.
+
+Redistributing your own image built from this one inherits all of the above; keep `/usr/share/doc` and the manifest intact and it travels with the layers. Patents are a separate axis from licensing, and AAC in particular is still encumbered; if you offer `f:aac` or `f:m4a` commercially, that is worth its own opinion.
 
 ## Documentation
 
