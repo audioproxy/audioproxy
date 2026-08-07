@@ -57,12 +57,14 @@ defmodule AudioProxy.Application do
     # The semaphore is ahead of both, for that reason read the other way round:
     # a coordinator releases its slot from `terminate/2`, so the thing it
     # releases into has to still be there when the last coordinator stops.
-    # The probe coordinators sit beside the render ones and ahead of them only
-    # by convention: both spawn through `RenderSupervisor`, so both have to stop
-    # before it, which reverse-order shutdown gives for free.
+    # The probe pool is the same shape one layer over: `AudioProxy.ProbeLimiter`
+    # ahead of the coordinators that take slots from it, and its registry and
+    # supervisor after, so reverse-order shutdown stops the coordinators before
+    # the counter they release into.
     children =
       [
         AudioProxy.Semaphore,
+        AudioProxy.ProbeLimiter,
         # Reads the semaphore's depth, so it starts behind it — and ahead of
         # the listener, because `/ready` must have somewhere to ask on the
         # first accepted connection.

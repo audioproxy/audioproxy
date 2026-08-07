@@ -118,9 +118,9 @@ Two things the numbers also settle about *shape*:
 ## Known limits, accepted deliberately
 
 Surfaced by the adversarial review round and recorded rather than fixed. Each is
-either stated in `AudioProxy.ProbeCoordinator`'s moduledoc already or an exact
-copy of a shape `AudioProxy.RenderCoordinator` ships today; changing any of them
-here would make the two paths stop matching, which costs more than it buys.
+either stated in the relevant moduledoc already or an exact copy of a shape the
+render path ships today; changing any of them here would make the two paths stop
+matching, which costs more than it buys.
 
 - **A verdict that arrives after a waiter's deadline is never collected.**
   `ProbeCoordinator.await/2`'s drain is `after 0` and there is no barrier that
@@ -132,6 +132,11 @@ here would make the two paths stop matching, which costs more than it buys.
   five-second join timeout is a 25-second worst case on a request path, reachable
   only by a coordinator that is wedged five times in a row.
   `AudioProxy.RenderCoordinator` has the identical constants.
+- **`ProbeLimiter.acquire/1` does not catch an exit, while `release/1` does.** A
+  limiter that is momentarily down therefore fails probes with a 500 rather than
+  degrading. `AudioProxy.Semaphore.request/1` is the same, deliberately: the
+  asymmetry is that a release during shutdown must never crash its caller, while
+  an acquire has nothing useful to do with a missing counter.
 - **An abnormal runner exit *after* a verdict has been broadcast is silent.** The
   verdict is already delivered and valid, so there is nothing to report to a
   client; what is lost is a log line about something odd having happened in a

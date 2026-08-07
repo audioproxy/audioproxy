@@ -177,7 +177,9 @@ A `HEAD` answers what the check chain determines — `401`, `404`, `413` and the
 
 A probe reads container headers and stops; it never decodes. It therefore does **not** take an `AP_MAX_CONCURRENCY` slot — that cap exists to bound encoders pinning cores, and queueing probes behind renders would make the endpoint a client calls *before* it knows what to request the slowest thing in the proxy. `AP_PROBE_TIMEOUT` is what bounds one probe's lifetime, and it is separate from and shorter than `AP_RENDER_TIMEOUT`.
 
-Probes coalesce on the **source**, not the variant: concurrent requests reading one source share one `ffprobe`, whether they are two `/info` calls, two different renditions of one file, or an `/info` alongside a render. The identity is the source because that is what a probe reads — two variants of one file ask ffprobe the identical question about the identical bytes, and `/info` describes no variant at all. A request served from the variant store, or answered `304`, never reaches the gate and probes not at all.
+What a probe *does* take is a slot in a pool of its own, `AP_MAX_PROBE_CONCURRENCY`, which defaults to four times `AP_MAX_CONCURRENCY`. There are two subprocess pools, and this is the second: renders are rationed by one counter and probes by another, so a probe never waits behind an encoder and neither pool is unbounded. A probe that finds no slot is answered `429` with `Retry-After`, the same shape a full render queue produces. There is no queue behind the probe ceiling — a probe is tens of milliseconds, so telling a client to come back is worth more than making it wait.
+
+Probes coalesce on the **source**, not the variant: concurrent requests reading one source share one `ffprobe`, whether they are two `/info` calls, two different renditions of one file, or an `/info` alongside a render. Only a request that actually spawns a probe takes a slot, so the ceiling counts `ffprobe` processes rather than requests — exactly as `AP_MAX_CONCURRENCY` counts encoders rather than subscribers. A request served from the variant store, or answered `304`, probes not at all and takes nothing from either pool.
 
 ---
 
@@ -233,7 +235,7 @@ Every response, success or error, carries an explicit `Cache-Control` — no CDN
 | `415` | Source not decodable (`undecodable_source`), or contains video (`video_source` — see §3.1) |
 | `416` | `Range` unsatisfiable against a cached variant (proxy mode only) |
 | `422` | Invalid or conflicting options |
-| `429` | No render slot: the wait queue was full, or this request waited in it longer than `AP_RENDER_TIMEOUT` without reaching the front (`Retry-After` set) |
+| `429` | No slot in one of the two pools: either no render slot (the wait queue was full, or this request waited in it longer than `AP_RENDER_TIMEOUT` without reaching the front) or no probe slot (`AP_MAX_PROBE_CONCURRENCY` reached, §4.3 — that pool has no queue). `Retry-After` set either way, and which pool it was is deliberately not reported |
 | `500` | The render failed for a reason that is not the client's: no encoder, no space, a diagnostic the classifier does not recognise |
 | `500` | The storage backend a source names is misconfigured: no credentials, or a store that answers a redirect because the configured region or endpoint is not the object's. No client action can resolve either |
 | `502` | The storage backend could not be reached: a transport failure, or a `5xx` from the store itself |
@@ -265,7 +267,8 @@ Mid-stream render failure after `200` is signaled by abnormal termination of the
 | `AP_LOCAL_ROOT` | Root directory for `local://` sources; unset = local sources disabled. Must exist at boot |
 | `AP_VARIANT_STORE` | Variant store, scheme-tagged: `file:///path` or `s3://bucket`; unset = no cache, always render. Either scheme is proved writable at boot by performing a write and removing it — a directory that does not exist or refuses writes, or a bucket that is unreachable or refuses one, fails the container. `s3://` names a bucket only — a key prefix, a port or embedded credentials are refused rather than ignored |
 | `AP_MAX_CONCURRENCY` | Max simultaneous ffmpeg processes (default: CPU count). Coalesced requests share one, so this counts renders and not requests |
-| `AP_QUEUE_SIZE` | Requests that may wait for a slot before the next is answered `429` |
+| `AP_MAX_PROBE_CONCURRENCY` | Max simultaneous ffprobe processes (default: 4 × `AP_MAX_CONCURRENCY`). A pool of its own so a probe never waits behind an encoder; concurrent requests for one source share a probe, so this counts probes and not requests. No queue — overflow is `429` — see §4.3 |
+| `AP_QUEUE_SIZE` | Requests that may wait for a *render* slot before the next is answered `429` |
 | `AP_READY_QUEUE_THRESHOLD` | Queue depth at which `/ready` answers `503`, recovering at half of it rounded down (default: half `AP_QUEUE_SIZE` rounded down, minimum 1; `0` disables, as does `AP_QUEUE_SIZE=0`). Refused above `AP_QUEUE_SIZE`, where it could never trip |
 | `AP_MAX_SRC_BYTES`, `AP_RENDER_TIMEOUT` | Abuse limits. `AP_MAX_SRC_BYTES` bounds the *source*, checked before a render starts — the `413` above |
 | `AP_MAX_VARIANT_BYTES` | Bytes one render may retain, defaulting to the effective `AP_MAX_SRC_BYTES`. Output past it kills the render; the response has already committed to `200`, so the outcome is a failed stream rather than a `413` |

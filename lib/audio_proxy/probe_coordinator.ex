@@ -36,12 +36,26 @@ defmodule AudioProxy.ProbeCoordinator do
   ## Asking
 
   `probe/3` either starts the probe or attaches to the running one, and returns
-  exactly what `AudioProxy.Ffprobe.probe/2` would have returned — `{:ok,
-  decoded_json}` or `{:error, reason}` in that module's own vocabulary. A caller
-  that already handled `probe/2` needs no new clause.
+  what `AudioProxy.Ffprobe.probe/2` would have returned — `{:ok, decoded_json}`
+  or `{:error, reason}` in that module's own vocabulary — plus one reason of its
+  own, `{:error, {:queue_full, retry_after}}`, when `AudioProxy.ProbeLimiter`
+  had no slot. `AudioProxy.ErrorJSON` already renders that tuple as §5's 429.
 
   A caller cannot tell whether it started the probe or joined one, and has no
   reason to: it is waiting for a verdict either way.
+
+  ## The slot comes first, and only a spawn takes one
+
+  A coordinator takes an `AP_MAX_PROBE_CONCURRENCY` slot in `init/1`, before it
+  spawns anything, and releases it the moment the verdict arrives — before the
+  linger below, because what the linger holds is a decoded map and a map costs
+  no CPU.
+
+  Taking the slot *in the coordinator* rather than in the caller is what makes
+  the two halves of this change compose: requests that coalesce onto a running
+  probe do not consume the ceiling, so the bound counts `ffprobe` processes
+  rather than requests, exactly as the render semaphore counts encoders rather
+  than subscribers.
 
   ## The start race
 
@@ -93,7 +107,7 @@ defmodule AudioProxy.ProbeCoordinator do
 
   require Logger
 
-  alias AudioProxy.Ffprobe
+  alias AudioProxy.{Ffprobe, ProbeLimiter}
 
   @registry __MODULE__.Registry
   @supervisor __MODULE__.Supervisor
@@ -120,16 +134,16 @@ defmodule AudioProxy.ProbeCoordinator do
   @attempts 5
 
   @typedoc "Why a probe produced no verdict. `AudioProxy.Ffprobe`'s, plus a full pool."
-  @type error_reason :: Ffprobe.error_reason()
+  @type error_reason :: Ffprobe.error_reason() | {:queue_full, pos_integer()}
 
   defstruct [:identity, :input, :opts, :runner, :result, waiters: MapSet.new()]
 
   @doc """
   The registry and supervisor this module needs, for the application tree.
 
-  Start them after `AudioProxy.Ffmpeg.RenderSupervisor`: a coordinator spawns a
-  runner that starts a subprocess through it, and reverse-order shutdown then
-  tears the coordinators down first.
+  Start them after `AudioProxy.ProbeLimiter`: a coordinator takes a slot in
+  `init/1` and releases one on its way out, so the thing it releases into has to
+  outlive it, which reverse-order shutdown gives for free.
   """
   @spec children() :: [Supervisor.child_spec() | {module(), term()}]
   def children do
@@ -250,7 +264,7 @@ defmodule AudioProxy.ProbeCoordinator do
       # Never restarted, for the same reason a render coordinator is not: every
       # waiter has already been told, and a fresh request will probe again.
       restart: :temporary,
-      shutdown: 6_000
+      shutdown: ProbeLimiter.release_timeout() + 1_000
     }
   end
 
@@ -265,9 +279,8 @@ defmodule AudioProxy.ProbeCoordinator do
 
   @impl true
   def init(opts) do
-    # So that a supervisor shutdown arrives as an `{:EXIT, _, _}` this process
-    # handles rather than a silent kill, which is what takes the runner — and
-    # its `ffprobe` — down with it.
+    # So that the supervisor's shutdown reaches `terminate/2`, where the slot is
+    # returned.
     Process.flag(:trap_exit, true)
 
     state = %__MODULE__{
@@ -279,7 +292,13 @@ defmodule AudioProxy.ProbeCoordinator do
       waiters: MapSet.new([Keyword.fetch!(opts, :waiter)])
     }
 
-    {:ok, spawn_runner(state)}
+    # Asked for here so that a full pool is a `start_child` error the requesting
+    # process gets back directly — a 429 before a coordinator exists, rather
+    # than a coordinator whose only act is to broadcast a refusal.
+    case ProbeLimiter.acquire() do
+      :ok -> {:ok, spawn_runner(state)}
+      {:error, reason} -> {:stop, {:shutdown, reason}}
+    end
   end
 
   # The runner calls `Ffprobe.probe/2` and reports. It has to be a separate
@@ -316,6 +335,14 @@ defmodule AudioProxy.ProbeCoordinator do
 
   @impl true
   def handle_info({:probe_result, result}, %__MODULE__{result: nil} = state) do
+    # Before the linger, not in `terminate/2`. The subprocess is gone by the
+    # time `probe/2` returns, and what this process holds from here on is a
+    # decoded map — holding a slot across the linger would shrink the effective
+    # ceiling by the linger over the probe's own duration, which for a 40 ms
+    # probe is almost all of it. `terminate/2` still releases, for the paths
+    # that never get here; the second call is a no-op.
+    ProbeLimiter.release()
+
     state = %{state | result: result}
 
     case result do
@@ -351,6 +378,15 @@ defmodule AudioProxy.ProbeCoordinator do
   def handle_info({:EXIT, _from, reason}, state), do: {:stop, reason, state}
 
   def handle_info(_message, state), do: {:noreply, state}
+
+  @impl true
+  def terminate(_reason, _state) do
+    # Idempotent, and it covers the stop paths that never reached the verdict —
+    # a supervisor shutdown mid-probe, most of all. The limiter's own monitor is
+    # the backstop for the ones that never reach here.
+    ProbeLimiter.release()
+    :ok
+  end
 
   # The identity goes *first*, then everyone waiting is told. Both orders stop
   # a joiner from being handed a failed verdict — a call that arrives after

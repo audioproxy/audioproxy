@@ -306,7 +306,7 @@ Responses carry an `ETag` derived from the source object, so a client or CDN tha
 
 Probing is cheap — it reads the file's header and stops — so it does not queue behind renders and has its own, shorter, `AP_PROBE_TIMEOUT`. For the same reason `AP_MAX_SRC_BYTES` does not apply here: a source too large to render can still be described, which is what you want, since the long file is exactly the one you were going to ask for a trimmed preview of.
 
-Requests reading the same source also share one probe rather than each paying for their own — several `/info` calls, several renditions of one file, or an `/info` arriving alongside a render. Sharing is per *source* rather than per variant, because what a probe reads is the source: two renditions of one file ask the same question of the same bytes.
+Cheap is not free, though, so probes have a ceiling of their own: `AP_MAX_PROBE_CONCURRENCY`, separate from `AP_MAX_CONCURRENCY` so that neither pool can starve the other. Requests reading the same source share one probe — several `/info` calls, several renditions, or an `/info` alongside a render — so the ceiling is reached by traffic naming many *different* sources at once. When it is, the answer is a `429` with `Retry-After`, the same as a full render queue; come back and there will almost certainly be room, since a probe lasts milliseconds.
 
 ## Processing options
 
@@ -486,7 +486,7 @@ Failures are JSON, one shape everywhere: `{"error": "…", "message": "…"}`.
 | `415` | `undecodable_source` | The source format is not decodable, or — on `/info` — carries no audio at all |
 | `415` | `video_source` | The source contains a video stream, and this proxy serves audio only. Cover art is not video. See [Sources](#sources) |
 | `422` | `invalid_options` | Invalid or conflicting options; the message names the offending segment |
-| `429` | `queue_full` | The render queue is full, or this request waited longer than `AP_RENDER_TIMEOUT` for a slot; `Retry-After` is set |
+| `429` | `queue_full` | A pool is full: either the render queue (or this request waited longer than `AP_RENDER_TIMEOUT` for a render slot), or `AP_MAX_PROBE_CONCURRENCY` probes are already running. `Retry-After` is set either way, and the two are deliberately indistinguishable to a client |
 | `500` | `render_failed` | The render failed for a reason that is not yours: no encoder on the host, no disk space, a failure the proxy could not classify. Worth retrying |
 | `500` | `probe_failed` | A probe failed for a reason that is not yours. Worth retrying. Both endpoints probe — `/info` is a probe, and a render runs one first to check the source is audio |
 | `500` | `not_configured` | The storage backend the source names is misconfigured — no credentials, or a region/endpoint that is not the object's, which the store answers with a redirect. An operator has to fix it; retrying will not |
@@ -511,7 +511,8 @@ Note that the variables below are the full configuration surface for the design,
 | `AP_LOCAL_ROOT` | existing directory | unset | Root for `local://` sources; unset disables them. Must exist at boot, and may not be `/` |
 | `AP_VARIANT_STORE` | URL (`file:///path`, `s3://bucket`) | unset | Where rendered variants are written back; unset = no cache, always render. Probed for writability at boot. See [Variant store](#variant-store) |
 | `AP_MAX_CONCURRENCY` | positive integer | schedulers online | Max simultaneous ffmpeg processes. Requests that share a render share its slot, so this counts encodes, not connections |
-| `AP_QUEUE_SIZE` | non-negative integer | `32` | Requests that may wait for a slot before the next one is answered `429` with `Retry-After`. `0` means no waiting at all |
+| `AP_MAX_PROBE_CONCURRENCY` | positive integer | `4 × AP_MAX_CONCURRENCY` | Max simultaneous ffprobe processes. A ceiling of its own so a probe never queues behind a render; requests for the same source share a probe, so this counts probes, not connections. Raise it if you serve many distinct sources at once and see `429`s while ffmpeg is idle |
+| `AP_QUEUE_SIZE` | non-negative integer | `32` | Requests that may wait for a render slot before the next one is answered `429` with `Retry-After`. `0` means no waiting at all |
 | `AP_READY_QUEUE_THRESHOLD` | non-negative integer, ≤ `AP_QUEUE_SIZE` | half `AP_QUEUE_SIZE`, rounded down (min 1) | Queue depth at which `/ready` answers `503`; it recovers again at half the threshold, rounded down. `0` disables the check, which is what a single node wants. See [Health and readiness](#health-and-readiness) |
 | `AP_MAX_SRC_BYTES` | positive integer | `2000000000` | Reject larger sources with `413`, before any render starts. Does not apply to `/info`, which only reads headers |
 | `AP_MAX_VARIANT_BYTES` | positive integer | the effective `AP_MAX_SRC_BYTES` | Cap the bytes one render may hold in memory; output past it kills the render and fails the request mid-stream. Set it below `AP_MAX_SRC_BYTES` to accept large sources while producing small outputs. Raising it does **not** buy capacity — it bounds one render, so every concurrent slot may reach it; the lever for the total is `AP_MAX_CONCURRENCY`. See [docs/capacity.md](docs/capacity.md) |

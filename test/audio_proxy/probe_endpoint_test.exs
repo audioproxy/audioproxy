@@ -1,17 +1,20 @@
 defmodule AudioProxy.ProbeEndpointTest do
   @moduledoc """
-  Probe coalescing where it bites: signed requests, and the `ffprobe` processes
+  The probe pool where it bites: signed requests, and the `ffprobe` processes
   they do or do not start.
 
-  `AudioProxy.ProbeCoordinatorTest` proves the mechanism. This proves the
-  wiring — that a burst of requests for one source costs one probe rather than
-  one each, that `/info` and the render endpoint's audio-only gate share that
-  probe, and that a request which never reaches the gate never spawns one.
+  `AudioProxy.ProbeCoordinatorTest` proves the coalescing and
+  `AudioProxy.ProbeLimiterTest` proves the counting. This proves the wiring —
+  that a burst of requests for one source costs one probe rather than one each,
+  that `/info` and the render endpoint's audio-only gate share that probe, that
+  a full probe pool reaches the client as §5's 429 with a `Retry-After`, and
+  that neither pool is consulted for a request that never probes.
 
   Driven through `AudioProxy.CountingProbe.Router`, which is the production
   chain with a prober that keeps a tally beside the source.
 
-  `async: false`: the config and both registries are one global thing.
+  `async: false`: the config, both registries and both pools are one global
+  thing.
   """
 
   use ExUnit.Case, async: false
@@ -25,6 +28,7 @@ defmodule AudioProxy.ProbeEndpointTest do
   alias AudioProxy.{
     CacheKey,
     FakeFfmpeg,
+    ProbeLimiter,
     RenderCoordinator,
     Semaphore,
     Signature,
@@ -59,6 +63,7 @@ defmodule AudioProxy.ProbeEndpointTest do
       local_root: tmp_dir,
       max_src_bytes: 2_000_000_000,
       max_variant_bytes: 2_000_000_000,
+      max_probe_concurrency: 8,
       variant_store: nil
     })
 
@@ -122,8 +127,53 @@ defmodule AudioProxy.ProbeEndpointTest do
     end
   end
 
+  describe "the probe ceiling, from the client's side" do
+    test "an exhausted pool is 429 with a Retry-After", %{dir: dir} do
+      put_config(%{max_probe_concurrency: 1})
+
+      # One slow probe holds the only slot; a request for a *different* source
+      # arrives while it does, so there is nothing to coalesce onto.
+      held = Task.async(fn -> get("/f:mp3/plain/local://probeslow.wav") end)
+      wait_until(fn -> FakeFfmpeg.probe_count(dir) == 1 end)
+
+      conn = get("/f:mp3/plain/local://piece.wav")
+
+      assert conn.status == 429
+      assert [retry_after] = get_resp_header(conn, "retry-after")
+      assert String.to_integer(retry_after) >= 1
+      assert JSON.decode!(conn.resp_body)["error"] == "queue_full"
+
+      assert Task.await(held, @deadline).status == 200
+
+      # Refused rather than queued: the second source was never probed.
+      assert FakeFfmpeg.probe_count(dir) == 1
+    end
+
+    test "a probe does not wait behind a render slot", %{dir: dir} do
+      # Every render slot held and no room to wait. A request that needs a
+      # render is shed; one that only needs a probe is not, which is the whole
+      # reason the probe path has a counter of its own.
+      put_config(%{max_concurrency: 1, queue_size: 0})
+
+      hanging = Task.async(fn -> get("/f:mp3/plain/local://hang.wav") end)
+      wait_until(fn -> Semaphore.stats().held == 1 end)
+
+      # Captured *before*, because the hanging render's own gate probe has
+      # already made the count 1: asserting `>= 1` afterwards would hold for a
+      # proxy in which the second probe never ran at all.
+      before = FakeFfmpeg.probe_count(dir)
+
+      assert get("/info/plain/local://piece.wav").status == 200
+      assert FakeFfmpeg.probe_count(dir) == before + 1
+
+      assert %{held: 0} = ProbeLimiter.stats()
+
+      Task.shutdown(hanging, :brutal_kill)
+    end
+  end
+
   describe "a request that never probes" do
-    test "a cache HIT probes not at all", %{dir: dir} do
+    test "a cache HIT needs neither pool", %{dir: dir} do
       store = Path.join(dir, "store")
       File.mkdir_p!(store)
       put_config(%{variant_store: {:file, store}, serve_mode: :proxy})
@@ -139,22 +189,31 @@ defmodule AudioProxy.ProbeEndpointTest do
           etag: ~s("#{key}")
         })
 
+      # Both pools exhausted-by-configuration: one probe slot, held, and no
+      # render slot at all to be had.
+      put_config(%{max_probe_concurrency: 1, max_concurrency: 1, queue_size: 0})
+
+      held = Task.async(fn -> get("/f:mp3/plain/local://probeslow.wav") end)
+      wait_until(fn -> FakeFfmpeg.probe_count(dir) == 1 end)
+
       conn = get(rest)
 
       assert conn.status == 200
       assert conn.resp_body == "stored-variant-bytes"
       assert get_resp_header(conn, "x-audio-proxy") == ["HIT"]
 
-      # The point, stated as the count: the bytes already exist, so the gate
-      # never runs and no probe is spawned for this request at all.
-      assert FakeFfmpeg.probe_count(dir) == 0
+      # The point, stated as the count: the HIT is served from bytes that
+      # already exist, so it asks neither pool for anything.
+      assert FakeFfmpeg.probe_count(dir) == 1
 
-      # The store is this test's alone, so wait for the write-back to settle
-      # rather than hand a running tee to whatever configuration comes next.
+      assert Task.await(held, @deadline).status == 200
+
+      # And then wait for the render that held the probe slot to finish being
+      # written back, since this is the one test with somewhere to write.
       wait_until(fn -> DynamicSupervisor.which_children(RenderCoordinator.Supervisor) == [] end)
     end
 
-    test "a 304 revalidation does not either", %{dir: dir} do
+    test "a 304 revalidation needs neither either", %{dir: dir} do
       options = "f:mp3"
       rest = "/#{options}/plain/local://piece.wav"
       etag = ~s("#{CacheKey.derive!(options, "local://piece.wav")}")
