@@ -192,7 +192,19 @@ metrics:
 
 It is a lagging signal, though: ffmpeg saturates a slot's CPU whether the queue behind it is empty or thirty deep, so utilization tells you the node is working, not that it is behind. **Queue depth is the leading signal** — it is the thing `/ready` already thresholds on, and scaling on it means adding capacity while requests are waiting rather than after they start timing out.
 
-Reading queue depth as a metric needs the `/metrics` endpoint, which arrives in its own slice; the semaphore already emits the gauge as telemetry. Once it is there, the HPA shape is a custom Pods metric on the queue-depth gauge with a target well below `AP_READY_QUEUE_THRESHOLD`, so the fleet scales *before* nodes start shedding.
+`audio_proxy_render_queue_depth` is that number, exported by [`/metrics`](../README.md#metrics). The HPA shape is a custom Pods metric on it, with a target well below `AP_READY_QUEUE_THRESHOLD` so the fleet scales *before* nodes start shedding:
+
+```yaml
+metrics:
+  - type: Pods
+    pods:
+      metric: { name: audio_proxy_render_queue_depth }
+      target: { type: AverageValue, averageValue: "4" }
+```
+
+Two things have to be in place first. The scrape port is on its own listener bound to loopback by default, so a scraper outside the pod needs `AP_METRICS_BIND=0.0.0.0` and a `PodMonitor` on `AP_METRICS_PORT` — declare the port on the pod, not on the Service that serves audio. And the metric has to reach the HPA, which means Prometheus Adapter or an equivalent bridge; the HPA reads the custom metrics API, never the exposition directly.
+
+`audio_proxy_render_queue_rejections_total` is the alert that pairs with this target. Depth is the signal you scale on; rejections are the signal that you scaled too late.
 
 Until then, the practical pairing is CPU-based HPA plus readiness: readiness sheds within the current fleet, CPU grows the fleet. The failure mode worth naming is the one where they are not paired — under cluster-wide overload *every* node crosses the threshold, every node reports unready, and the Service has no endpoints at all. Readiness on its own can only redistribute load; it cannot create capacity. The autoscaler is what resolves an overload. Shed, then scale — never shed alone.
 

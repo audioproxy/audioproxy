@@ -9,8 +9,9 @@ defmodule AudioProxy.Router do
   which share a route — is dispatched to a pipeline that verifies the
   signature before any other processing; an unsigned or badly-signed request
   is a 401 from there, and anything that matches no route at all is the JSON
-  404 below. The `metrics` route from `docs/audio-proxy-api-v1.md` §2 arrives
-  with its own slice.
+  404 below. `/metrics` is deliberately *not* here — it has a listener of its
+  own (`AudioProxy.Metrics.Router`), and the route below says so with a 404
+  rather than letting it fall through to the signed one.
 
   The signed route binds `:sig` and `rest` for dispatch only. Neither binding
   is read downstream: the signature covers the raw request path, which
