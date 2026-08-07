@@ -278,7 +278,7 @@ Mid-stream render failure after `200` is signaled by abnormal termination of the
 | `AP_SERVE_MODE` | `redirect` \| `proxy` |
 | `AP_PRESIGN_TTL` | Seconds a HIT's presigned URL stays valid (default: 300); redirect mode only |
 | `AP_LOG_LEVEL` | `debug` \| `info` \| `warning` \| `error` (default: `info`) |
-| `AP_METRICS_BIND`, `AP_METRICS_PORT` | Where the `/metrics` listener binds (default: `127.0.0.1`, `9568`). The endpoint is unsigned, so the bind is its access control; `AP_METRICS_BIND` is an address literal and a hostname is refused at boot |
+| `AP_METRICS_BIND`, `AP_METRICS_PORT` | Where the `/metrics` listener binds (default: `127.0.0.1`, `9568`). The endpoint is unsigned, so the bind is its access control; `AP_METRICS_BIND` is an address literal and a hostname is refused at boot, as is a port equal to the listener's |
 | `AP_S3_ENDPOINT` | Origin URL of an S3-compatible store (`http://minio:9000`); unset = AWS proper. An origin and nothing else — a path, query, fragment or embedded credentials are refused at boot |
 | `AP_S3_ADDRESSING` | `virtual` \| `path`: whether a request names its bucket in the host or in the path. Default: `virtual` with no `AP_S3_ENDPOINT`, `path` with one. Signed requests and presigned URLs always use the same style, since the host is inside the signature |
 | `AP_S3_CA_BUNDLE` | PEM bundle to verify the store's certificate against, replacing the system trust store; a readable file at boot. There is no way to disable verification |

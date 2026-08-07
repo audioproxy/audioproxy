@@ -226,6 +226,29 @@ defmodule AudioProxy.ConfigTest do
 
       assert error.message =~ "AP_METRICS_PORT"
     end
+
+    test "a port equal to the listener's aborts, naming both variables" do
+      error =
+        assert_raise Error, fn ->
+          Config.build!(%{"AP_PORT" => "9568", "AP_METRICS_PORT" => "9568"})
+        end
+
+      assert error.message =~ "AP_METRICS_PORT"
+      assert error.message =~ "AP_PORT"
+    end
+
+    test "the collision is caught against PORT too, which the worktree workflow sets" do
+      # Not a hypothetical: `PORT` is the branch's hashed port, so a branch can
+      # hash onto a metrics default nobody touched. Left to the runtime this is
+      # an `:eaddrinuse` naming neither variable.
+      assert_raise Error, fn -> Config.build!(%{"PORT" => "9568"}) end
+    end
+
+    test "the default pair does not collide" do
+      config = Config.build!(%{})
+
+      refute config.port == config.metrics_port
+    end
   end
 
   describe "AP_LOCAL_ROOT" do
