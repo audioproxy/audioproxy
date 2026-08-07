@@ -7,6 +7,16 @@
 # worktree. So all this does is remove the worktree's devcontainer, which
 # would otherwise linger after the directory is gone.
 #
+# "The devcontainer" is a compose project, not a container. The devcontainer CLI
+# labels only the service it attaches to — `devcontainer.local_folder` lands on
+# `app` and on nothing else — so selecting by that label alone tore down `app`
+# and left the `minio` sidecar running against a directory that no longer
+# existed. Every worktree removal stranded one, plus the project's network;
+# `add-image-license-compliance` left a MinIO up for 16 hours before anyone
+# looked. The label both services do carry is the compose project's
+# `working_dir`, which is derived from the path rather than from a munged
+# project name, so it needs no guessing about how the CLI spells things.
+#
 # Invoked by wt's [pre-remove] hook.
 
 set -euo pipefail
@@ -20,15 +30,38 @@ WORKSPACE_FOLDER="$(cd "$(dirname "$0")/.." && pwd)"
 
 echo "==> Removing devcontainer for $(basename "$WORKSPACE_FOLDER")"
 
-# The devcontainer CLI labels containers with the workspace folder it built them
-# from, which is how we find this worktree's container and no other's.
-containers="$(docker ps -aq \
-  --filter "label=devcontainer.local_folder=$WORKSPACE_FOLDER" 2>/dev/null || true)"
+# Two filters, unioned: the first finds the attached service the way it always
+# has, the second finds every service in the same compose project. Either alone
+# is a container this worktree owns, and both are scoped by this worktree's own
+# path, so a parallel session's containers cannot match. Docker ANDs multiple
+# --filter arguments, hence two queries rather than one.
+containers="$( { docker ps -aq \
+    --filter "label=devcontainer.local_folder=$WORKSPACE_FOLDER"
+  docker ps -aq \
+    --filter "label=com.docker.compose.project.working_dir=$WORKSPACE_FOLDER/.devcontainer"
+  } 2>/dev/null | sort -u || true)"
 
 if [ -n "$containers" ]; then
+  # Read the project off the containers before removing them — afterwards there
+  # is nothing left to ask, and the network outlives its services.
+  # shellcheck disable=SC2086
+  projects="$(docker inspect $containers \
+    --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null \
+    | grep -v '^$' | sort -u || true)"
+
   # shellcheck disable=SC2086
   docker rm --force --volumes $containers >/dev/null
-  echo "==> Removed"
+  echo "==> Removed $(printf '%s\n' "$containers" | wc -l | tr -d ' ') container(s)"
+
+  for project in $projects; do
+    networks="$(docker network ls -q \
+      --filter "label=com.docker.compose.project=$project" 2>/dev/null || true)"
+    if [ -n "$networks" ]; then
+      # shellcheck disable=SC2086
+      docker network rm $networks >/dev/null 2>&1 || true
+      echo "==> Removed the $project network"
+    fi
+  done
 else
   echo "==> No container found; nothing to do"
 fi
