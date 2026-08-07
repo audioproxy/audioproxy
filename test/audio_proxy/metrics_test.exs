@@ -253,6 +253,47 @@ defmodule AudioProxy.MetricsTest do
     end
   end
 
+  describe "surviving its own death" do
+    test "a brutal kill restarts cleanly and keeps counting" do
+      before = Process.whereis(Metrics)
+      ref = Process.monitor(before)
+
+      # `:kill` rather than `:stop`: it is the one exit that skips `terminate/2`,
+      # so the handler outlives the table and `init/1` has to cope with an id
+      # that is already attached. Asserting `:ok` on the re-attach instead put
+      # the supervisor into a restart loop, and three of those took the whole
+      # application down — from one kill.
+      Process.exit(before, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^before, :killed}, 5_000
+
+      restarted = await_restart(before)
+
+      assert is_pid(restarted) and restarted != before
+
+      # Attached exactly once per event, not twice — a restart that attached
+      # without detaching would double-count everything it saw.
+      events = for h <- :telemetry.list_handlers([]), h.id == Metrics, do: h.event_name
+
+      assert events != []
+      assert length(events) == length(Enum.uniq(events))
+
+      Metrics.reset()
+      render_stop(:mp3, :ok, 0.1)
+
+      assert lines("audio_proxy_renders_total") == [
+               ~s(audio_proxy_renders_total{format="mp3",outcome="success"} 1)
+             ]
+    end
+
+    defp await_restart(old, attempts \\ 100) do
+      case Process.whereis(Metrics) do
+        nil when attempts > 0 -> Process.sleep(20) && await_restart(old, attempts - 1)
+        ^old when attempts > 0 -> Process.sleep(20) && await_restart(old, attempts - 1)
+        other -> other
+      end
+    end
+  end
+
   describe "concurrent updates" do
     test "counters are exact under contention" do
       writers = 20
