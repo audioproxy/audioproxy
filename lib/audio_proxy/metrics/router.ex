@@ -56,11 +56,17 @@ defmodule AudioProxy.Metrics.Router do
     |> send_resp(200, "")
   end
 
+  # `no-store` here too, and not for symmetry: without it the response carries
+  # Plug's default `max-age=0, private, must-revalidate`, and this listener's
+  # whole surface is meant to be uncacheable. The 404 is not sensitive, so this
+  # is tidiness rather than a fix — but a cache policy that varies by route
+  # within one listener is a thing to explain later.
   match _ do
     conn
     |> assign(:endpoint_class, :unknown)
     |> assign(:error_class, :not_found)
     |> put_resp_content_type("text/plain")
+    |> put_resp_header("cache-control", "no-store")
     |> send_resp(404, "not_found\n")
   end
 
