@@ -9,8 +9,9 @@ defmodule AudioProxy.Router do
   which share a route — is dispatched to a pipeline that verifies the
   signature before any other processing; an unsigned or badly-signed request
   is a 401 from there, and anything that matches no route at all is the JSON
-  404 below. The `metrics` route from `docs/audio-proxy-api-v1.md` §2 arrives
-  with its own slice.
+  404 below. `/metrics` is deliberately *not* here — it has a listener of its
+  own (`AudioProxy.Metrics.Router`), and the route below says so with a 404
+  rather than letting it fall through to the signed one.
 
   The signed route binds `:sig` and `rest` for dispatch only. Neither binding
   is read downstream: the signature covers the raw request path, which
@@ -87,6 +88,16 @@ defmodule AudioProxy.Router do
     |> send_resp(ready_status(ready?), "")
   end
 
+  # `/metrics` is served on its own listener (`AudioProxy.Metrics.Router`), and
+  # saying so here is the only way this listener answers what it means. Without
+  # the route it would match the signed one below with an empty `rest`, and an
+  # operator who pointed a scraper at the wrong port would get a 401 about a
+  # signature — a message about the wrong problem entirely. It is also the
+  # honest status: the scrape surface is genuinely not here.
+  match "/metrics", via: [:get, :head] do
+    not_found(conn)
+  end
+
   get "/:sig/*rest" do
     conn
     |> assign(:endpoint_class, :render)
@@ -102,6 +113,10 @@ defmodule AudioProxy.Router do
   end
 
   match _ do
+    not_found(conn)
+  end
+
+  defp not_found(conn) do
     conn
     |> assign(:endpoint_class, :unknown)
     |> assign(:error_class, :not_found)

@@ -117,10 +117,11 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 - `s3://` sources. ffmpeg reads the object through a presigned URL, so a trim fetches only the bytes it needs, and an unreachable store answers `502` rather than a `404` that would report a deletion that did not happen. Same caveat as above: on `main`, not in the `0.3.0` image.
 - An `s3://` **variant store**, so the cache survives a restart and is shared between nodes — and with it, `AP_SERVE_MODE=redirect`, which has been the documented default all along and had no backend that could presign until now. A hit answers `302` to a short-lived storage URL and the proxy leaves the hot path entirely.
 
+- A Prometheus `/metrics` endpoint on a bind-restricted listener of its own, reporting queue depth, render durations, cache hit ratio and error rates. Same caveat as above: on `main`, not in the `0.3.0` image. See [Metrics](#metrics).
+
 **After that**
 
 - HTTPS sources, for stores that are not S3
-- A Prometheus `/metrics` endpoint reporting queue depth, render durations and hit ratio
 - arm64 images, so Graviton/Ampere and Apple Silicon run natively
 
 **Under consideration**
@@ -518,6 +519,8 @@ Note that the variables below are the full configuration surface for the design,
 | `AP_SERVE_MODE` | `redirect` \| `proxy` | `redirect` | Serve cache hits by redirect or proxied. See [Choosing a serve mode](#choosing-a-serve-mode) |
 | `AP_PRESIGN_TTL` | positive integer | `300` | Seconds a cache hit's presigned URL stays valid. Redirect mode only |
 | `AP_LOG_LEVEL` | `debug` \| `info` \| `warning` \| `error` | `info` | Lowest level written to stdout. See [Logs](#logs) |
+| `AP_METRICS_BIND` | IP address literal | `127.0.0.1` | Interface the `/metrics` listener binds. The endpoint is unsigned, so this *is* its access control — widen it deliberately. A hostname is refused. See [Metrics](#metrics) |
+| `AP_METRICS_PORT` | positive integer | `9568` | Port for the `/metrics` listener. Must differ from the listener port (`AP_PORT`, or `PORT`) — two listeners cannot share one, and the clash is refused at boot rather than left to an `:eaddrinuse` naming neither |
 | `AP_S3_ENDPOINT` | origin URL | unset | Talk to an S3-compatible store instead of AWS. See [S3 credentials](#s3-credentials) and [docs/s3-providers.md](docs/s3-providers.md) |
 | `AP_S3_ADDRESSING` | `virtual` \| `path` | `virtual` with no `AP_S3_ENDPOINT`, `path` with one | Whether a request names its bucket in the host (`bucket.host/key`) or in the path (`host/bucket/key`). Tigris requires `virtual`; see [docs/s3-providers.md](docs/s3-providers.md) |
 | `AP_S3_CA_BUNDLE` | path to a PEM file | unset | Verify the store's certificate against this bundle instead of the system trust store, for a store behind a private CA. Must be readable at boot |
@@ -634,7 +637,7 @@ The proxy is built to sit behind a CDN without special configuration on either s
 | `416` | `no-store` | The only response whose body depends on a request header, and nothing here sends `Vary: Range` |
 | `429`, `500`, `502`, `504` | `no-store` | Transient — caching a transient failure amplifies it (`429` carries `Retry-After`, and a cached `502` would suppress the retry that would have worked) |
 | `200` from `/info` | `public, max-age=3600` | Not `immutable`, and not a year: the metadata describes a source somebody may re-upload, so caches must be able to revalidate it. See [Asking what a source is](#asking-what-a-source-is) |
-| `/health`, `/ready` | `no-store` | Liveness is only worth anything fresh, and a stored readiness verdict is advice about a load level that has since moved |
+| `/health`, `/ready`, `/metrics` | `no-store` | Liveness is only worth anything fresh, a stored readiness verdict is advice about a load level that has since moved, and a cached scrape is a measurement of a moment that has passed |
 
 The error rows are a deliberate relaxation, worth knowing if you operate a shared cache: without them every response would carry Plug's `max-age=0, private, must-revalidate`, so errors were previously not cacheable at all and never shareable. Dropping `private` is safe here because an error body is a pure function of the URL — no cookies, no auth headers, nothing per-user in it. The practical effect is that a hot 404 or a bad-signature storm is absorbed at the edge instead of reaching the origin every time. If you need the old behavior for a specific deployment, an edge rule overriding `Cache-Control` on 4xx is the place to do it; the proxy has no knob for it by design.
 
@@ -694,13 +697,89 @@ Levels:
 | `error` | Nothing routine: a render the host could not start at all (no encoder on `PATH`), a subprocess that survived `SIGKILL`, and crashes |
 | `warning` | `5xx` and `504` responses, and the ffmpeg diagnostic behind a failed render |
 | `info` | **Default.** The above, plus one line per request, `4xx` included: a `401` is a normal outcome for a public endpoint, not an incident |
-| `debug` | The above, plus `/health` (silent otherwise, so a liveness probe every second does not become the log), the render lifecycle, and client disconnects |
+| `debug` | The above, plus `/health`, `/ready` and `/metrics` (silent otherwise, so a liveness probe every second and a scrape every fifteen do not become the log), the render lifecycle, and client disconnects |
 
 Set the floor with `AP_LOG_LEVEL`; `warning` is the setting for a busy production instance that wants failures only.
 
 Presigned URLs and credentials never appear. Sources are logged by their canonical identity (`local://piece.wav`), never by what ffmpeg was handed to read, and diagnostics quoted back from ffmpeg have their query strings stripped.
 
 Structured JSON output is not implemented yet — it arrives with its own slice.
+
+## Metrics
+
+`GET /metrics` answers in Prometheus text format. It is unsigned, and it is served on **its own listener**, bound by default to `127.0.0.1:9568` — a sidecar scraper and a `kubectl port-forward` reach it, and nothing off-host does. The bind is the access control, so widening it is a deliberate act:
+
+```console
+$ curl -s localhost:9568/metrics | head -3
+# HELP audio_proxy_renders_total Renders that finished, by output format and outcome.
+# TYPE audio_proxy_renders_total counter
+audio_proxy_renders_total{format="mp3",outcome="success"} 412
+```
+
+`AP_PORT` does not serve it — a request for `/metrics` there is a `404`.
+
+### What is exported
+
+| Metric | Type | Labels |
+|---|---|---|
+| `audio_proxy_renders_total` | counter | `format`, `outcome` |
+| `audio_proxy_render_duration_seconds` | histogram | `format`, `outcome` |
+| `audio_proxy_renders_running` | gauge | — |
+| `audio_proxy_render_slots_held` | gauge | — |
+| `audio_proxy_render_slots_capacity` | gauge | — |
+| `audio_proxy_render_queue_depth` | gauge | — |
+| `audio_proxy_render_queue_capacity` | gauge | — |
+| `audio_proxy_render_queue_rejections_total` | counter | — |
+| `audio_proxy_cache_lookups_total` | counter | `format`, `outcome` |
+| `audio_proxy_variant_store_write_failures_total` | counter | — |
+| `audio_proxy_http_requests_total` | counter | `endpoint`, `status` |
+
+`format` is the output format (`mp3`, `opus`, `peaks`, …). `outcome` on a render is `success`, `cancelled` (the client went away mid-stream), or the failure class from the [Errors](#errors) table (`timeout`, `undecodable`, `not_found`, …); on a cache lookup it is `hit`, `miss` or `coalesced`, the same three values the `X-Audio-Proxy` header carries. `endpoint` is the route class (`render`, `info`, `health`, `ready`, `metrics`, `unknown`) and `status` a code family (`2xx`, `4xx`, …).
+
+Every label is a fixed, bounded set. Nothing derived from a request — not the source, not the options, not the cache key — becomes a label, so no client can grow your scraper's series count.
+
+`renders_running` counts *renders*, not requests: twenty clients coalesced onto one encode are one running render, which is what `AP_MAX_CONCURRENCY` counts too.
+
+Duration buckets are fixed at 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120 and 300 seconds. They are not configurable, so the histogram stays aggregatable across nodes and across releases.
+
+### Scrape config
+
+```yaml
+scrape_configs:
+  - job_name: audio_proxy
+    static_configs:
+      - targets: ["127.0.0.1:9568"]
+```
+
+In a container, `127.0.0.1` is the pod, not the host — so a sidecar scraper in the same pod works unchanged, and a scraper elsewhere needs `AP_METRICS_BIND=0.0.0.0` plus a network policy that keeps the port to your monitoring namespace. On Kubernetes, declare the port on the pod and point a `PodMonitor` at it rather than exposing it through the Service that serves audio.
+
+### The four signals
+
+```promql
+# Saturation: how much of this node's render budget is in use. The leading
+# signal is the queue behind it — the slots are full long before it grows.
+sum(audio_proxy_render_slots_held) / sum(audio_proxy_render_slots_capacity)
+sum(audio_proxy_render_queue_depth)
+
+# Latency: the 95th percentile render, by format. Split by format because a
+# full-length FLAC and a 30-second Opus preview are not the same workload.
+histogram_quantile(
+  0.95,
+  sum by (format, le) (rate(audio_proxy_render_duration_seconds_bucket[5m]))
+)
+
+# Cache efficiency: the share of requests that cost no encode at all. This is
+# the number the proxy exists to move.
+sum(rate(audio_proxy_cache_lookups_total{outcome=~"hit|coalesced"}[5m]))
+  / sum(rate(audio_proxy_cache_lookups_total[5m]))
+
+# Errors: the share of renders that did not deliver, and the load being shed.
+sum(rate(audio_proxy_renders_total{outcome!~"success|cancelled"}[5m]))
+  / sum(rate(audio_proxy_renders_total[5m]))
+rate(audio_proxy_render_queue_rejections_total[5m])
+```
+
+Two more worth an alert. `audio_proxy_variant_store_write_failures_total` moving at all means the cache has silently stopped filling — clients are being served, so nothing else reports it, and the hit ratio decays over hours. And `audio_proxy_render_queue_depth` is the leading signal for autoscaling: target it well below `AP_READY_QUEUE_THRESHOLD` so the fleet grows before nodes start shedding. See [docs/scaling.md](docs/scaling.md).
 
 ## Stack
 
@@ -741,6 +820,6 @@ Redistributing your own image built from this one inherits all of the above; kee
 | [VERSIONS.md](VERSIONS.md) | What the image is built from: Debian, Elixir/OTP and ffmpeg pins, why not Alpine, and how to bump one |
 | [docs/ffmpeg-arguments.md](docs/ffmpeg-arguments.md) | How options become ffmpeg arguments: filter order, per-format flags, known gaps |
 | [docs/rendering.md](docs/rendering.md) | How a render runs: the subprocess, the chunk stream, coalescing, buffering and lifecycle guarantees |
-| [docs/scaling.md](docs/scaling.md) | Running more than one node: the shared variant store it requires, what duplicate renders cost, load balancer recipes, Kubernetes probes and autoscaling, Fly.io, Docker Swarm |
+| [docs/scaling.md](docs/scaling.md) | Running more than one node: the shared variant store it requires, what duplicate renders cost, load balancer recipes, Kubernetes probes and queue-depth autoscaling, Fly.io, Docker Swarm |
 | [docs/capacity.md](docs/capacity.md) | How much memory a container needs: a concurrency-per-memory-limit matrix, then the formula behind it, measured per-format costs, long-form worked examples, and what the CI guard asserts |
 | `openspec/specs/` | Capability specs for what is built; `openspec/changes/` holds what is planned |

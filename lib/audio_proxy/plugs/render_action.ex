@@ -140,8 +140,9 @@ defmodule AudioProxy.Plugs.RenderAction do
   Every way this module can finish a render — done, cancelled by a departing
   client, failed, timed out, dead — closes an `AudioProxy.Telemetry` span
   rather than calling `Logger`. `AudioProxy.LogHandler` turns those events
-  into the lines an operator reads, and the metrics slice attaches its
-  aggregator to the same ones. The span is threaded through the receive loop
+  into the lines an operator reads, and `AudioProxy.Metrics` counts the same
+  ones into `renders_total` and its duration histogram. The span is threaded
+  through the receive loop
   as a plain value because there are half a dozen exit points and no single
   function call to wrap.
 

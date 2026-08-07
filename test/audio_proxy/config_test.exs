@@ -26,6 +26,8 @@ defmodule AudioProxy.ConfigTest do
                serve_mode: :redirect,
                presign_ttl: 300,
                log_level: :info,
+               metrics_bind: {127, 0, 0, 1},
+               metrics_port: 9568,
                s3: %{
                  region: nil,
                  access_key_id: nil,
@@ -177,6 +179,59 @@ defmodule AudioProxy.ConfigTest do
         assert Config.build!(%{"AP_LOG_LEVEL" => Atom.to_string(level)}).log_level == level
         assert level in Logger.levels()
       end
+    end
+  end
+
+  describe "AP_METRICS_BIND and AP_METRICS_PORT" do
+    test "default to loopback and the exporter port" do
+      config = Config.build!(%{})
+
+      # The scrape endpoint is unsigned, so its default reach is the whole of
+      # its access control — and it must be a default nobody has to remember
+      # to tighten.
+      assert config.metrics_bind == {127, 0, 0, 1}
+      assert config.metrics_port == 9568
+    end
+
+    test "an address literal becomes the tuple Bandit binds" do
+      assert Config.build!(%{"AP_METRICS_BIND" => "0.0.0.0"}).metrics_bind == {0, 0, 0, 0}
+      assert Config.build!(%{"AP_METRICS_BIND" => "::1"}).metrics_bind == {0, 0, 0, 0, 0, 0, 0, 1}
+    end
+
+    test "a hostname is refused, since access control must not depend on DNS" do
+      error = assert_raise Error, fn -> Config.build!(%{"AP_METRICS_BIND" => "localhost"}) end
+
+      assert error.message =~ "AP_METRICS_BIND"
+      assert error.message =~ "not a hostname"
+    end
+
+    test "a port that is not a positive integer aborts naming the variable" do
+      error = assert_raise Error, fn -> Config.build!(%{"AP_METRICS_PORT" => "0"}) end
+
+      assert error.message =~ "AP_METRICS_PORT"
+    end
+
+    test "a port equal to the listener's aborts, naming both variables" do
+      error =
+        assert_raise Error, fn ->
+          Config.build!(%{"AP_PORT" => "9568", "AP_METRICS_PORT" => "9568"})
+        end
+
+      assert error.message =~ "AP_METRICS_PORT"
+      assert error.message =~ "AP_PORT"
+    end
+
+    test "the collision is caught against PORT too, which the worktree workflow sets" do
+      # Not a hypothetical: `PORT` is the branch's hashed port, so a branch can
+      # hash onto a metrics default nobody touched. Left to the runtime this is
+      # an `:eaddrinuse` naming neither variable.
+      assert_raise Error, fn -> Config.build!(%{"PORT" => "9568"}) end
+    end
+
+    test "the default pair does not collide" do
+      config = Config.build!(%{})
+
+      refute config.port == config.metrics_port
     end
   end
 
