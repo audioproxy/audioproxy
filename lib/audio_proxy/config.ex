@@ -608,7 +608,29 @@ defmodule AudioProxy.Config do
     config
     |> validate_redirect_presign!()
     |> validate_ready_queue_threshold!()
+    |> validate_metrics_port!()
   end
+
+  # Cross-field: two Bandit listeners cannot share a port. Left to the runtime
+  # this is an `:eaddrinuse` from inside a supervisor, which names a number and
+  # neither of the two variables that produced it — and the operator has to know
+  # there is a second listener at all to read it.
+  #
+  # It is not only a typo. The listener port falls back to `PORT`, which the
+  # worktree workflow sets to the branch's hashed port, so a branch can hash to
+  # 9568 and collide with a metrics default nobody touched.
+  #
+  # Only equality is checked. A bind address would have to be compared against
+  # `0.0.0.0`, loopback and every interface the host actually has, and a rule
+  # that refused a legitimate pairing would be worse than the error it saved.
+  defp validate_metrics_port!(%{port: port, metrics_port: port}) do
+    raise Error,
+          "AP_METRICS_PORT (#{port}) must differ from the listener port — /metrics is served " <>
+            "on a second listener, and two cannot share one port. The listener port comes from " <>
+            "AP_PORT, or from PORT if that is unset"
+  end
+
+  defp validate_metrics_port!(config), do: config
 
   # Cross-field: the semaphore never queues more than `AP_QUEUE_SIZE` waiters,
   # so a threshold above it is a readiness check that can never trip. Refused

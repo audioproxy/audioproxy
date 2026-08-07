@@ -520,7 +520,7 @@ Note that the variables below are the full configuration surface for the design,
 | `AP_PRESIGN_TTL` | positive integer | `300` | Seconds a cache hit's presigned URL stays valid. Redirect mode only |
 | `AP_LOG_LEVEL` | `debug` \| `info` \| `warning` \| `error` | `info` | Lowest level written to stdout. See [Logs](#logs) |
 | `AP_METRICS_BIND` | IP address literal | `127.0.0.1` | Interface the `/metrics` listener binds. The endpoint is unsigned, so this *is* its access control — widen it deliberately. A hostname is refused. See [Metrics](#metrics) |
-| `AP_METRICS_PORT` | positive integer | `9568` | Port for the `/metrics` listener, separate from `AP_PORT` |
+| `AP_METRICS_PORT` | positive integer | `9568` | Port for the `/metrics` listener. Must differ from the listener port (`AP_PORT`, or `PORT`) — two listeners cannot share one, and the clash is refused at boot rather than left to an `:eaddrinuse` naming neither |
 | `AP_S3_ENDPOINT` | origin URL | unset | Talk to an S3-compatible store instead of AWS. See [S3 credentials](#s3-credentials) and [docs/s3-providers.md](docs/s3-providers.md) |
 | `AP_S3_ADDRESSING` | `virtual` \| `path` | `virtual` with no `AP_S3_ENDPOINT`, `path` with one | Whether a request names its bucket in the host (`bucket.host/key`) or in the path (`host/bucket/key`). Tigris requires `virtual`; see [docs/s3-providers.md](docs/s3-providers.md) |
 | `AP_S3_CA_BUNDLE` | path to a PEM file | unset | Verify the store's certificate against this bundle instead of the system trust store, for a store behind a private CA. Must be readable at boot |
