@@ -52,7 +52,7 @@ defmodule AudioProxy.ProbeCoordinator do
   no CPU.
 
   Taking the slot *in the coordinator* rather than in the caller is what makes
-  the two halves of this change compose: requests that coalesce onto a running
+  coalescing and the ceiling compose: requests that coalesce onto a running
   probe do not consume the ceiling, so the bound counts `ffprobe` processes
   rather than requests, exactly as the render semaphore counts encoders rather
   than subscribers.
