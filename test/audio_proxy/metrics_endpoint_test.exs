@@ -69,10 +69,24 @@ defmodule AudioProxy.MetricsEndpointTest do
       assert conn.resp_body == ""
     end
 
-    test "nothing else is served on this listener" do
+    test "nothing else is served on this listener, and the refusal is uncacheable too" do
       conn = conn(:get, "/health") |> AudioProxy.Metrics.Router.call(@metrics_opts)
 
       assert conn.status == 404
+      assert get_resp_header(conn, "cache-control") == ["no-store"]
+    end
+
+    test "a trailing slash is the same request" do
+      # Plug drops the empty trailing segment, so `/metrics/` and `/metrics`
+      # have identical `path_info` and neither listener treats them
+      # differently. Pinned because it is the sort of thing a reader assumes
+      # goes the other way.
+      conn = conn(:get, "/metrics/") |> AudioProxy.Metrics.Router.call(@metrics_opts)
+
+      assert conn.status == 200
+
+      assert conn(:get, "/metrics/") |> AudioProxy.Router.call(@public_opts) |> Map.get(:status) ==
+               404
     end
   end
 
