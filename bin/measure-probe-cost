@@ -1,0 +1,376 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Measures what one `ffprobe` costs and how many of them a box tolerates at
+# once, which is the evidence `bound-probe-concurrency` needs before it picks a
+# number for a probe ceiling.
+#
+#   bin/measure-probe-cost                  # build, measure, print both tables
+#   SKIP_BUILD=1 bin/measure-probe-cost     # reuse the tagged images
+#   LEVELS="1 8 32" bin/measure-probe-cost  # a shorter curve
+#
+# Requires docker and an ffmpeg on the *host* (only to generate the fixture).
+# Everything measured runs inside `audio_proxy:runtime`, because the binding
+# constraint being looked for — process table, file descriptors, scheduler
+# time — is the shipped image's on Linux and not the developer's on macOS.
+#
+# ## What is measured, and against what
+#
+# Two source shapes, because the whole question is whether a probe is cheap:
+#
+#   * **local** — a file the container reads directly, which is `AP_LOCAL_ROOT`
+#     in production.
+#   * **http** — the same bytes over a network hop, served by nginx on a docker
+#     network, which is the shape an S3 presigned URL has. Its latency is a
+#     *floor*: a real S3 endpoint is milliseconds away and this one is
+#     microseconds, so the HTTP column understates the wait and overstates how
+#     much of a probe is spawn cost. That direction is the safe one for sizing a
+#     ceiling — a bound derived from it is if anything too generous.
+#
+# The argv comes from `AudioProxy.Ffprobe.args/2` in the test image rather than
+# from a copy maintained here, for the reason `bin/measure-ffmpeg-rss` gives
+# about `Command.build/3`: a measurement of flags the proxy does not actually
+# pass is a measurement of nothing.
+#
+# ## How a level is run
+#
+# For each concurrency level, that many probes are started as close to
+# simultaneously as `sh` manages, each timing itself with `date +%s%N`, and the
+# level's wall clock is the whole burst. Reported per level: the median and the
+# maximum of the individual probes, the burst's own wall clock, and the peak
+# process and open-file-descriptor counts sampled from `/proc` while it ran.
+#
+# `/proc` is read from *inside* the container, so both counts are the PID
+# namespace's — the probes and their shells, not the host's thousands. That is
+# what makes "peak fds" a number about this workload rather than about the
+# machine it happened to run on.
+#
+# Sampling can miss a peak between polls, so both peaks are lower bounds and the
+# script prints the interval alongside them. The medians cannot be missed that
+# way: every probe records its own duration.
+
+require "json"
+require "open3"
+require "optparse"
+require "tmpdir"
+
+require_relative "script_support"
+
+include ScriptSupport
+
+IMAGE = ENV.fetch("IMAGE", "audio_proxy:runtime")
+TEST_IMAGE = ENV.fetch("TEST_IMAGE", "audio_proxy:test")
+REPO_ROOT = File.expand_path("..", __dir__)
+
+# The curve tasks 1.2 asks for. 512 is deliberately past anything a box should
+# be asked to do — the point is to find where it stops being linear, and a curve
+# that only samples the comfortable range cannot.
+LEVELS = ENV.fetch("LEVELS", "1 8 32 128 512").split.map { |l| Integer(l) }
+
+# Repeats of the single-probe measurement, whose whole point is a number small
+# enough that a scheduling hiccup would dominate one run.
+REPEATS = Integer(ENV.fetch("REPEATS", "20"))
+
+# Fixture length. Long enough to be a real file with a real header, short enough
+# that generating it is instant — a probe reads the header and stops, so this
+# number is not supposed to matter, and the local/http comparison is where that
+# claim gets tested.
+DURATION = Integer(ENV.fetch("DURATION", "60"))
+
+# Seconds between `/proc` samples. At 512 concurrent probes the burst lasts
+# seconds, so this is tens of samples; at 1 it may be none, which is why the
+# single-probe table does not report peaks.
+SAMPLE_INTERVAL = ENV.fetch("SAMPLE_INTERVAL", "0.05")
+
+NETWORK = "audio-proxy-probe-cost"
+FIXTURE = "piece.wav"
+
+def build_images
+  return warn("  skipped (SKIP_BUILD)") if ENV["SKIP_BUILD"]
+
+  sh!("docker", "build", "--target", "runtime", "-t", IMAGE, REPO_ROOT)
+  sh!("docker", "build", "--target", "test", "-t", TEST_IMAGE, REPO_ROOT)
+  warn "  built #{IMAGE} and #{TEST_IMAGE}"
+end
+
+# The argv the proxy would run, straight out of `AudioProxy.Ffprobe.args/2`.
+# Same sentinel trick as `bin/measure-ffmpeg-rss`: `mix` compiles on first run
+# in a fresh container and says so on stdout, so the split has to be exact
+# rather than "the output".
+SENTINEL = "--argv--"
+
+ELIXIR_SNIPPET = <<~ELIXIR
+  IO.puts("#{SENTINEL}")
+
+  System.fetch_env!("INPUT")
+  |> AudioProxy.Ffprobe.args(System.fetch_env!("PROTOCOLS"))
+  |> Enum.each(&IO.puts/1)
+ELIXIR
+
+def build_argv(input, protocols)
+  out = sh!("docker", "run", "--rm",
+            "-e", "INPUT=#{input}", "-e", "PROTOCOLS=#{protocols}",
+            TEST_IMAGE,
+            "mix", "run", "--no-start", "-e", ELIXIR_SNIPPET)
+
+  _log, _, argv = out.partition("#{SENTINEL}\n")
+  raise "no #{SENTINEL} in builder output:\n#{out}" if argv.empty?
+
+  # `args/2` is flags and input, not a command: the binary is what
+  # `AudioProxy.Ffprobe.executable/1` resolves at run time, and it is `ffprobe`
+  # from `PATH` in the image, same as in production.
+  ["ffprobe", *argv.lines.map(&:chomp).reject(&:empty?)]
+end
+
+# The driver that runs inside the container. Written as `sh` rather than driven
+# from the host one probe at a time, because a burst started over 512 `docker
+# exec` calls would measure docker.
+#
+# `wait` is given explicit pids: the sampler is a background job of the same
+# shell, and a bare `wait` would never return.
+DRIVER = <<~'SH'
+  set -eu
+
+  rm -rf /tmp/run
+  mkdir -p /tmp/run
+
+  # One sample before the loop, so a burst that finishes inside one interval is
+  # still measured against something.
+  count_procs() { ls -d /proc/[0-9]* 2>/dev/null | wc -l; }
+  count_fds() { ls /proc/[0-9]*/fd 2>/dev/null | grep -c '^[0-9]' || true; }
+
+  : > /tmp/run/procs
+  : > /tmp/run/fds
+  count_procs >> /tmp/run/procs
+  count_fds >> /tmp/run/fds
+
+  while :; do
+    count_procs >> /tmp/run/procs
+    count_fds >> /tmp/run/fds
+    sleep "$SAMPLE_INTERVAL"
+  done &
+  sampler=$!
+
+  # `SERIAL=1` is the single-probe arm: the same probe, the same timing, one at
+  # a time. Sharing the driver rather than writing a second one is what keeps
+  # the two tables comparable — a "one probe" figure measured by a different
+  # harness than the curve is not the curve's left-hand end.
+  # `$$` is deliberately not the discriminator for the stderr file: in POSIX sh
+  # it is the *parent* shell's pid inside a background subshell, so every probe
+  # in a burst would write to one path and 512 diagnostics would be one.
+  probe() {
+    index=$1
+    shift
+    s=$(date +%s%N)
+    if "$@" > /dev/null 2> "/tmp/run/err.$index"; then rc=0; else rc=$?; fi
+    e=$(date +%s%N)
+    echo "$(( (e - s) / 1000000 )) $rc" >> /tmp/run/times
+  }
+
+  pids=""
+  i=0
+  burst_start=$(date +%s%N)
+  while [ "$i" -lt "$LEVEL" ]; do
+    if [ "${SERIAL:-0}" = "1" ]; then
+      probe "$i" "$@"
+    else
+      probe "$i" "$@" &
+      pids="$pids $!"
+    fi
+    i=$((i + 1))
+  done
+
+  if [ -n "$pids" ]; then
+    # shellcheck disable=SC2086
+    wait $pids
+  fi
+  burst_end=$(date +%s%N)
+
+  kill "$sampler" 2>/dev/null || true
+
+  echo "burst_ms=$(( (burst_end - burst_start) / 1000000 ))"
+  echo "peak_procs=$(sort -n /tmp/run/procs | tail -1)"
+  echo "peak_fds=$(sort -n /tmp/run/fds | tail -1)"
+  echo "proc_samples=$(wc -l < /tmp/run/procs)"
+  echo "failures=$(awk '$2 != 0' /tmp/run/times | wc -l)"
+  echo "times=$(awk '{print $1}' /tmp/run/times | tr '\n' ',')"
+  # The first failing probe's diagnostic, so a level that silently measured 512
+  # errors is not published as a level that measured 512 probes.
+  echo "stderr=$(cat /tmp/run/err.* 2>/dev/null | head -3 | tr '\n' '~')"
+SH
+
+def run_level(level, argv, network:, mount:, serial: false)
+  args = ["docker", "run", "--rm",
+          "-e", "LEVEL=#{level}", "-e", "SAMPLE_INTERVAL=#{SAMPLE_INTERVAL}",
+          "-e", "SERIAL=#{serial ? 1 : 0}",
+          "-v", "#{mount}:/fixtures:ro"]
+  args += ["--network", network] if network
+  args += ["--entrypoint", "sh", IMAGE, "-c", DRIVER, "sh", *argv]
+
+  fields = sh!(*args).lines.map(&:chomp)
+  field = ->(name) { fields.find { |l| l.start_with?("#{name}=") }.to_s.delete_prefix("#{name}=") }
+
+  times = field["times"].split(",").reject(&:empty?).map { |t| Integer(t) }
+  raise "level #{level} recorded no timings" if times.empty?
+
+  failures = Integer(field["failures"])
+  if failures.positive?
+    raise "level #{level}: #{failures}/#{level} probes exited non-zero — " \
+          "#{field["stderr"].tr("~", " ")}"
+  end
+
+  {
+    level: level,
+    times: times.sort,
+    burst_ms: Integer(field["burst_ms"]),
+    peak_procs: Integer(field["peak_procs"]),
+    peak_fds: Integer(field["peak_fds"]),
+    samples: Integer(field["proc_samples"])
+  }
+end
+
+def median(sorted) = sorted[sorted.length / 2]
+
+# Nearest-rank, which is the only percentile definition that does not need
+# interpolating between two samples — and at these sample counts interpolation
+# would be inventing precision the run does not have.
+#
+# The `- 1` is load-bearing and was missing: `(n * 0.95).floor` is `n - 1` for
+# every n up to 20, so the p95 column reproduced the maximum exactly, and the
+# published table had two columns that were the same number wearing different
+# names. Nothing else in the script depended on it, which is why the rows still
+# looked plausible.
+def percentile(sorted, fraction)
+  (sorted.length * fraction).ceil.clamp(1, sorted.length).then { |rank| sorted[rank - 1] }
+end
+
+def image_facts
+  ffprobe = sh!("docker", "run", "--rm", "--entrypoint", "ffprobe", IMAGE, "-version")
+    .lines.first.to_s.strip
+  inspected = JSON.parse(sh!("docker", "inspect", IMAGE)).first
+  cpus = sh!("docker", "run", "--rm", "--entrypoint", "nproc", IMAGE).strip
+
+  {
+    ffprobe: ffprobe[/ffprobe version (\S+)/, 1],
+    arch: "#{inspected["Os"]}/#{inspected["Architecture"]}",
+    cpus: cpus
+  }
+end
+
+# The nginx that serves the HTTP arm. `nginx:alpine` rather than anything of
+# ours: it is a static file server on a throwaway network, it speaks Range,
+# and it is not the thing under measurement.
+def start_fixture_server(dir)
+  sh("docker", "network", "rm", NETWORK)
+  sh!("docker", "network", "create", NETWORK)
+
+  cid = docker_run("--network", NETWORK, "--network-alias", "fixtures",
+                   "-v", "#{dir}:/usr/share/nginx/html:ro", "nginx:alpine")
+
+  # nginx is up when it answers, not when docker says the container started.
+  30.times do
+    out, ok = sh("docker", "run", "--rm", "--network", NETWORK, "--entrypoint", "sh",
+                 IMAGE, "-c", "ffprobe -v error -i http://fixtures/#{FIXTURE} 2>&1 | head -1")
+    return cid if ok && out.strip.empty?
+
+    sleep 0.2
+  end
+
+  raise "the fixture server never answered on http://fixtures/#{FIXTURE}"
+end
+
+def generate_fixture(dir)
+  sh!("ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+      "-f", "lavfi", "-i", "sine=frequency=440:duration=#{DURATION}",
+      "-c:a", "pcm_s16le", File.join(dir, FIXTURE))
+
+  warn "  #{FIXTURE}: #{File.size(File.join(dir, FIXTURE)) / 1024} KiB, #{DURATION} s"
+end
+
+def cost_table(single, facts)
+  lines = []
+  lines << "| Source | Median | p95 | Max |"
+  lines << "|---|---|---|---|"
+  single.each do |arm, times|
+    lines << "| #{arm} | #{median(times)} ms | #{percentile(times, 0.95)} ms | " \
+             "#{times.last} ms |"
+  end
+  lines << ""
+  lines << "One probe at a time, #{REPEATS} runs per arm — spawn, header read and " \
+           "teardown, wall clock. Measured on `#{facts[:arch]}` (#{facts[:cpus]} cores) " \
+           "against ffprobe `#{facts[:ffprobe]}` from the runtime image. The HTTP arm " \
+           "is nginx one docker network away, so its latency is a floor rather than a " \
+           "real endpoint's. Regenerate with `bin/measure-probe-cost`."
+  lines.join("\n")
+end
+
+def curve_table(rows, arm, facts)
+  lines = []
+  lines << "| In flight | Median | Max | Burst | Peak procs | Peak fds |"
+  lines << "|---|---|---|---|---|---|"
+  rows.each do |r|
+    lines << "| #{r[:level]} | #{median(r[:times])} ms | #{r[:times].last} ms | " \
+             "#{r[:burst_ms]} ms | #{r[:peak_procs]} | #{r[:peak_fds]} |"
+  end
+  lines << ""
+  lines << "Probes started as one burst against the #{arm} source and waited for. " \
+           "*Median* and *Max* are individual probes; *Burst* is the whole level's wall " \
+           "clock. Process and descriptor counts are the container PID namespace's, " \
+           "sampled every #{SAMPLE_INTERVAL} s from `/proc`, so both are lower bounds. " \
+           "#{facts[:cpus]} cores, ffprobe `#{facts[:ffprobe]}`."
+  lines.join("\n")
+end
+
+# ---------------------------------------------------------------------------
+
+OptionParser.new do |o|
+  o.banner = "usage: bin/measure-probe-cost"
+end.parse!
+
+warn "→ images"
+build_images
+
+facts = image_facts
+warn "→ measuring against ffprobe #{facts[:ffprobe]} on #{facts[:arch]}, #{facts[:cpus]} cores"
+
+Dir.mktmpdir("probe-cost") do |dir|
+  # nginx and the prober both read it, and docker's own mount user is neither.
+  File.chmod(0o755, dir)
+  generate_fixture(dir)
+
+  begin
+    start_fixture_server(dir)
+
+    arms = {
+      "local" => build_argv("/fixtures/#{FIXTURE}", "file"),
+      "http" => build_argv("http://fixtures/#{FIXTURE}", "https,http,tls,tcp")
+    }
+
+    warn "→ one probe at a time (#{REPEATS} runs per arm)"
+    single = arms.to_h do |arm, argv|
+      row = run_level(REPEATS, argv, network: NETWORK, mount: dir, serial: true)
+      warn format("  %-6s median %d ms, max %d ms", arm, median(row[:times]), row[:times].last)
+      [arm, row[:times]]
+    end
+
+    # The curve is the local arm only. The HTTP one would measure nginx's
+    # accept queue as much as the box's process table, and the question here is
+    # what *this* side runs out of first.
+    warn "→ concurrency curve, local source (#{LEVELS.join(", ")} in flight)"
+    curve = LEVELS.map do |level|
+      row = run_level(level, arms.fetch("local"), network: nil, mount: dir)
+      warn format("  %4d  median %4d ms  burst %5d ms  procs %4d  fds %5d  (%d samples)",
+                  level, median(row[:times]), row[:burst_ms],
+                  row[:peak_procs], row[:peak_fds], row[:samples])
+      row
+    end
+
+    puts
+    puts cost_table(single, facts)
+    puts
+    puts curve_table(curve, "local", facts)
+  ensure
+    containers.dup.each { |cid| docker_rm(cid) }
+    sh("docker", "network", "rm", NETWORK)
+  end
+end

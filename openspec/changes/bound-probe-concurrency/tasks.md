@@ -1,8 +1,8 @@
 ## 1. Measure
 
-- [ ] 1.1 Probe cost against a local file and against an HTTP source: spawn, first byte, teardown, wall clock. Ruby script under `bin/`, reusing `bin/script_support.rb`'s plumbing; numbers into `design.md`
-- [ ] 1.2 Concurrency curve: probes at 1, 8, 32, 128, 512 in flight — wall clock per probe, scheduler utilisation, peak file descriptors and processes. Find the knee, and say what binds first
-- [ ] 1.3 Decide from the numbers whether §3's bound is needed at all once §2 lands, and record the decision in `design.md` either way
+- [x] 1.1 Probe cost against a local file and against an HTTP source: spawn, first byte, teardown, wall clock. Ruby script under `bin/`, reusing `bin/script_support.rb`'s plumbing; numbers into `design.md`
+- [x] 1.2 Concurrency curve: probes at 1, 8, 32, 128, 512 in flight — wall clock per probe, scheduler utilisation, peak file descriptors and processes. Find the knee, and say what binds first
+- [x] 1.3 Decide from the numbers whether §3's bound is needed at all once §2 lands, and record the decision in `design.md` either way
 
 ## 2. Coalesce probes per cache key
 
