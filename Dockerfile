@@ -129,6 +129,58 @@ RUN apt-get update \
         wget \
     && rm -rf /var/lib/apt/lists/*
 
+# Corresponding source, baked in at build time.
+#
+# This image distributes Debian binaries — ffmpeg's build is `--enable-gpl` —
+# and distributing a GPL binary carries two obligations: ship the license text,
+# and make the *exact* source available. The first is Debian's own
+# `/usr/share/doc/<pkg>/copyright`, which debian:slim keeps (its dpkg exclude
+# strips `/usr/share/doc/*` but re-includes the copyright files). **Any future
+# size pass must preserve them**, along with this manifest; the license-
+# compliance job in CI fails the build if either goes missing.
+#
+# The second is this file. Rather than mirroring tarballs, each package is
+# linked to snapshot.debian.org at its installed version — Debian's own archive,
+# version-exact and permanent, so the link resolves to the source the binary in
+# *this* image was built from rather than to whatever is current. The base
+# image's snapshot timestamp is recorded too, so the whole apt state can be
+# reconstructed and not just the individual packages.
+#
+# Generated here rather than by CI on purpose: the artifact carries its own
+# compliance, so an image built locally is as compliant as a published one.
+#
+# `${Package}` and not `${binary:Package}` — the latter appends the arch
+# qualifier (`libfoo:amd64`), which is not what the manifest is keyed on. The
+# status filter drops packages that are removed-but-config-retained: dpkg still
+# knows them, but this image does not distribute them.
+ARG DEBIAN_VERSION
+RUN set -eu; \
+    snapshot="${DEBIAN_VERSION##*-}"; \
+    mkdir -p /usr/share/audioproxy; \
+    { \
+      echo "# audio_proxy image — corresponding source for the Debian packages it distributes"; \
+      echo "#"; \
+      echo "# License notices for every package below are in /usr/share/doc/<package>/copyright."; \
+      echo "# The source each binary was built from is archived by Debian at the URL on its line;"; \
+      echo "# snapshot.debian.org is version-exact, so those links do not drift with the suite."; \
+      echo "#"; \
+      echo "# Base image: debian:${DEBIAN_VERSION}-slim"; \
+      case "$snapshot" in \
+        [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) \
+          echo "# Base image snapshot: https://snapshot.debian.org/archive/debian/${snapshot}T000000Z/";; \
+        *) \
+          echo "# Base image snapshot: unknown (DEBIAN_VERSION carries no date suffix)";; \
+      esac; \
+      echo "#"; \
+      echo "# Packages installed at build time may be newer than that snapshot; the per-package"; \
+      echo "# URLs are the authoritative record, and each is pinned to the version listed here."; \
+      echo "#"; \
+      echo "# package<TAB>version<TAB>source-package<TAB>source-version<TAB>source-url"; \
+      dpkg-query -W -f='${db:Status-Abbrev}\t${Package}\t${Version}\t${source:Package}\t${source:Version}\n' \
+        | awk -F'\t' '$1 ~ /^ii/ { printf "%s\t%s\t%s\t%s\thttps://snapshot.debian.org/package/%s/%s/\n", $2, $3, $4, $5, $4, $5 }' \
+        | sort; \
+    } > /usr/share/audioproxy/SOURCES.txt
+
 # uid/gid 1000 matches the devcontainer, so a bind-mounted fixture directory
 # has the same ownership story in both.
 RUN groupadd --gid 1000 app \
@@ -162,10 +214,18 @@ CMD ["/app/bin/audio_proxy", "start"]
 # Provenance. Passed by CI; `docker build` without them leaves the value empty
 # rather than wrong. `image.source` is also what links the GHCR package to the
 # repository.
+#
+# The description is what GHCR prints on the package page, so it is where the
+# compliance pointer goes: someone deciding whether to redistribute this image
+# reads that page, not the filesystem. `licenses` names GPL-3.0-or-later
+# alongside the proxy's own Apache-2.0 because that is the strongest copyleft
+# in the aggregate (Debian's ffmpeg copyright carries GPL-3+ stanzas), and an
+# aggregate scanner that under-reports is worse than one that over-reports.
 ARG VERSION
 ARG REVISION
 LABEL org.opencontainers.image.title="audio_proxy" \
-      org.opencontainers.image.description="On-the-fly audio transcoding proxy" \
+      org.opencontainers.image.description="On-the-fly audio transcoding proxy. Distributes Debian packages, ffmpeg among them, under their own licenses: notices are in /usr/share/doc/*/copyright and corresponding source is listed in /usr/share/audioproxy/SOURCES.txt. See https://github.com/audioproxy/audioproxy#license" \
+      org.opencontainers.image.licenses="Apache-2.0 AND GPL-3.0-or-later" \
       org.opencontainers.image.source="https://github.com/audioproxy/audioproxy" \
       org.opencontainers.image.url="https://github.com/audioproxy/audioproxy" \
       org.opencontainers.image.version="${VERSION}" \

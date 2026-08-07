@@ -232,6 +232,118 @@ jobs:
       - name: Check that the guard can still fail
         run: SKIP_BUILD=1 IMAGE=audio_proxy:capacity bin/check-capacity --self-test
 
+  license-compliance:
+    name: the image carries its notices and its source manifest
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build the release image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: runtime
+          load: true
+          tags: audio_proxy:license
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The image distributes GPL binaries, so it has to ship the notices for
+      # them. debian:slim strips /usr/share/doc but keeps the copyright files;
+      # a future size pass that took the rest too would break the obligation
+      # silently, which is what this asserts against. ffmpeg is named because
+      # it is the GPL build and the reason any of this exists.
+      - name: Assert the license notices survive
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh audio_proxy:license -c '
+            set -eu
+            test -s /usr/share/doc/ffmpeg/copyright || { echo "::error::/usr/share/doc/ffmpeg/copyright is missing or empty"; exit 1; }
+            missing=0
+            for pkg in $(dpkg-query -W -f="\${db:Status-Abbrev}\t\${Package}\n" | awk -F"\t" "\$1 ~ /^ii/ { print \$2 }"); do
+              [ -s "/usr/share/doc/$pkg/copyright" ] || { echo "no copyright for $pkg"; missing=$((missing + 1)); }
+            done
+            echo "packages without a copyright file: $missing"
+            [ "$missing" -eq 0 ] || { echo "::error::$missing installed packages ship no copyright file"; exit 1; }
+          '
+
+      # The manifest is the corresponding-source half of the obligation, and it
+      # is only worth anything if it describes *this* image. Compared as sorted
+      # package/version pairs against dpkg in the same container: a package
+      # installed after the manifest step, or a manifest gone stale in a cached
+      # layer, shows up as a diff rather than as a link nobody follows.
+      - name: Assert the manifest matches the installed packages
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh audio_proxy:license -c '
+            set -eu
+            test -s /usr/share/audioproxy/SOURCES.txt || { echo "::error::/usr/share/audioproxy/SOURCES.txt is missing or empty"; exit 1; }
+            grep -v "^#" /usr/share/audioproxy/SOURCES.txt | cut -f1,2 | sort > /tmp/manifest.txt
+            dpkg-query -W -f="\${db:Status-Abbrev}\t\${Package}\t\${Version}\n" \
+              | awk -F"\t" "\$1 ~ /^ii/ { print \$2 \"\t\" \$3 }" | sort > /tmp/installed.txt
+            echo "manifest: $(wc -l < /tmp/manifest.txt) packages, dpkg: $(wc -l < /tmp/installed.txt)"
+            diff -u /tmp/installed.txt /tmp/manifest.txt || { echo "::error::SOURCES.txt does not match dpkg (- installed, + manifest)"; exit 1; }
+          '
+
+      # GHCR prints the description label on the package page, which is where
+      # someone decides whether to redistribute the image. If the pointer to
+      # the manifest falls out of that label, the compliance story is still
+      # true and nobody is told about it.
+      - name: Assert the package description points at the manifest
+        run: |
+          set -euo pipefail
+          description=$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.description"}}' audio_proxy:license)
+          licenses=$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.licenses"}}' audio_proxy:license)
+          echo "description: $description"
+          echo "licenses:    $licenses"
+          case "$description" in
+            *SOURCES.txt*) ;;
+            *) echo "::error::image description does not mention SOURCES.txt"; exit 1;;
+          esac
+          case "$licenses" in
+            *GPL*) ;;
+            *) echo "::error::image licenses label does not name the copyleft in the aggregate"; exit 1;;
+          esac
+
+      # And that the links in it resolve. Spot-checked rather than exhaustive:
+      # 289 requests to Debian's archival service to prove a URL template is
+      # not a check, it is a habit. ffmpeg is always among them; the first and
+      # last entries move with the package set, so the sample is not frozen on
+      # three packages that happen to be stable.
+      #
+      # A 404 here is a real failure and not flakiness to retry away: it means
+      # either the URL form changed or a version reached the image before the
+      # snapshot archived it, and both need a person.
+      - name: Spot-check that the source URLs resolve
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh audio_proxy:license \
+            -c 'grep -v "^#" /usr/share/audioproxy/SOURCES.txt | cut -f5' > urls.txt
+
+          {
+            grep -m1 '/package/ffmpeg/' urls.txt
+            awk 'NR==1' urls.txt
+            tail -n 1 urls.txt
+          } | sort -u > sample.txt
+
+          failed=0
+          while read -r url; do
+            code=$(curl -sS --retry 3 --retry-connrefused -o /dev/null -w '%{http_code}' "$url")
+            echo "$code  $url"
+            case "$code" in
+              2*|3*) ;;
+              *) failed=$((failed + 1));;
+            esac
+          done < sample.txt
+
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::$failed sampled source URL(s) did not resolve on snapshot.debian.org"
+            exit 1
+          fi
+
   # ---------------------------------------------------------------------------
   # Publishing. Gated on everything above; never runs for a pull request, so a
   # fork cannot push and an unreviewed branch has nowhere to publish to.
@@ -239,7 +351,7 @@ jobs:
 
   publish:
     name: publish image to GHCR
-    needs: [smoke, image-ffmpeg, capacity]
+    needs: [smoke, image-ffmpeg, capacity, license-compliance]
     if: >-
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
