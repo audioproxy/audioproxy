@@ -24,6 +24,86 @@ The order on the render path is: 304 → cache lookup → stat → **probe** →
 - **Overflow is 429 with `Retry-After`**, reusing what the semaphore already produces and `AudioProxy.ErrorJSON` already renders. No new status, and the same client contract: come back, the box is busy.
 - **A refused source is the interesting case.** Video sources never reach the semaphore, so the queue never sheds them. If the measurements show probes are the cheap way to burn CPU, the bound has to sit ahead of the gate to help at all — which means the bound is on *probes*, not on renders that follow them.
 
+## What a probe costs — measured
+
+`bin/measure-probe-cost`, against the runtime image's ffprobe 7.1.5 on
+linux/arm64, 10 cores. Regenerate rather than trust these if the image's ffmpeg
+moves.
+
+| Source | Median | p95 | Max |
+|---|---|---|---|
+| local | 47 ms | 56 ms | 68 ms |
+| http | 43 ms | 44 ms | 49 ms |
+
+One probe at a time, 20 runs per arm. The HTTP arm is nginx one docker network
+away, so its latency is a *floor* rather than a real endpoint's — a presigned S3
+URL adds a real RTT and a TLS handshake on top. What the two rows landing within
+a few milliseconds of each other says is that a probe is not dominated by the network
+even when the network is free: it is dominated by starting ffprobe.
+
+| In flight | Median | Max | Burst | Peak procs | Peak fds |
+|---|---|---|---|---|---|
+| 1 | 78 ms | 78 ms | 80 ms | 6 | 24 |
+| 8 | 95 ms | 97 ms | 98 ms | 20 | 81 |
+| 32 | 254 ms | 286 ms | 290 ms | 68 | 272 |
+| 128 | 1171 ms | 1281 ms | 1295 ms | 260 | 1078 |
+| 512 | 6052 ms | 7542 ms | 7634 ms | 698 | 1562 |
+
+**What binds first is the CPU, and nothing else comes close.** At 512 probes in
+flight the container held 1562 file descriptors against a limit of 20480 and 698
+processes against 24089 — neither within an order of magnitude of running out.
+Meanwhile per-probe latency went from 78 ms to 6 s, and throughput peaked at
+roughly 110 probes/second around 32 in flight and *fell* to 67/second at 512.
+That is the signature of a workload contending for the CPU past saturation, not
+of a resource being exhausted.
+
+**A probe is ~45 ms of wall clock, and only part of that is core time.** Worth
+stating precisely, because the numbers do not support the stronger claim: a
+purely CPU-bound 45 ms unit on 10 cores would scale to roughly 220
+probes/second, and the measured peak is 110. So something under half of a probe
+is core occupancy — dynamic linking against libav and codec-table
+initialisation, mostly — and the rest is serialized I/O that a core is not held
+for. The instrument here measures wall clock; it cannot separate the two, and
+this section should not pretend otherwise.
+
+The conclusion is unchanged, and does not need the stronger claim: descriptors
+and processes are each more than an order of magnitude from their limits at
+every level measured, so whatever fraction of a probe is CPU, the CPU is what
+degrades first. The knee sits at the core count, which is what a
+partly-CPU-bound cost predicts. Below it latency is flat and throughput scales;
+above it latency grows linearly with depth and throughput slowly degrades.
+
+## The decision task 1.3 asks for: ship the bound
+
+**Yes, §3 is still needed once §2 lands**, and the measurements say why in one
+line: coalescing is keyed on the *variant*, and the pathological case is not.
+
+Coalescing removes duplicate probes for one cache key, which is the case the
+proposal opens with and a real one. It does nothing for N requests naming N
+different sources — including the case the proposal calls the interesting one,
+where every source is refused and no render is ever started, so the render queue
+never sheds any of it. Against those, the numbers above are the whole story: 512
+concurrent requests for distinct sources cost ~45 ms of contended CPU each and take
+six seconds apiece to answer, on a box whose ffmpeg slots are meanwhile
+untouched. Nothing in the proxy bounds that today except how many connections
+Bandit accepted.
+
+So the bound is a real backstop rather than a formality, and the requirement in
+`specs/render-concurrency/spec.md` stands as written.
+
+Two things the numbers also settle about *shape*:
+
+- **A ceiling, not a scheduler.** Degradation is gradual — no cliff, no
+  exhaustion — so the bound's job is to stop the tail, not to smooth the middle.
+  It should sit well above `AP_MAX_CONCURRENCY` and be reached only by traffic
+  that is pathological.
+- **The default follows the cores, because the cost does.** `4 ×
+  AP_MAX_CONCURRENCY` (whose own default is `System.schedulers_online()`) puts
+  the default ceiling at 40 on this box: past the throughput knee, comfortably
+  inside the region where a probe still answers in a quarter of a second, and
+  four times the render cap so the "a probe never queues behind an encoder"
+  property is visible in the arithmetic rather than only in the code.
+
 ## Risks / Trade-offs
 
 - [A probe bound adds a queue in front of the cheapest part of the request] → keep the bound high relative to `AP_MAX_CONCURRENCY`; the point is a ceiling, not scheduling.
