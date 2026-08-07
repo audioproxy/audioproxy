@@ -365,6 +365,15 @@ defmodule AudioProxy.Metrics do
   # a genuine 404.
   defp record(@bandit_stop, _measurements, _metadata, _config), do: :ok
 
+  # Unreachable through `attach_many/4`, which only subscribes this handler to
+  # the events matched above — and here anyway, because the cost of being wrong
+  # is not one dropped sample. An unmatched event is a `FunctionClauseError`,
+  # which the rescue turns into a `Logger.error` *per event*: at render rates
+  # that is the log, and the thing it is shouting about is a metric nobody
+  # asked for yet. The day `Telemetry.render_events/0` grows a fourth name,
+  # this is the difference between silence and a flood.
+  defp record(_event, _measurements, _metadata, _config), do: :ok
+
   defp finished(measurements, metadata, outcome) do
     labels = [label(metadata[:format]), outcome]
 
@@ -461,9 +470,22 @@ defmodule AudioProxy.Metrics do
   ## Sampled values
 
   defp sampled do
-    running = %{"audio_proxy_renders_running" => [{[], RenderCoordinator.in_flight()}]}
+    Map.merge(running(), semaphore())
+  end
 
-    Map.merge(running, semaphore())
+  # Guarded the same way the semaphore is, and for the same reason: both are
+  # "ask another process", and a scrape that dies because one of them is
+  # momentarily unavailable takes every *other* metric with it — including the
+  # counters, which were sitting in ETS and answerable throughout. The
+  # asymmetry was unintentional; `Registry.count/1` exits if the registry is
+  # not running, and that exit propagated straight out of `scrape/0`.
+  defp running do
+    %{"audio_proxy_renders_running" => [{[], RenderCoordinator.in_flight()}]}
+  catch
+    :exit, _reason ->
+      Logger.warning("coalescing registry did not answer; scrape omits renders_running")
+
+      %{}
   end
 
   defp semaphore do
