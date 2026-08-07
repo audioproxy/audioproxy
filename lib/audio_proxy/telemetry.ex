@@ -3,9 +3,9 @@ defmodule AudioProxy.Telemetry do
   The render lifecycle as `:telemetry` events — the one instrumentation point
   every consumer reads.
 
-  `AudioProxy.LogHandler` is the first consumer; `add-metrics-endpoint`
-  attaches an aggregator to the same events without touching the render path.
-  That is the whole reason the render action emits events rather than calling
+  `AudioProxy.LogHandler` is the first consumer and `AudioProxy.Metrics` the
+  second, attached to the same events without touching the render path. That
+  is the whole reason the render action emits events rather than calling
   `Logger` directly: instrument once, consume twice.
 
   ## Events
@@ -60,8 +60,9 @@ defmodule AudioProxy.Telemetry do
   misleading rather than merely incomplete: a request that joins a nearly
   finished render and drains its backlog reports megabytes in single-digit
   milliseconds, which reads as an impossibly fast ffmpeg. It is also the
-  numerator `add-metrics-endpoint` needs for a coalescing ratio, which is a
-  headline number for a proxy whose whole point is not rendering twice.
+  numerator a coalescing ratio needs, which is a headline number for a proxy
+  whose whole point is not rendering twice — though the ratio itself is built
+  from the cache lookup event above, which is the one that also sees a HIT.
 
   ## `source` is the canonical identity, never the ffmpeg input
 

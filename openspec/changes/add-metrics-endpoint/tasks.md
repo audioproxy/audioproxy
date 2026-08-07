@@ -16,4 +16,4 @@
 
 ## 4. Docs
 
-- [ ] 4.1 Update README: metrics list with labels, scrape config example, example PromQL for the four signals
+- [x] 4.1 Update README: metrics list with labels, scrape config example, example PromQL for the four signals
