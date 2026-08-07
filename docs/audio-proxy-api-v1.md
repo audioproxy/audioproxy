@@ -175,7 +175,9 @@ A `HEAD` answers what the check chain determines — `401`, `404`, `413` and the
 
 `AP_MAX_SRC_BYTES` does **not** apply to `/info`, unlike every other signed request: a probe reads container headers and never decodes, so a source too large to *render* still costs a probe nothing to describe — and the client most in need of the endpoint is precisely the one holding a long source it means to ask a trimmed preview of.
 
-A probe reads container headers and stops; it never decodes. It therefore does **not** take an `AP_MAX_CONCURRENCY` slot — that cap exists to bound encoders pinning cores, and queueing probes behind renders would make the endpoint a client calls *before* it knows what to request the slowest thing in the proxy. `AP_PROBE_TIMEOUT` is what bounds this path, and it is separate from and shorter than `AP_RENDER_TIMEOUT`.
+A probe reads container headers and stops; it never decodes. It therefore does **not** take an `AP_MAX_CONCURRENCY` slot — that cap exists to bound encoders pinning cores, and queueing probes behind renders would make the endpoint a client calls *before* it knows what to request the slowest thing in the proxy. `AP_PROBE_TIMEOUT` is what bounds one probe's lifetime, and it is separate from and shorter than `AP_RENDER_TIMEOUT`.
+
+Probes coalesce on the **source**, not the variant: concurrent requests reading one source share one `ffprobe`, whether they are two `/info` calls, two different renditions of one file, or an `/info` alongside a render. The identity is the source because that is what a probe reads — two variants of one file ask ffprobe the identical question about the identical bytes, and `/info` describes no variant at all. A request served from the variant store, or answered `304`, never reaches the gate and probes not at all.
 
 ---
 

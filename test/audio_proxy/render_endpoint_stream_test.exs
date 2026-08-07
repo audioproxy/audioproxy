@@ -24,6 +24,7 @@ defmodule AudioProxy.RenderEndpointStreamTest do
   use ExUnit.Case, async: false
 
   import AudioProxy.ConfigHelper
+  import AudioProxy.ProbeCoalesceHelper
 
   alias AudioProxy.{RawHttp, Signature}
 
@@ -54,6 +55,8 @@ defmodule AudioProxy.RenderEndpointStreamTest do
       # One second, so the pre-stream timeout is a test and not a coffee break.
       render_timeout: 1
     })
+
+    reset_probes()
 
     bandit =
       start_supervised!(

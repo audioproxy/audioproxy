@@ -15,6 +15,8 @@
 #   garbage.*     exit 0 writing something that is not JSON — the probe that
 #                 "succeeded" and said nothing usable, which is a 500
 #   probehang.*   produce nothing, ever, until the timeout kills it
+#   probeslow.*   a half-second pause, then the default WAV — a probe slow
+#                 enough for a burst to coalesce onto while it is still running
 #   tagged.*      a lossy source carrying tags, no bit depth
 #   video.*       audio plus a genuine h264 video stream — the gate's 415
 #   videoonly.*   video and nothing else
@@ -57,6 +59,23 @@ JSON
     ;;
   probehang.*)
     sleep 300
+    ;;
+  probeslow.*)
+    # Long enough that a burst of requests is still arriving while this one runs,
+    # so a coalescing test is about probes *in flight* rather than about a
+    # verdict already held. Short enough not to be felt in the suite.
+    sleep 0.5
+    cat <<'JSON'
+{
+  "streams": [
+    {
+      "codec_type": "audio", "codec_name": "pcm_s16le", "sample_rate": "48000",
+      "channels": 2, "bits_per_sample": 16
+    }
+  ],
+  "format": { "format_name": "wav", "duration": "5.000000", "size": "960044" }
+}
+JSON
     ;;
   tagged.*)
     cat <<'JSON'

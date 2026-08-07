@@ -17,6 +17,7 @@ defmodule AudioProxy.VariantCacheTest do
   use ExUnit.Case, async: false
 
   import AudioProxy.CoalesceHelper
+  import AudioProxy.ProbeCoalesceHelper
   import AudioProxy.ConfigHelper
   import Plug.Conn
   import Plug.Test
@@ -63,6 +64,7 @@ defmodule AudioProxy.VariantCacheTest do
     })
 
     reset_coordinators()
+    reset_probes()
     PresigningStore.reset()
 
     {:ok, store: store}

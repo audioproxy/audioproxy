@@ -79,7 +79,7 @@ defmodule AudioProxy.Plugs.InfoAction do
 
   import Plug.Conn
 
-  alias AudioProxy.{ErrorJSON, Ffprobe, Source}
+  alias AudioProxy.{ErrorJSON, Ffprobe, ProbeCoordinator, Source}
   alias AudioProxy.Ffmpeg.Command
 
   # An hour, then revalidate. See the moduledoc for why not `immutable`.
@@ -149,8 +149,15 @@ defmodule AudioProxy.Plugs.InfoAction do
     probe_opts =
       [protocols: Command.protocols(elem(source, 0))] ++ Keyword.take(opts, [:executable])
 
+    # Through `AudioProxy.ProbeCoordinator`, which is the same mechanism the
+    # render endpoint's audio-only gate goes through — so a burst of `/info`
+    # requests for one source costs one probe, and an `/info` that arrives while
+    # a render is probing the same source costs none. It is the *source* the two
+    # share an identity on, which is what makes this endpoint able to join at
+    # all: `/info` describes no variant and so has no cache key to be
+    # identified by.
     with {:ok, input} <- Source.ffmpeg_input(source),
-         {:ok, output} <- Ffprobe.probe(input, probe_opts),
+         {:ok, output} <- ProbeCoordinator.probe(Source.canonical(source), input, probe_opts),
          :ok <- audio_only(output),
          {:ok, info} <- Ffprobe.contract(output, size: stat.size) do
       conn

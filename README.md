@@ -306,6 +306,8 @@ Responses carry an `ETag` derived from the source object, so a client or CDN tha
 
 Probing is cheap — it reads the file's header and stops — so it does not queue behind renders and has its own, shorter, `AP_PROBE_TIMEOUT`. For the same reason `AP_MAX_SRC_BYTES` does not apply here: a source too large to render can still be described, which is what you want, since the long file is exactly the one you were going to ask for a trimmed preview of.
 
+Requests reading the same source also share one probe rather than each paying for their own — several `/info` calls, several renditions of one file, or an `/info` arriving alongside a render. Sharing is per *source* rather than per variant, because what a probe reads is the source: two renditions of one file ask the same question of the same bytes.
+
 ## Processing options
 
 The options segments describe the variant completely, and their normalized form *is* the cache key. `AudioProxy.Options` parses, validates, and normalizes them; `AudioProxy.CacheKey` hashes the result. Invalid or conflicting options are rejected with an `AudioProxy.OptionError` naming the offending segment, which the HTTP layer will render as a `422`.

@@ -19,6 +19,7 @@ defmodule AudioProxy.RenderEndpointFfmpegTest do
   use ExUnit.Case, async: false
 
   import AudioProxy.CoalesceHelper
+  import AudioProxy.ProbeCoalesceHelper
   import AudioProxy.ConfigHelper
 
   alias AudioProxy.{RawHttp, Signature}
@@ -74,6 +75,7 @@ defmodule AudioProxy.RenderEndpointFfmpegTest do
     })
 
     reset_coordinators()
+    reset_probes()
 
     bandit =
       start_supervised!(

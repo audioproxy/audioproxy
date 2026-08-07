@@ -25,6 +25,7 @@ defmodule AudioProxy.LogHandlerTest do
   doctest AudioProxy.LogHandler
 
   import AudioProxy.CoalesceHelper
+  import AudioProxy.ProbeCoalesceHelper
   import AudioProxy.ConfigHelper
   import ExUnit.CaptureLog
   import Plug.Test
@@ -59,6 +60,7 @@ defmodule AudioProxy.LogHandlerTest do
 
     # `cache=` is only meaningful against a known-empty registry.
     reset_coordinators()
+    reset_probes()
 
     :ok
   end

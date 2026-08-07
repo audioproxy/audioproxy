@@ -57,6 +57,9 @@ defmodule AudioProxy.Application do
     # The semaphore is ahead of both, for that reason read the other way round:
     # a coordinator releases its slot from `terminate/2`, so the thing it
     # releases into has to still be there when the last coordinator stops.
+    # The probe coordinators sit beside the render ones and ahead of them only
+    # by convention: both spawn through `RenderSupervisor`, so both have to stop
+    # before it, which reverse-order shutdown gives for free.
     children =
       [
         AudioProxy.Semaphore,
@@ -67,6 +70,7 @@ defmodule AudioProxy.Application do
         AudioProxy.VariantStore.Tee.supervisor(),
         AudioProxy.Ffmpeg.RenderSupervisor
       ] ++
+        AudioProxy.ProbeCoordinator.children() ++
         AudioProxy.RenderCoordinator.children() ++ listener(config)
 
     Logger.info("audio_proxy #{vsn()} starting (serve_mode: #{config.serve_mode})")

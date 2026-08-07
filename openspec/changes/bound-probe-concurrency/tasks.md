@@ -6,10 +6,10 @@
 
 ## 2. Coalesce probes per cache key
 
-- [ ] 2.1 One probe per in-flight cache key: concurrent requests for the same variant await one result rather than spawning their own, via `Registry` and a broadcast in the shape `AudioProxy.RenderCoordinator` already uses
-- [ ] 2.2 Lifecycle: a crashed or timed-out probe fails every waiter with the same classified reason, and leaves no entry behind (monitor-based, as the coordinator does with subscribers)
-- [ ] 2.3 A late joiner that arrives after the verdict gets it without a second spawn, and one that arrives after the entry is gone probes normally
-- [ ] 2.4 Tests: N concurrent requests for one key spawn exactly one probe (process-table assertion, as the render tests do); a refused source still refuses every waiter; `/info` and the render gate share the mechanism
+- [x] 2.1 One probe per in-flight cache key: concurrent requests for the same variant await one result rather than spawning their own, via `Registry` and a broadcast in the shape `AudioProxy.RenderCoordinator` already uses
+- [x] 2.2 Lifecycle: a crashed or timed-out probe fails every waiter with the same classified reason, and leaves no entry behind (monitor-based, as the coordinator does with subscribers)
+- [x] 2.3 A late joiner that arrives after the verdict gets it without a second spawn, and one that arrives after the entry is gone probes normally
+- [x] 2.4 Tests: N concurrent requests for one key spawn exactly one probe (process-table assertion, as the render tests do); a refused source still refuses every waiter; `/info` and the render gate share the mechanism
 
 ## 3. Bound concurrent probes — only if 1.3 says so
 
@@ -20,5 +20,5 @@
 ## 4. Docs
 
 - [ ] 4.1 `README.md` configuration table gains the new limit if 3.1 lands, phrased as what an operator would raise and when
-- [ ] 4.2 `docs/audio-proxy-api-v1.md` §4.3 currently says a probe "does not take an `AP_MAX_CONCURRENCY` slot" — extend it to say what it *does* take, so the two pools are both described
-- [ ] 4.3 `openspec/changes/add-audio-only-policy/design.md`'s deferral note points here; check it still reads true when this lands
+- [x] 4.2 `docs/audio-proxy-api-v1.md` §4.3 currently says a probe "does not take an `AP_MAX_CONCURRENCY` slot" — extend it to say what it *does* take, so the two pools are both described
+- [x] 4.3 `openspec/changes/add-audio-only-policy/design.md`'s deferral note points here; check it still reads true when this lands
