@@ -106,6 +106,16 @@ defmodule AudioProxy.Metrics do
   # running more than one node needs it to be.
   @buckets [0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0]
 
+  # A histogram series is one ETS row: `{key, sum_micros, b0, b1, …, b_inf}`.
+  # See `observe/3` — the shape exists so that an observation is a single
+  # atomic `update_counter`, which is what keeps `_sum` and the buckets from
+  # ever disagreeing under a concurrent scrape. `@histogram_row` is the
+  # zeroed default a first observation creates; `@histogram_pattern` is the
+  # same arity with wildcards, for reading the series back.
+  @histogram_slots length(@buckets) + 2
+  @histogram_row List.to_tuple([nil | List.duplicate(0, @histogram_slots)])
+  @histogram_pattern List.to_tuple([nil | List.duplicate(:_, @histogram_slots)])
+
   # A scrape must not outlive the interval that triggered it, and a wedged
   # semaphore is a thing to report rather than to wait for. Sized like
   # `AudioProxy.Readiness`'s probe budget, and for the same reason.
@@ -385,11 +395,29 @@ defmodule AudioProxy.Metrics do
 
   defp count(name, labels), do: bump({:counter, name, labels})
 
+  # One row per series, one update per observation. The sum and the bucket used
+  # to be two keys and two `update_counter` calls, which left a window a scrape
+  # could land in: bucket incremented, sum not yet, and the exposition showed a
+  # histogram whose `_sum` was short of what its `_count` implied. Impossible
+  # arithmetic, self-correcting on the next scrape, and exactly the kind of
+  # thing nobody diagnoses.
+  #
+  # `:ets.update_counter/4` applies a *list* of position operations to a single
+  # key atomically, which removes the window rather than narrowing it. Position
+  # 2 is the sum in microseconds; 3 onward are the buckets, one slot per edge
+  # plus the `+Inf` overflow. No separate count: the exposition already derives
+  # it by accumulating the buckets, and a second copy is a second thing to
+  # disagree.
   defp observe(name, labels, duration) when is_integer(duration) and duration >= 0 do
     micros = System.convert_time_unit(duration, :native, :microsecond)
+    key = {:histogram, name, labels}
 
-    bump({:bucket, name, labels, bucket_index(micros)})
-    bump({:sum, name, labels}, micros)
+    :ets.update_counter(
+      @table,
+      key,
+      [{2, micros}, {3 + bucket_index(micros), 1}],
+      put_elem(@histogram_row, 0, key)
+    )
   end
 
   # A measurement that is not a duration is not an observation. Counting it as
@@ -415,24 +443,12 @@ defmodule AudioProxy.Metrics do
   end
 
   defp series(%{type: :histogram} = definition) do
-    width = length(@buckets) + 1
-
-    sums =
-      Map.new(:ets.match(@table, {{:sum, definition.name, :"$1"}, :"$2"}), fn [labels, sum] ->
-        {labels, sum}
-      end)
-
     @table
-    |> :ets.match({{:bucket, definition.name, :"$1", :"$2"}, :"$3"})
-    |> Enum.group_by(fn [labels, _index, _count] -> labels end)
-    |> Enum.map(fn {labels, rows} ->
-      counts = Map.new(rows, fn [_labels, index, count] -> {index, count} end)
+    |> :ets.match_object(put_elem(@histogram_pattern, 0, {:histogram, definition.name, :_}))
+    |> Enum.map(fn row ->
+      [{:histogram, _name, labels}, micros | buckets] = Tuple.to_list(row)
 
-      {labels,
-       %{
-         buckets: Enum.map(0..(width - 1), &Map.get(counts, &1, 0)),
-         sum: Map.get(sums, labels, 0) / 1_000_000
-       }}
+      {labels, %{buckets: buckets, sum: micros / 1_000_000}}
     end)
   end
 

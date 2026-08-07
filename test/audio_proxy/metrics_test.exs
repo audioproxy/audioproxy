@@ -32,6 +32,17 @@ defmodule AudioProxy.MetricsTest do
     |> Enum.filter(&String.starts_with?(&1, prefix))
   end
 
+  # The value off a single unlabeled-or-not sample line, or 0 when the series
+  # has not appeared yet.
+  defp extract(body, name) do
+    case Regex.run(~r/^#{Regex.escape(name)}\{[^}]*\} (\S+)$/m, body) do
+      # `_count` renders as an integer and `_sum` as a float, so this has to
+      # take both.
+      [_line, value] -> value |> Float.parse() |> elem(0)
+      nil -> 0.0
+    end
+  end
+
   defp seconds(value),
     do: System.convert_time_unit(trunc(value * 1_000_000), :microsecond, :native)
 
@@ -295,6 +306,67 @@ defmodule AudioProxy.MetricsTest do
   end
 
   describe "concurrent updates" do
+    test "a histogram's sum and buckets stay consistent while it is being written" do
+      writers = 8
+      per_writer = 100
+
+      task =
+        Task.async(fn ->
+          for _ <- 1..(writers * per_writer) do
+            body = scrape()
+
+            sum = extract(body, "audio_proxy_render_duration_seconds_sum")
+            count = extract(body, "audio_proxy_render_duration_seconds_count")
+
+            # Every observation is 0.5 s exactly, so the sum is the count times
+            # that or the scrape caught a half-written series.
+            assert sum == count * 0.5, "sum #{sum} does not match count #{count}"
+          end
+        end)
+
+      1..writers
+      |> Task.async_stream(
+        fn _ -> for _ <- 1..per_writer, do: render_stop(:mp3, :ok, 0.5) end,
+        max_concurrency: writers,
+        timeout: 30_000
+      )
+      |> Stream.run()
+
+      Task.await(task, 60_000)
+
+      # The deterministic half, and the one that actually holds the invariant:
+      # after every writer is done the totals must agree exactly.
+      body = scrape()
+
+      assert extract(body, "audio_proxy_render_duration_seconds_count") == writers * per_writer
+
+      assert extract(body, "audio_proxy_render_duration_seconds_sum") ==
+               writers * per_writer * 0.5
+    end
+
+    test "one observation writes one row, which is what makes it atomic" do
+      render_stop(:mp3, :ok, 0.5)
+
+      # The consistency above is a property of the *shape*, not of timing: a
+      # series is a single ETS row, so `:ets.update_counter/4`'s list form moves
+      # the sum and the bucket together and a reader sees one or the other
+      # state, never a mixture. Two rows and two calls is what left a window,
+      # and no concurrency test reproduces that window reliably enough to be a
+      # regression test — this assertion is the guard instead.
+      rows =
+        AudioProxy.Metrics
+        |> :ets.tab2list()
+        |> Enum.filter(&match?({:histogram, _name, _labels}, elem(&1, 0)))
+
+      assert [row] = rows
+
+      # Position 2 is the sum in microseconds; 3 onward are the buckets, one
+      # slot per edge plus the `+Inf` overflow.
+      assert tuple_size(row) == length(Metrics.buckets()) + 3
+      assert elem(row, 1) == 500_000
+      assert row |> Tuple.to_list() |> Enum.drop(2) |> Enum.sum() == 1
+    end
+
     test "counters are exact under contention" do
       writers = 20
       per_writer = 200
