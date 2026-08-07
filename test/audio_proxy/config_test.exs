@@ -17,6 +17,7 @@ defmodule AudioProxy.ConfigTest do
                local_root: nil,
                variant_store: nil,
                max_concurrency: System.schedulers_online(),
+               max_probe_concurrency: System.schedulers_online() * 4,
                queue_size: 32,
                ready_queue_threshold: 16,
                max_src_bytes: 2_000_000_000,
@@ -63,6 +64,21 @@ defmodule AudioProxy.ConfigTest do
       assert config.max_src_bytes == 1_048_576
       assert config.render_timeout == 90
       assert config.presign_ttl == 60
+    end
+
+    test "AP_MAX_PROBE_CONCURRENCY defaults to four times the effective render cap" do
+      # It tracks `AP_MAX_CONCURRENCY` rather than the scheduler count directly,
+      # so an operator who has already sized their render pool for the box does
+      # not have to size the probe pool a second time.
+      assert Config.build!(%{"AP_MAX_CONCURRENCY" => "3"}).max_probe_concurrency == 12
+    end
+
+    test "AP_MAX_PROBE_CONCURRENCY set explicitly is independent of the render cap" do
+      config =
+        Config.build!(%{"AP_MAX_CONCURRENCY" => "3", "AP_MAX_PROBE_CONCURRENCY" => "64"})
+
+      assert config.max_concurrency == 3
+      assert config.max_probe_concurrency == 64
     end
 
     test "AP_MAX_VARIANT_BYTES defaults to the effective AP_MAX_SRC_BYTES" do

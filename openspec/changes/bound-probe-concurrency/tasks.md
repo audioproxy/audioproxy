@@ -13,12 +13,12 @@
 
 ## 3. Bound concurrent probes — only if 1.3 says so
 
-- [ ] 3.1 A probe-specific counter, separate from `AudioProxy.Semaphore`'s render slots, with its own `AP_`-prefixed limit and a default derived from the measurements
-- [ ] 3.2 Overflow answers 429 with `Retry-After`, through `AudioProxy.ErrorJSON`'s existing `{:queue_full, retry_after}` row — no new status, no new vocabulary
-- [ ] 3.3 Tests: the cap holds under 3× its value racing (as `render-concurrency`'s own property does), a probe never waits behind a render slot, and a cache HIT still needs neither
+- [x] 3.1 A probe-specific counter, separate from `AudioProxy.Semaphore`'s render slots, with its own `AP_`-prefixed limit and a default derived from the measurements
+- [x] 3.2 Overflow answers 429 with `Retry-After`, through `AudioProxy.ErrorJSON`'s existing `{:queue_full, retry_after}` row — no new status, no new vocabulary
+- [x] 3.3 Tests: the cap holds under 3× its value racing (as `render-concurrency`'s own property does), a probe never waits behind a render slot, and a cache HIT still needs neither
 
 ## 4. Docs
 
-- [ ] 4.1 `README.md` configuration table gains the new limit if 3.1 lands, phrased as what an operator would raise and when
+- [x] 4.1 `README.md` configuration table gains the new limit if 3.1 lands, phrased as what an operator would raise and when
 - [x] 4.2 `docs/audio-proxy-api-v1.md` §4.3 currently says a probe "does not take an `AP_MAX_CONCURRENCY` slot" — extend it to say what it *does* take, so the two pools are both described
 - [x] 4.3 `openspec/changes/add-audio-only-policy/design.md`'s deferral note points here; check it still reads true when this lands

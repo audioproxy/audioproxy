@@ -22,6 +22,7 @@ defmodule AudioProxy.Config do
   | `AP_LOCAL_ROOT` | existing directory, not `/` | unset (`nil`) — local sources disabled |
   | `AP_VARIANT_STORE` | scheme-tagged URL (`file:///path`, `s3://bucket`) | unset (`nil`) — no variant cache |
   | `AP_MAX_CONCURRENCY` | positive integer | `System.schedulers_online/0` |
+  | `AP_MAX_PROBE_CONCURRENCY` | positive integer | `4 × AP_MAX_CONCURRENCY` |
   | `AP_QUEUE_SIZE` | non-negative integer | `32` |
   | `AP_READY_QUEUE_THRESHOLD` | non-negative integer, ≤ `AP_QUEUE_SIZE` | half the queue, floored, min 1 (`0` disables) |
   | `AP_MAX_SRC_BYTES` | positive integer | `2_000_000_000` |
@@ -80,6 +81,17 @@ defmodule AudioProxy.Config do
   # in ten seconds is one the client should hear about rather than wait on.
   @default_probe_timeout 10
 
+  # `AP_MAX_PROBE_CONCURRENCY`'s default, as a multiple of the render cap. A
+  # probe turns out to cost ~45 ms, a good part of it contended CPU — measured in
+  # change's `design.md`, and mostly dynamic linking rather than the header read
+  # — so probes and renders do compete for the same cores, and a ceiling has to
+  # be some function of how many there are. Four times the render cap puts the
+  # default past the measured throughput knee while keeping the two pools
+  # visibly different sizes: the probe path exists so that a header read does
+  # not queue behind an encoder, and a ratio of one would hide that in the
+  # arithmetic even though the code still had it.
+  @probe_concurrency_factor 4
+
   # How long a HIT's presigned URL stays valid. Short on purpose: the URL is
   # handed to one client for one playback, and the response carrying it is
   # `no-store`, so nothing needs it to outlive the redirect it arrived in.
@@ -116,6 +128,7 @@ defmodule AudioProxy.Config do
           local_root: String.t() | nil,
           variant_store: AudioProxy.VariantStore.config() | nil,
           max_concurrency: pos_integer(),
+          max_probe_concurrency: pos_integer(),
           queue_size: non_neg_integer(),
           ready_queue_threshold: non_neg_integer(),
           max_src_bytes: pos_integer(),
@@ -190,6 +203,11 @@ defmodule AudioProxy.Config do
     # large one.
     queue_size = integer(env, "AP_QUEUE_SIZE", @default_queue_size, :non_negative)
 
+    # Read ahead of the map for the same reason again: the probe ceiling's
+    # default is a multiple of the render cap, so the render cap has to exist
+    # before it is computed.
+    max_concurrency = integer(env, "AP_MAX_CONCURRENCY", System.schedulers_online(), :positive)
+
     validate!(%{
       port: port(env),
       key: hex(env, "AP_KEY", @min_key_bytes),
@@ -198,7 +216,14 @@ defmodule AudioProxy.Config do
       source_allowlist: list(env, "AP_SOURCE_ALLOWLIST"),
       local_root: directory(env, "AP_LOCAL_ROOT"),
       variant_store: store(env, "AP_VARIANT_STORE"),
-      max_concurrency: integer(env, "AP_MAX_CONCURRENCY", System.schedulers_online(), :positive),
+      max_concurrency: max_concurrency,
+      max_probe_concurrency:
+        integer(
+          env,
+          "AP_MAX_PROBE_CONCURRENCY",
+          max_concurrency * @probe_concurrency_factor,
+          :positive
+        ),
       queue_size: queue_size,
       ready_queue_threshold:
         integer(

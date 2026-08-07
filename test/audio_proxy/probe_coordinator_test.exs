@@ -30,6 +30,7 @@ defmodule AudioProxy.ProbeCoordinatorTest do
 
     put_config(%{
       local_root: tmp_dir,
+      max_probe_concurrency: 8,
       # Short, so the timeout test is not the slowest thing in the suite.
       probe_timeout: 1
     })
@@ -134,6 +135,55 @@ defmodule AudioProxy.ProbeCoordinatorTest do
       assert results == List.duplicate({:error, :probe_timeout}, 4)
       refute registered?("probehang.wav")
       assert FakeFfmpeg.probe_count(dir) == 1
+    end
+  end
+
+  describe "the probe ceiling" do
+    test "refuses with the 429 the render queue produces, not a status of its own", %{dir: dir} do
+      put_config(%{max_probe_concurrency: 1})
+
+      # One slow probe holds the only slot for half a second; a second, distinct
+      # source arrives while it does.
+      held = Task.async(fn -> probe(dir, "probeslow.wav") end)
+      wait_until(fn -> FakeFfmpeg.probe_count(dir) == 1 end)
+
+      assert {:error, {:queue_full, retry_after}} = probe(dir, "piece.wav")
+      assert retry_after >= 1
+
+      assert {:ok, _} = Task.await(held, @deadline)
+
+      # Refused, not queued: the second source was never probed at all.
+      assert FakeFfmpeg.probe_count(dir) == 1
+    end
+
+    test "counts probes rather than requests, so joiners are free", %{dir: dir} do
+      # A ceiling of one, and twenty requests for one source. Every one is
+      # answered: nineteen of them coalesce onto the slot the first took, which
+      # is what makes the two halves of this change compose.
+      put_config(%{max_probe_concurrency: 1})
+
+      results =
+        1..20
+        |> Task.async_stream(fn _ -> probe(dir, "probeslow.wav") end,
+          max_concurrency: 20,
+          timeout: @deadline
+        )
+        |> Enum.map(fn {:ok, result} -> result end)
+
+      assert Enum.all?(results, &match?({:ok, _}, &1))
+      assert FakeFfmpeg.probe_count(dir) == 1
+    end
+
+    test "is given back as soon as the verdict is, not when the linger ends", %{dir: dir} do
+      # The slot is released before the coordinator starts holding its verdict.
+      # A ceiling of one plus a linger that held the slot would make a second,
+      # distinct source wait a linger for a probe that had already finished.
+      put_config(%{max_probe_concurrency: 1})
+
+      assert {:ok, _} = probe(dir, "piece.wav")
+      assert {:ok, _} = probe(dir, "other.wav")
+
+      assert FakeFfmpeg.probe_count(dir) == 2
     end
   end
 
