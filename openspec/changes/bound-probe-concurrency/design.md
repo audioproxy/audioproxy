@@ -19,6 +19,17 @@ The order on the render path is: 304 → cache lookup → stat → **probe** →
 ## Decisions
 
 - **Measure first, and write the numbers down.** Probe cost (spawn + header read + teardown) for a local file and an HTTP source, and the concurrency at which a box degrades — scheduler time, file descriptors, or process table. Without them, "bound probes" is a number pulled from the air, and this project has a habit of measuring things like this (`Path.safe_relative/2`'s component cap, `-frag_duration`'s fragment count) rather than asserting them.
+- **The coalescing identity is the source, not the cache key.** Decided during
+  implementation, against what this change's own delta spec first said, and the
+  spec was corrected rather than the code. Two reasons, in order of weight.
+  Task 2.4 requires `/info` to share the mechanism, and `/info` describes no
+  variant — there is no cache key for it to be identified by, so a cache-key
+  identity would have meant either a second mechanism or an endpoint-shaped
+  exception. And a probe's verdict depends on the source alone: `f:mp3/br:128`
+  and `f:opus` of one file ask ffprobe the identical question about the
+  identical bytes, so the variant identity would have been strictly narrower for
+  no benefit. Every scenario the original requirement listed still holds, since
+  source-keying is a superset of variant-keying.
 - **Coalescing before capping.** If N requests for one key collapse to one probe, the pathological case mostly evaporates and a cap becomes a backstop rather than the mechanism. It is also the cheaper change: `Registry` plus a broadcast is a pattern already in the codebase.
 - **A separate counter, never the render semaphore.** They ration different resources: a slot means "a core is pinned for the length of a file", a probe means "a header read is in flight". Sharing one cap would put probes behind encoders, which is exactly what `AudioProxy.Ffprobe`'s moduledoc says must not happen — it would make `/info`, the endpoint a client calls *before* it knows what to ask for, the slowest thing in the proxy.
 - **Overflow is 429 with `Retry-After`**, reusing what the semaphore already produces and `AudioProxy.ErrorJSON` already renders. No new status, and the same client contract: come back, the box is busy.
@@ -103,6 +114,28 @@ Two things the numbers also settle about *shape*:
   inside the region where a probe still answers in a quarter of a second, and
   four times the render cap so the "a probe never queues behind an encoder"
   property is visible in the arithmetic rather than only in the code.
+
+## Known limits, accepted deliberately
+
+Surfaced by the adversarial review round and recorded rather than fixed. Each is
+either stated in `AudioProxy.ProbeCoordinator`'s moduledoc already or an exact
+copy of a shape `AudioProxy.RenderCoordinator` ships today; changing any of them
+here would make the two paths stop matching, which costs more than it buys.
+
+- **A verdict that arrives after a waiter's deadline is never collected.**
+  `ProbeCoordinator.await/2`'s drain is `after 0` and there is no barrier that
+  could make it exact — nothing a waiter can do stops the coordinator. The
+  message can then never match again (the coordinator pid is in the pattern), so
+  on a keep-alive connection one accumulates per timed-out probe. It takes a
+  probe outrunning `AP_PROBE_TIMEOUT` plus the margin to happen at all.
+- **The start-or-join retry loop has no overall deadline.** Five attempts at a
+  five-second join timeout is a 25-second worst case on a request path, reachable
+  only by a coordinator that is wedged five times in a row.
+  `AudioProxy.RenderCoordinator` has the identical constants.
+- **An abnormal runner exit *after* a verdict has been broadcast is silent.** The
+  verdict is already delivered and valid, so there is nothing to report to a
+  client; what is lost is a log line about something odd having happened in a
+  process that had already done its job.
 
 ## Risks / Trade-offs
 

@@ -162,6 +162,7 @@ defmodule AudioProxy.Plugs.RenderAction do
     Config,
     ErrorJSON,
     Ffprobe,
+    ProbeCoordinator,
     RenderCoordinator,
     Semaphore,
     Source,
@@ -280,7 +281,7 @@ defmodule AudioProxy.Plugs.RenderAction do
     with {:ok, stat} <- Source.stat(source),
          :ok <- within_limit(stat.size),
          {:ok, input} <- Source.ffmpeg_input(source),
-         :ok <- audio_only(input, type, opts),
+         :ok <- audio_only(source, input, type, opts),
          {:ok, status, render, backlog} <- subscribe(conn, input, type, opts) do
       # `input` is what ffmpeg reads and can be a presigned URL; the span
       # carries the canonical identity instead, so nothing downstream of here
@@ -338,12 +339,22 @@ defmodule AudioProxy.Plugs.RenderAction do
   # reached anyway, and a probe that times out or dies says so with the limit an
   # operator would raise. Nothing here falls back to "render it and see": a gate
   # that fails open is not a gate.
-  defp audio_only(input, type, opts) do
+  defp audio_only(source, input, type, opts) do
     probe_opts =
       [protocols: Command.protocols(type)] ++
         probe_executable(Keyword.get(opts, :probe_executable))
 
-    case Ffprobe.probe(input, probe_opts) do
+    # Through the coordinator, not `Ffprobe.probe/2` directly: concurrent
+    # requests for one source share the probe the way they already share the
+    # render, and only a request that actually spawns one takes an
+    # `AP_MAX_PROBE_CONCURRENCY` slot. The identity is the *source* rather than
+    # the cache key — see `AudioProxy.ProbeCoordinator` — so two variants of one
+    # file coalesce here even though they will not coalesce downstream.
+    #
+    # One reason more than `Ffprobe.probe/2` can produce arrives with it:
+    # `{:queue_full, retry_after}` when the probe pool is full, which
+    # `AudioProxy.ErrorJSON` renders as the same 429 a full render queue does.
+    case ProbeCoordinator.probe(Source.canonical(source), input, probe_opts) do
       {:ok, probe} -> if Ffprobe.has_video?(probe), do: {:error, :video_source}, else: :ok
       {:error, reason} -> {:error, reason}
     end

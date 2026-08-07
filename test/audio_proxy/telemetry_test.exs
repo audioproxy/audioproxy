@@ -14,6 +14,7 @@ defmodule AudioProxy.TelemetryTest do
   use ExUnit.Case, async: false
 
   import AudioProxy.CoalesceHelper
+  import AudioProxy.ProbeCoalesceHelper
   import AudioProxy.ConfigHelper
   import ExUnit.CaptureLog
   import Plug.Test
@@ -45,6 +46,7 @@ defmodule AudioProxy.TelemetryTest do
     # coordinator left lingering by another test would turn a `:miss` here
     # into a `:coalesced`.
     reset_coordinators()
+    reset_probes()
 
     :ok
   end

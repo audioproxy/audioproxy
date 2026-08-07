@@ -15,6 +15,7 @@ defmodule AudioProxy.VariantStore.TeeTest do
   use ExUnit.Case, async: false
 
   import AudioProxy.CoalesceHelper
+  import AudioProxy.ProbeCoalesceHelper
   import AudioProxy.ConfigHelper
 
   alias AudioProxy.{RenderCoordinator, RenderHarness, VariantStore}
@@ -42,6 +43,7 @@ defmodule AudioProxy.VariantStore.TeeTest do
     })
 
     reset_coordinators()
+    reset_probes()
     {:ok, root: tmp_dir}
   end
 

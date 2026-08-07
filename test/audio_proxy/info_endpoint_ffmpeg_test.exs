@@ -16,6 +16,7 @@ defmodule AudioProxy.InfoEndpointFfmpegTest do
   use ExUnit.Case, async: false
 
   import AudioProxy.ConfigHelper
+  import AudioProxy.ProbeCoalesceHelper
 
   alias AudioProxy.{RawHttp, Signature}
 
@@ -73,6 +74,8 @@ defmodule AudioProxy.InfoEndpointFfmpegTest do
       max_variant_bytes: 2_000_000_000,
       probe_timeout: 30
     })
+
+    reset_probes()
 
     bandit =
       start_supervised!(

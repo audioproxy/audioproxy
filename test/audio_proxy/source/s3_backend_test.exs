@@ -55,6 +55,7 @@ defmodule AudioProxy.Source.S3BackendTest do
   use ExUnit.Case, async: false
 
   import AudioProxy.CoalesceHelper
+  import AudioProxy.ProbeCoalesceHelper
   import AudioProxy.ConfigHelper
   import Plug.Test
 
@@ -105,6 +106,7 @@ defmodule AudioProxy.Source.S3BackendTest do
 
     ensure_bucket!()
     reset_coordinators()
+    reset_probes()
 
     key = unique_key("piece.wav")
     :ok = S3.put_stream(@bucket, key, [@body])

@@ -15,6 +15,7 @@ defmodule AudioProxy.InfoEndpointTest do
   use ExUnit.Case, async: false
 
   import AudioProxy.ConfigHelper
+  import AudioProxy.ProbeCoalesceHelper
   import Plug.Conn
   import Plug.Test
 
@@ -51,6 +52,8 @@ defmodule AudioProxy.InfoEndpointTest do
       # long enough that a loaded machine does not trip it spuriously.
       probe_timeout: 1
     })
+
+    reset_probes()
 
     :ok
   end

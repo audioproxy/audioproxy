@@ -15,6 +15,7 @@ defmodule AudioProxy.RenderCoordinatorTest do
   use ExUnit.Case, async: false
 
   import AudioProxy.CoalesceHelper
+  import AudioProxy.ProbeCoalesceHelper
   import AudioProxy.ConfigHelper
 
   alias AudioProxy.RenderCoordinator
@@ -29,6 +30,7 @@ defmodule AudioProxy.RenderCoordinatorTest do
   setup do
     put_config(%{max_src_bytes: 2_000_000_000, max_variant_bytes: 2_000_000_000})
     reset_coordinators()
+    reset_probes()
     :ok
   end
 

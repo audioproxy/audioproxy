@@ -20,6 +20,7 @@ defmodule AudioProxy.RenderSemaphoreTest do
   use ExUnit.Case, async: false
 
   import AudioProxy.CoalesceHelper
+  import AudioProxy.ProbeCoalesceHelper
   import AudioProxy.ConfigHelper
   import Plug.Conn
   import Plug.Test
@@ -60,6 +61,7 @@ defmodule AudioProxy.RenderSemaphoreTest do
     })
 
     reset_coordinators()
+    reset_probes()
 
     :ok
   end

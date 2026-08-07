@@ -16,6 +16,7 @@ defmodule AudioProxy.RenderEndpointTest do
   use ExUnit.Case, async: false
 
   import AudioProxy.CoalesceHelper
+  import AudioProxy.ProbeCoalesceHelper
   import AudioProxy.ConfigHelper
   import Plug.Conn
   import Plug.Test
@@ -60,6 +61,7 @@ defmodule AudioProxy.RenderEndpointTest do
     # Every request below is its own render unless the test says otherwise —
     # see `AudioProxy.CoalesceHelper` for why that needs saying.
     reset_coordinators()
+    reset_probes()
 
     :ok
   end
