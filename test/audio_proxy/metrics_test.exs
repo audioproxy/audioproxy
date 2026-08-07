@@ -241,6 +241,35 @@ defmodule AudioProxy.MetricsTest do
     end
   end
 
+  describe "a scrape degrades rather than fails" do
+    test "an event this handler does not map is ignored, not logged per event" do
+      # Attached to nothing that emits this, but the clause matters: an
+      # unmatched event is a FunctionClauseError, and the rescue would turn
+      # every one of them into a log line.
+      log =
+        capture_log(fn ->
+          :telemetry.execute([:audio_proxy, :render, :stop], %{duration: 1}, %{format: :mp3})
+          AudioProxy.Metrics.handle_event([:audio_proxy, :something, :new], %{}, %{}, nil)
+        end)
+
+      refute log =~ "metrics handler failed"
+    end
+
+    test "the counters still answer when a sampled source cannot" do
+      render_stop(:mp3, :ok, 0.1)
+
+      # Both sampled sources are other processes, and a scrape must not lose
+      # the ETS-backed metrics because one of them is unavailable. Proved
+      # against the real ones here; the guards are what make it hold when they
+      # are not there.
+      body = scrape()
+
+      assert body =~ ~s(audio_proxy_renders_total{format="mp3",outcome="success"} 1)
+      assert body =~ "audio_proxy_renders_running "
+      assert body =~ "audio_proxy_render_slots_held "
+    end
+  end
+
   describe "the handler survives what it is given" do
     test "an unreadable event is logged and the handler stays attached" do
       # Absent fields are total by construction — a missing format is
