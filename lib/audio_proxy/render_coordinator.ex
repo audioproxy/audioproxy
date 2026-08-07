@@ -229,6 +229,22 @@ defmodule AudioProxy.RenderCoordinator do
   end
 
   @doc """
+  How many renders are in flight right now.
+
+  One per registered cache key, which is the same thing `AP_MAX_CONCURRENCY`
+  counts: the twenty requests coalesced onto one encode are one render here.
+  `AudioProxy.Metrics` samples it per scrape rather than maintaining a gauge
+  from the render events, because a registry entry cannot outlive the process
+  that holds it — an abnormal exit corrects this number for free, where an
+  event-driven counter would be permanently one too high.
+
+  Briefly includes a coordinator that has finished and not yet unregistered,
+  which is the same window that lets a late request coalesce onto its backlog.
+  """
+  @spec in_flight() :: non_neg_integer()
+  def in_flight, do: Registry.count(@registry)
+
+  @doc """
   Subscribes the calling process to the render for `cache_key`, starting it
   from `spec` if it is not already running.
 

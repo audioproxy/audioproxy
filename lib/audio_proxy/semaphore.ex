@@ -84,12 +84,15 @@ defmodule AudioProxy.Semaphore do
   | `[:audio_proxy, :semaphore, :released]` | `held`, `queued`, `duration` | a holder gave its slot back |
   | `[:audio_proxy, :semaphore, :abandoned]` | `held`, `queued` | a waiter left the queue before its turn |
 
-  `held` and `queued` are the occupancy and depth *after* the event, so any one
-  of them samples the gauges `add-metrics-endpoint` will publish; `wait` and
+  `held` and `queued` are the occupancy and depth *after* the event; `wait` and
   `duration` are native time units. Metadata is always `%{capacity:,
   queue_size:}`. `:abandoned` is one more event than `design.md` listed, and it
-  is here for the gauges: without it a queue that drains by attrition — clients
-  giving up — would leave `queued` reading high until the next unrelated event.
+  is here so that a queue draining by attrition — clients giving up — does not
+  leave `queued` reading high until the next unrelated event.
+
+  `AudioProxy.Metrics` counts `:rejected` from this set and takes its occupancy
+  gauges from `stats/2` instead, so the accuracy of what it publishes does not
+  depend on every event being seen.
   """
 
   use GenServer
@@ -158,6 +161,18 @@ defmodule AudioProxy.Semaphore do
     {name, opts} = Keyword.pop(opts, :name, @name)
 
     GenServer.start_link(__MODULE__, opts, name: name)
+  end
+
+  @doc """
+  Every event this module emits, for a consumer attaching to all of them.
+
+  The same service `AudioProxy.Telemetry.render_events/0` performs for the
+  render lifecycle, and for the same reason: a consumer that listed the names
+  itself would go on working, silently short of one, the day a sixth is added.
+  """
+  @spec events() :: [:telemetry.event_name()]
+  def events do
+    Enum.map([:acquired, :queued, :rejected, :released, :abandoned], &(@telemetry ++ [&1]))
   end
 
   @doc """
