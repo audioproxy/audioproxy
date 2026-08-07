@@ -230,6 +230,13 @@ defmodule AudioProxy.Metrics do
 
   Sampled gauges are unaffected — there is nothing here to reset, since they
   are read from the semaphore and the registry at scrape time.
+
+  Not atomic, and deliberately left that way. Clearing and re-seeding are two
+  operations, and an event landing between them creates a counter that
+  `seed/0`'s `insert_new` will not then flatten — so that series survives the
+  reset at 1. Every caller is a test, the suite's metrics tests are
+  `async: false`, and a lock around a test helper would be machinery for a
+  race that production cannot reach: nothing on the request path calls this.
   """
   @spec reset() :: :ok
   def reset do
