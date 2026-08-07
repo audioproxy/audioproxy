@@ -6,7 +6,7 @@
 ## 2. Aggregation & exposition
 
 - [ ] 2.1 `AudioProxy.Metrics` GenServer + ETS: counters, gauges, fixed-bucket histograms; telemetry attachment
-- [ ] 2.2 Prometheus text renderer (# HELP/# TYPE, label escaping, histogram +Inf/sum/count invariants)
+- [x] 2.2 Prometheus text renderer (# HELP/# TYPE, label escaping, histogram +Inf/sum/count invariants)
 - [ ] 2.3 Unit tests: event sequences → exact exposition output; histogram bucket math; concurrent-update counter accuracy
 
 ## 3. Endpoint
