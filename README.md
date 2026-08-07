@@ -713,7 +713,7 @@ Elixir with Plug and [Bandit](https://github.com/mtrudel/bandit), and no Phoenix
 The published image is a separate question, because it is a distribution. It ships Debian's packages, ffmpeg among them, and Debian builds ffmpeg with `--enable-gpl`; handing those binaries to someone carries the GPL's obligations. Two things ride in the image to meet them:
 
 - **The license notices**, at `/usr/share/doc/<package>/copyright`, exactly as Debian ships them.
-- **The corresponding source**, listed in `/usr/share/audioproxy/SOURCES.txt`: every installed package at its exact version, with the [snapshot.debian.org](https://snapshot.debian.org) URL for the source that binary was built from. That archive is version-exact and permanent, so a link still resolves to the source behind *this* image long after the suite has moved on.
+- **The corresponding source**, listed in `/usr/share/audioproxy/SOURCES.txt`: every Debian package the image installs, at its exact version, with the [snapshot.debian.org](https://snapshot.debian.org) URL for the source that binary was built from. That archive is version-exact and long-lived, so a link still resolves to the source behind *this* image after the suite has moved on. (The manifest covers what apt installed. The release alongside it, the bundled ERTS and the Elixir dependencies, is Apache-2.0 and MIT throughout and its source is this repository.)
 
 Read either straight out of the image:
 
@@ -722,7 +722,7 @@ docker run --rm --entrypoint cat ghcr.io/audioproxy/audioproxy:latest /usr/share
 docker run --rm --entrypoint cat ghcr.io/audioproxy/audioproxy:latest /usr/share/doc/ffmpeg/copyright
 ```
 
-Both are checked in CI on every build (present, complete, and resolving), so an image that reaches the registry has them.
+Both are checked in CI on every build (present, complete, and resolving), so an image that reaches the registry has them. The image's `org.opencontainers.image.licenses` label names Apache-2.0 and the strongest copyleft in the mix; it is a signal, not an inventory, and those two files are the record.
 
 Should a listed source ever become unreachable, the offer stands: open an issue at [github.com/audioproxy/audioproxy](https://github.com/audioproxy/audioproxy/issues) and the corresponding source for that image will be provided, for three years from the date it was published.
 

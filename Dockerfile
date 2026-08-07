@@ -141,10 +141,10 @@ RUN apt-get update \
 #
 # The second is this file. Rather than mirroring tarballs, each package is
 # linked to snapshot.debian.org at its installed version — Debian's own archive,
-# version-exact and permanent, so the link resolves to the source the binary in
-# *this* image was built from rather than to whatever is current. The base
-# image's snapshot timestamp is recorded too, so the whole apt state can be
-# reconstructed and not just the individual packages.
+# and version-exact, so the link resolves to the source the binary in *this*
+# image was built from rather than to whatever is current. The archive is
+# long-lived rather than guaranteed forever; mirroring tarballs is the
+# escalation if that ever stops holding.
 #
 # Generated here rather than by CI on purpose: the artifact carries its own
 # compliance, so an image built locally is as compliant as a published one.
@@ -153,8 +153,17 @@ RUN apt-get update \
 # qualifier (`libfoo:amd64`), which is not what the manifest is keyed on. The
 # status filter drops packages that are removed-but-config-retained: dpkg still
 # knows them, but this image does not distribute them.
+#
+# Written to a temporary file and moved into place only once it has been counted.
+# `set -o pipefail` (dash supports it since 0.5.12, which trixie carries) makes a
+# `dpkg-query` that dies mid-stream fail the build rather than being laundered
+# into success by the `sort` at the end of the pipe; the count is the backstop
+# for the same hazard, because a manifest that is merely *short* is the failure
+# that looks fine. The floor is well under the ~90 packages a bare debian:slim
+# carries, so it fires on a broken generator and never on a slimmer image.
 ARG DEBIAN_VERSION
 RUN set -eu; \
+    set -o pipefail; \
     snapshot="${DEBIAN_VERSION##*-}"; \
     mkdir -p /usr/share/audioproxy; \
     { \
@@ -164,12 +173,19 @@ RUN set -eu; \
       echo "# The source each binary was built from is archived by Debian at the URL on its line;"; \
       echo "# snapshot.debian.org is version-exact, so those links do not drift with the suite."; \
       echo "#"; \
+      echo "# This covers what apt installed. The release itself — the BEAM's bundled ERTS and"; \
+      echo "# the compiled Elixir dependencies under /app — is Apache-2.0 and MIT throughout,"; \
+      echo "# and its source is the repository named in the image labels."; \
+      echo "#"; \
       echo "# Base image: debian:${DEBIAN_VERSION}-slim"; \
       case "$snapshot" in \
         [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) \
-          echo "# Base image snapshot: https://snapshot.debian.org/archive/debian/${snapshot}T000000Z/";; \
+          echo "# Nearest archived snapshot to that date tag (the archive resolves it to the"; \
+          echo "# closest run, which may be some hours either side — the per-package URLs below"; \
+          echo "# are the exact record, this one is context):"; \
+          echo "#   https://snapshot.debian.org/archive/debian/${snapshot}T000000Z/";; \
         *) \
-          echo "# Base image snapshot: unknown (DEBIAN_VERSION carries no date suffix)";; \
+          echo "# Nearest archived snapshot: unknown (DEBIAN_VERSION carries no date suffix)";; \
       esac; \
       echo "#"; \
       echo "# Packages installed at build time may be newer than that snapshot; the per-package"; \
@@ -179,7 +195,14 @@ RUN set -eu; \
       dpkg-query -W -f='${db:Status-Abbrev}\t${Package}\t${Version}\t${source:Package}\t${source:Version}\n' \
         | awk -F'\t' '$1 ~ /^ii/ { printf "%s\t%s\t%s\t%s\thttps://snapshot.debian.org/package/%s/%s/\n", $2, $3, $4, $5, $4, $5 }' \
         | sort; \
-    } > /usr/share/audioproxy/SOURCES.txt
+    } > /tmp/SOURCES.txt; \
+    packages=$(grep -cv '^#' /tmp/SOURCES.txt || true); \
+    echo "manifest lists $packages packages"; \
+    if [ "$packages" -lt 50 ]; then \
+      echo "manifest lists only $packages packages — dpkg-query or awk failed" >&2; \
+      exit 1; \
+    fi; \
+    mv /tmp/SOURCES.txt /usr/share/audioproxy/SOURCES.txt
 
 # uid/gid 1000 matches the devcontainer, so a bind-mounted fixture directory
 # has the same ownership story in both.
@@ -217,10 +240,16 @@ CMD ["/app/bin/audio_proxy", "start"]
 #
 # The description is what GHCR prints on the package page, so it is where the
 # compliance pointer goes: someone deciding whether to redistribute this image
-# reads that page, not the filesystem. `licenses` names GPL-3.0-or-later
-# alongside the proxy's own Apache-2.0 because that is the strongest copyleft
-# in the aggregate (Debian's ffmpeg copyright carries GPL-3+ stanzas), and an
-# aggregate scanner that under-reports is worse than one that over-reports.
+# reads that page, not the filesystem.
+#
+# `licenses` is **not an inventory** and cannot be one: the image also carries
+# GPL-2+, LGPL, MPL, MIT and BSD packages, and an SPDX expression naming all of
+# them would be a hand-maintained list that goes stale on the next apt bump. It
+# names the proxy's own Apache-2.0 and the strongest copyleft in the aggregate
+# (Debian's ffmpeg copyright carries GPL-3+ stanzas), on the grounds that a
+# scanner which under-reports copyleft fails worse than one that over-reports.
+# The authoritative record is SOURCES.txt and the copyright files, which the
+# description points at.
 ARG VERSION
 ARG REVISION
 LABEL org.opencontainers.image.title="audio_proxy" \
