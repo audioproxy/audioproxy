@@ -250,6 +250,20 @@ defmodule AudioProxy.Metrics do
       [@bandit_stop, Telemetry.cache_lookup_event(), Telemetry.store_write_failure_event()] ++
         Telemetry.render_events() ++ Semaphore.events()
 
+    # Detached first, and this is load-bearing rather than tidy. A handler is
+    # global and outlives the process that attached it — `terminate/2` takes it
+    # down on an ordinary stop, but not on a brutal kill, where nothing runs at
+    # all. The handler left behind then holds a reference to a table that died
+    # with its owner, so every event raises into the rescue below and the log
+    # fills while nothing is counted. Worse, `attach_many/4` answers
+    # `{:error, :already_exists}` for the taken id, which this asserted against
+    # `:ok` — so the restart crashed too, and the third one exhausted the
+    # supervisor's intensity and took the whole application down. One kill was
+    # enough to do it. Detaching makes the restart total, and guarantees the
+    # handler that ends up attached is pointed at the table this `init/1` just
+    # created.
+    _ = :telemetry.detach(@handler_id)
+
     :ok = :telemetry.attach_many(@handler_id, events, &__MODULE__.handle_event/4, nil)
 
     seed()
