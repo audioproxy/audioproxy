@@ -1,0 +1,265 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# The hex package is exactly what we meant to ship, and it builds for a
+# consumer. Two claims, checked in that order, because the second is only
+# interesting once the first holds.
+#
+#   bin/check-hex-package                  # build, inspect, then compile it
+#   SKIP_COMPILE=1 bin/check-hex-package   # inspect only (no network)
+#
+# This is also the pre-publish dry run: it leaves the tarball in the repo root
+# for inspection and uploads nothing, ever. `mix hex.publish` lives in CI's
+# publish job and nowhere else.
+#
+# Why a guard at all: a published version is permanent. `mix hex.retire` marks
+# a bad one, it does not remove it, so "the tarball is exactly what we ship"
+# has to be a property the build asserts rather than a habit the `files:` list
+# is trusted to preserve. The specific failure it exists to prevent is a
+# widened `files:` entry — `"."`, or a `docs` that grew a subdirectory — putting
+# `openspec/` or `test/` into a package that can never be taken back.
+#
+# Requires elixir and mix on PATH, plus network access for the compile step.
+
+require "fileutils"
+require "tmpdir"
+
+require_relative "script_support"
+
+include ScriptSupport
+
+REPO_ROOT = File.expand_path("..", __dir__)
+
+# Present, or the package is not worth publishing. `llms.txt` and
+# `llms-full.txt` are on this list for the reason they are in `files:` at all:
+# they are the whole point of shipping documentation inside the package, so an
+# embedder finds the URL contract in `deps/audio_proxy/` at the version they
+# depend on. A tarball without them still compiles, which is exactly why
+# nothing else would notice they had gone.
+REQUIRED = [
+  "mix.exs",
+  "README.md",
+  "LICENSE",
+  "VERSIONS.md",
+  "llms.txt",
+  "llms-full.txt",
+  "docs/audio-proxy-api-v1.md"
+].freeze
+
+# The allowlist, and the primary check: `mix.exs`'s `files:` is an allowlist,
+# so the guard over it has to be one too. A denylist can only refuse what
+# somebody thought to name, which makes it exactly as good as the imagination
+# of whoever last edited it — and a hex version is permanent, so "we did not
+# think of that one" is not a recoverable answer.
+#
+# Anything in the tarball that is not one of these files, or under one of these
+# directories, fails. That is deliberately stricter than it needs to be today:
+# adding a file to the package should mean editing this list, in the same
+# commit, on purpose.
+ALLOWED_FILES = %w[mix.exs README.md LICENSE VERSIONS.md llms.txt llms-full.txt].freeze
+ALLOWED_DIRS = %w[lib docs].freeze
+
+# The denylist, kept as defence in depth behind the allowlist, and matched on
+# **any path segment** rather than on a prefix. `openspec/` is the planning
+# board, `test/` and `examples/` are ours and not a consumer's, and
+# `Dockerfile`/`.github/` describe how *this* repository builds itself — a
+# package carrying them invites a reader to think they are supported
+# interfaces.
+#
+# Segment matching and not `start_with?`, because a prefix check only sees the
+# root of the tarball: `docs/openspec/…` and `lib/test/…` sail straight past
+# it, which is precisely the "a `docs` that grew a subdirectory" case this
+# script claims to prevent. It did not, until it was pointed out.
+FORBIDDEN_SEGMENTS = %w[
+  openspec
+  test
+  examples
+  .github
+  bin
+  rel
+  config
+  .devcontainer
+  deps
+  _build
+].freeze
+
+# Matched on the basename, wherever it appears, for the same reason.
+FORBIDDEN_NAMES = %w[Dockerfile .dockerignore .tool-versions CLAUDE.md mix.lock].freeze
+
+def log(message) = puts(message)
+
+def step(message) = puts("\n== #{message}")
+
+@failures = []
+
+def check(description)
+  ok = yield
+  puts("#{ok ? "  ok  " : "  FAIL"}  #{description}")
+  @failures << description unless ok
+  ok
+end
+
+def version
+  File.read(File.join(REPO_ROOT, "mix.exs"))[/version:\s*"([^"]+)"/, 1] ||
+    File.read(File.join(REPO_ROOT, "mix.exs"))[/@version\s+"([^"]+)"/, 1] ||
+    raise("no version in mix.exs")
+end
+
+# The hex tarball is a tar of a tar: an outer one carrying VERSION, CHECKSUM,
+# metadata.config and `contents.tar.gz`, with the files themselves in the
+# inner one. Listing the outer tells you nothing about what ships, which is the
+# mistake worth not making in a check whose whole job is to look inside.
+def package_paths(tarball, workdir)
+  outer = File.join(workdir, "outer")
+  FileUtils.mkdir_p(outer)
+  sh!("tar", "-xf", tarball, "-C", outer)
+
+  contents = File.join(outer, "contents.tar.gz")
+  raise "no contents.tar.gz inside #{tarball}" unless File.exist?(contents)
+
+  unpacked = File.join(workdir, "contents")
+  FileUtils.mkdir_p(unpacked)
+  sh!("tar", "-xzf", contents, "-C", unpacked)
+
+  paths = Dir.glob("**/*", File::FNM_DOTMATCH, base: unpacked)
+             .reject { |p| p.end_with?("/.", "/..") || p == "." }
+             .reject { |p| File.directory?(File.join(unpacked, p)) }
+             .sort
+
+  [paths, unpacked]
+end
+
+# Compiling the tarball proves what the file list only implies. Two things it
+# has caught in the shape of a thought experiment and would catch for real: a
+# module referring to something under `test/support`, and an `elixirc_paths`
+# that only ever ran with the repository around it.
+#
+# Deliberately outside the repository, in a temporary directory: run in place
+# and the surrounding checkout supplies whatever the tarball forgot, and the
+# check passes by accident.
+#
+# `MIX_ENV=prod` and not the ambient one. CI exports `MIX_ENV=test` for the
+# suite, and this project's `elixirc_paths(:test)` includes `test/support` —
+# which the tarball correctly does not carry, so inheriting it would fail this
+# step for the one reason that is not a defect.
+def compile_standalone(unpacked)
+  env = {"MIX_ENV" => "prod", "HEX_OFFLINE" => nil}
+
+  Dir.chdir(unpacked) do
+    _, ok = sh(env, "mix", "deps.get")
+    return [false, "mix deps.get failed:\n#{@last_stderr}"] unless ok
+
+    out, ok = sh(env, "mix", "compile")
+    return [false, "mix compile failed:\n#{out}#{@last_stderr}"] unless ok
+
+    [true, out]
+  end
+end
+
+def directories_of(path) = path.split("/")[0..-2]
+
+# Everything below runs inside one rescue, so that a failure in the plumbing —
+# `mix hex.build` exiting non-zero, a tarball that is not there, an unreadable
+# `contents.tar.gz` — is reported in the same "N check(s) failed" shape as a
+# content violation rather than as a Ruby backtrace. The exit status was
+# already correct either way; this is about what a reader finds in a CI log.
+begin
+  step "Building the package"
+  Dir.chdir(REPO_ROOT) { sh!("mix", "hex.build") }
+
+  tarball = File.join(REPO_ROOT, "audio_proxy-#{version}.tar")
+  raise "mix hex.build produced no #{tarball}" unless File.exist?(tarball)
+
+  log "  #{File.basename(tarball)} (#{File.size(tarball)} bytes)"
+
+  Dir.mktmpdir("hex-package-check") do |workdir|
+    paths, unpacked = package_paths(tarball, workdir)
+
+    step "Contents (#{paths.length} files)"
+    paths.each { |p| log "  #{p}" }
+
+    step "Required files"
+    REQUIRED.each do |required|
+      check("#{required} is present") { paths.include?(required) }
+    end
+
+    # Not a named file, because naming one makes the guard fail on a rename
+    # that the package is entirely fine with. What has to be true is that
+    # there is Elixir in here at all; the standalone compile proves the rest.
+    check("lib/ carries at least one .ex") do
+      paths.any? { |p| p.start_with?("lib/") && p.end_with?(".ex") }
+    end
+
+    step "Nothing outside the allowlist"
+    strays = paths.reject do |p|
+      ALLOWED_FILES.include?(p) || ALLOWED_DIRS.any? { |dir| p.start_with?("#{dir}/") }
+    end
+    allowed_dirs = ALLOWED_DIRS.map { |dir| "#{dir}/" }.join(", ")
+    check("every path is an allowed file or under #{allowed_dirs}") { strays.empty? }
+    strays.first(10).each { |p| log "        #{p}" }
+
+    step "Excluded paths"
+    FORBIDDEN_SEGMENTS.each do |segment|
+      offenders = paths.select { |p| directories_of(p).include?(segment) }
+      check("no #{segment}/ directory, at any depth") { offenders.empty? }
+      offenders.first(5).each { |p| log "        #{p}" }
+    end
+
+    FORBIDDEN_NAMES.each do |name|
+      offenders = paths.select { |p| File.basename(p) == name }
+      check("no #{name}, at any depth") { offenders.empty? }
+      offenders.first(5).each { |p| log "        #{p}" }
+    end
+
+    if ENV["SKIP_COMPILE"]
+      step "Standalone compile (skipped: SKIP_COMPILE)"
+    else
+      step "Standalone compile, outside the repository"
+      ok, detail = compile_standalone(unpacked)
+      check("the unpacked package compiles with MIX_ENV=prod") { ok }
+      log(detail.to_s.lines.last(20).join) unless ok
+    end
+  end
+
+  # `mix hex.publish` publishes docs as well as the package, by running
+  # `mix docs` — so the docs build is part of what a tag ships and belongs in
+  # the same dry run. Without this the first place a broken docs build could
+  # surface was inside the publish step, on the tag, after the image had
+  # already been pushed.
+  #
+  # The specific failure worth naming: the README is the front page
+  # (`main: "readme"`), and a relative link from an extra to a file that is not
+  # itself an extra resolves to nothing. That shipped a front page whose links
+  # to `llms.txt` and `llms-full.txt` — the two files the package exists to
+  # carry — were dead, and nothing said so, because the build still succeeded.
+  #
+  # Only the file-reference class is asserted, not every warning: ex_doc also
+  # reports references to hidden and third-party functions, which are a
+  # separate cleanup and would make this a guard nobody can keep green.
+  step "Documentation build"
+  docs_env = {"MIX_ENV" => "dev"}
+  Dir.chdir(REPO_ROOT) do
+    sh!(docs_env, "mix", "deps.get")
+    out, ok = sh(docs_env, "mix", "docs")
+    check("mix docs succeeds") { ok }
+    log(out.to_s.lines.last(20).join) unless ok
+
+    broken = @last_stderr.to_s.scan(/documentation references file "([^"]+)"/).flatten.uniq
+    check("every documented link resolves") { broken.empty? }
+    broken.first(10).each { |ref| log "        #{ref}" }
+  end
+rescue StandardError => e
+  step "The check could not complete"
+  log "  #{e.message}"
+  @failures << "the package could not be built or inspected: #{e.message}"
+end
+
+if @failures.empty?
+  step "The package is publishable"
+  log "  Nothing was uploaded. `mix hex.publish` runs in CI, on a tag."
+  exit 0
+else
+  step "#{@failures.length} check(s) failed"
+  @failures.each { |f| log "  #{f}" }
+  exit 1
+end

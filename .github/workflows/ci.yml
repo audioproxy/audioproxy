@@ -232,6 +232,44 @@ jobs:
       - name: Check that the guard can still fail
         run: SKIP_BUILD=1 IMAGE=audio_proxy:capacity bin/check-capacity --self-test
 
+  hex-package:
+    name: the hex package is what we meant to ship
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: erlef/setup-beam@v1
+        id: beam
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
+
+      - run: mix deps.get
+
+      # Runs on every pull request and not only on a tag, which is the whole
+      # point of it: a hex version is permanent, `mix hex.retire` marks a bad
+      # one rather than removing it, so the tarball has to be wrong on a branch
+      # — where it is free to fix — instead of on the tag that publishes it.
+      #
+      # Three claims, all in the script: the tarball holds the allowlist and
+      # nothing else (LICENSE and the two llms files present; `openspec/`,
+      # `test/`, `examples/`, `Dockerfile`, `.github/` absent at any depth), the
+      # unpacked tarball compiles on its own outside this checkout — so "the
+      # package builds for a consumer" is tested rather than inferred from a
+      # list of filenames — and `mix docs` builds with every documented link
+      # resolving, because `mix hex.publish` ships those docs too.
+      - name: Build the package and check its contents
+        run: bin/check-hex-package
+
   license-compliance:
     name: the image carries its notices and its source manifest
     needs: test
@@ -388,8 +426,8 @@ jobs:
   # ---------------------------------------------------------------------------
 
   publish:
-    name: publish image to GHCR
-    needs: [smoke, image-ffmpeg, capacity, license-compliance]
+    name: publish image to GHCR and package to hex
+    needs: [smoke, image-ffmpeg, capacity, license-compliance, hex-package]
     if: >-
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
@@ -478,3 +516,60 @@ jobs:
             VERSION=${{ steps.tags.outputs.version }}
             REVISION=${{ github.sha }}
           cache-from: type=gha
+
+      # ---------------------------------------------------------------------
+      # The hex package, on tags only. `main` publishes an `:edge` image and
+      # nothing else: hex has no moving channel to push a pre-release commit
+      # to, and the version in mix.exs has already been published by the time
+      # the next commit lands on main.
+      #
+      # After the image push, sharing its gate rather than duplicating it: the
+      # tag has already been asserted to match mix.exs above, so the image and
+      # the package of one version cannot be different code.
+      #
+      # Package and docs are published as two steps, not by one bare
+      # `mix hex.publish`, because their retry stories are opposite. A package
+      # version can be overwritten only within an hour of publishing it and
+      # only with `--replace`, so a second `mix hex.publish` on an
+      # already-published version *fails*. Documentation has no such limit and
+      # can be republished forever. Combined into one command, a docs failure
+      # after a successful package upload left the release unrecoverable by
+      # re-run: the retry died on the package half and never reached the docs.
+      # Split, the docs step retries cleanly and the package step fails loudly
+      # on a genuine duplicate, which is what it should do.
+      # ---------------------------------------------------------------------
+      - uses: erlef/setup-beam@v1
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      # MIX_ENV=dev, against the workflow-level `test`: `mix hex.publish`
+      # builds the docs as part of publishing, and ex_doc is a `only: :dev`
+      # dependency, so the default env here would fail on a missing `mix docs`.
+      - name: Publish the package to hex.pm
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          MIX_ENV: dev
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          # A missing secret is a hard failure and not a skip. The tag has
+          # already moved and the image has already published; a release that
+          # quietly shipped one of its two artifacts is the state worth
+          # failing loudly about.
+          if [ -z "${HEX_API_KEY:-}" ]; then
+            echo "::error::HEX_API_KEY is not set — see docs/development.md, 'The hex credentials'"
+            exit 1
+          fi
+
+          mix deps.get
+          mix hex.publish package --yes
+
+      - name: Publish the docs to hexdocs.pm
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          MIX_ENV: dev
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+        run: mix hex.publish docs --yes

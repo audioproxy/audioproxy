@@ -168,7 +168,8 @@ would never get that far.
 | `image-ffmpeg` | `test` | Builds the `test` and `runtime` stages, then `mix test --only ffmpeg` inside the image | Asserts the two stages carry the *same* ffmpeg build, and that its major matches [`VERSIONS.md`](../VERSIONS.md) |
 | `smoke` | `test` | Builds the release image, runs [`bin/smoke-image`](../bin/smoke-image) | Boot, health, an end-to-end render off a read-only mount, an `s3://` render against MinIO (and `502` once the store is gone), an `s3://` variant store served proxied and then redirected from a second container, a signed percent-escaped URL over h2c, config validation, SIGTERM during a render |
 | `capacity` | `test` | Runs [`bin/capacity-matrix --verify`](../bin/capacity-matrix), then builds the release image and runs [`bin/check-capacity`](../bin/check-capacity) twice | Drives a concurrent workload (two-hour source included) and asserts cgroup `memory.peak` stays inside the model [`docs/capacity.md`](capacity.md) publishes; the second run is the guard's own red-path check. The `--verify` step needs no image and checks the other direction — that every cell of that document's decision matrix really is the largest concurrency its column's memory limit holds |
-| `publish` | `smoke`, `image-ffmpeg`, `capacity` | Pushes to GHCR | Never runs for a pull request; see [Releases](#releases) |
+| `hex-package` | `test` | Runs [`bin/check-hex-package`](../bin/check-hex-package) | Builds the tarball, asserts it holds the allowlist and nothing else (LICENSE, `llms.txt`, `llms-full.txt` present; `openspec/`, `test/`, `examples/`, `Dockerfile`, `.github/` absent at any depth), unpacks it outside the checkout and compiles it, then builds the docs and asserts every documented link resolves. Runs on pull requests, because a published hex version is permanent |
+| `publish` | `smoke`, `image-ffmpeg`, `capacity`, `license-compliance`, `hex-package` | Pushes to GHCR, and on a tag publishes to hex.pm | Never runs for a pull request; see [Releases](#releases) |
 
 Compilation runs with warnings as errors because the compiler's set-theoretic
 type checker reports through warnings — that flag is what makes the type gate a
@@ -210,9 +211,16 @@ the branch rejects force-pushes and deletion. **Branch protection is a repo
 setting, not a file**, so it does not travel with a clone — a fork has to set it
 up again, under *Settings → Branches → Add rule* for `main`, requiring the
 checks named **format, compile, unit tests**, **ffmpeg-tagged tests against the
-shipped ffmpeg** and **container smoke suite** (GitHub lists status checks by
-job name, not by the job's key in the YAML). `publish` is not a required check —
-it does not run on pull requests at all.
+shipped ffmpeg**, **container smoke suite** and **the hex package is what we
+meant to ship** (GitHub lists status checks by job name, not by the job's key
+in the YAML). `publish` is not a required check — it does not run on pull
+requests at all.
+
+> **`hex-package` has to be added to that list by hand.** It gates `publish`
+> through `needs:`, which stops a *tag* from publishing a bad tarball but does
+> nothing to stop a pull request from merging one — and by the time the tag
+> runs, the fix is a new version rather than an edit. Until the rule names it,
+> a red `hex-package` is advisory.
 
 > **Renaming or removing a job means editing that list in the same breath.** A
 > required check is matched by job name, so one that no longer runs never
@@ -226,15 +234,70 @@ it does not run on pull requests at all.
 
 ## Releases
 
-Images live at `ghcr.io/audioproxy/audioproxy`. Nothing is published by hand:
+A release ships two artifacts: the image at `ghcr.io/audioproxy/audioproxy`, and
+the hex package [`audio_proxy`](https://hex.pm/packages/audio_proxy) with its
+docs on [hexdocs](https://hexdocs.pm/audio_proxy). Nothing is published by hand:
 the `publish` job is the only thing that pushes, and it is gated on the smoke
 suite, so a red pipeline publishes nothing for that ref.
 
-| Ref | Tags pushed | Mutable? |
+| Ref | Tags pushed | hex | Mutable? |
+|---|---|---|---|
+| `vX.Y.Z` | `:X.Y.Z`, `:X.Y`, `:latest` | `audio_proxy X.Y.Z` | `:X.Y` and `:latest` move; `:X.Y.Z` does not, and no hex version ever does |
+| push to `main` | `:edge`, `:sha-<12>` | none | `:edge` moves; `:sha-<12>` does not |
+| any other `v*` tag | none — the job fails | none | — |
+
+`main` publishes no package because hex has no moving channel to push a
+pre-release commit to: the version in `mix.exs` was published by the tag before
+it, so every commit after that tag would be a duplicate. `:edge` is the
+equivalent for anyone who needs one, and it is an image.
+
+The two artifacts cannot disagree about what they contain. The publish job
+asserts `mix.exs` matches the tag before it does anything, and both are built
+from that same commit — so `ghcr.io/audioproxy/audioproxy:0.4.0` and
+`audio_proxy 0.4.0` are the same code by construction, not by discipline.
+
+**The image is published first, then the package, then the docs** — three
+steps, and the order is what makes a partial failure recoverable:
+
+| Failed after | State | Recovery |
 |---|---|---|
-| `vX.Y.Z` | `:X.Y.Z`, `:X.Y`, `:latest` | `:X.Y` and `:latest` move; `:X.Y.Z` does not |
-| push to `main` | `:edge`, `:sha-<12>` | `:edge` moves; `:sha-<12>` does not |
-| any other `v*` tag | none — the job fails | — |
+| the image | image out, nothing on hex | Re-run the job. The image republishes harmlessly (same digest, same tags) |
+| the package | image and package out, no docs | Re-run **just the docs**: `MIX_ENV=dev mix hex.publish docs --yes`. Docs have no republish limit |
+| nothing | all three out | — |
+
+The package and the docs are two steps rather than one `mix hex.publish` for
+exactly that middle row. A published package version can only be overwritten
+within an hour of publishing it, and only with `--replace` — so a plain re-run
+of a combined command dies on the package half with "already published" and
+never reaches the docs it was re-run for.
+
+What cannot be undone is a *successful* bad publish. `mix hex.publish --revert
+VERSION` works for one hour (24 for a brand-new package) and after that
+`mix hex.retire` only marks a version rather than removing it. That asymmetry
+is why [`bin/check-hex-package`](../bin/check-hex-package) runs on every pull
+request instead of only at the tag.
+
+### The hex credentials
+
+Publishing needs a `HEX_API_KEY` repository secret, and it is the one part of
+the release path that is set up by hand:
+
+```bash
+# Once per maintainer, against your own hex.pm account:
+mix hex.user auth                    # or `mix hex.user register`
+mix hex.user key generate --key-name audioproxy-ci --permission api:write
+```
+
+Put that key in **Settings → Secrets and variables → Actions** as
+`HEX_API_KEY`. Scope it to `api:write` and nothing more; it is a
+publish credential, not an account credential, and it can be revoked with
+`mix hex.user key revoke --key-name audioproxy-ci` without touching the
+account.
+
+A tag pushed before that secret exists fails the publish job **after** the image
+has been pushed — deliberately loud, because a release that quietly shipped one
+of its two artifacts is the state worth failing about. If you are cutting the
+first release, confirm the secret is there before tagging.
 
 That last row is deliberate. The workflow triggers on `v*`, so `v1.2.3-rc1` and
 `v1.2` reach the publish job, and both would otherwise have been treated as
@@ -256,13 +319,26 @@ $EDITOR mix.exs
 
 # 2. Land it on main through the usual PR gate.
 
-# 3. Tag the merge commit and push the tag.
+# 3. Dry-run the package. Builds the tarball, checks its contents and
+#    compiles it outside the repo. Uploads nothing.
+bin/check-hex-package
+
+# 4. Tag the merge commit and push the tag.
 git tag -a v0.1.0 -m "v0.1.0"
 git push origin v0.1.0
 ```
 
 The tag push runs the whole pipeline again — tests, image, smoke — and only
 then publishes. There is no separate release workflow to keep in step.
+
+Step 3 is belt-and-braces: the same script gates every pull request, so a
+tarball that has gone wrong should already have failed there. It is in the
+procedure because the cost of the two is not symmetric — a minute locally
+against a permanent version on hex.
+
+Afterwards, confirm all four names agree: the git tag, `mix.exs`, the image tag
+on GHCR, and the version on [hex.pm](https://hex.pm/packages/audio_proxy) with
+its docs rendered on [hexdocs](https://hexdocs.pm/audio_proxy).
 
 **Release notes are claims, and claims name their checks.** Before publishing
 notes, every Highlight must point at the automated check that demonstrates it —
