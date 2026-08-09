@@ -95,7 +95,11 @@ RUN mix deps.get && mix deps.compile
 COPY config config
 COPY lib lib
 COPY test test
-COPY .formatter.exs README.md ./
+# README.md and the llms files are test *inputs*, not documentation freight:
+# `AudioProxy.ReadmeExamplesTest` and `AudioProxy.LlmsDocsTest` read them from
+# the working directory. A doc a test reads has to be copied here, or the
+# suite fails on a missing file rather than on anything it was testing.
+COPY .formatter.exs README.md llms.txt llms-full.txt ./
 
 CMD ["mix", "test", "--only", "ffmpeg"]
 

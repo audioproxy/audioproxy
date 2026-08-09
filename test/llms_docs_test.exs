@@ -25,11 +25,13 @@ defmodule AudioProxy.LlmsDocsTest do
   alias AudioProxy.Options
   alias AudioProxy.Signature
 
-  @external_resource "llms.txt"
-  @external_resource "llms-full.txt"
-
-  @index File.read!("llms.txt")
-  @full File.read!("llms-full.txt")
+  # Read when a test runs, not when this file compiles. `mix test --only
+  # ffmpeg` still *compiles* every test file, so a compile-time read makes
+  # these documents a build input of any image carrying the suite — which is
+  # how the release image's test stage broke on a file it never runs a test
+  # against. Same idiom as `AudioProxy.ReadmeExamplesTest`.
+  defp index, do: File.read!("llms.txt")
+  defp full, do: File.read!("llms-full.txt")
 
   describe "llms.txt format" do
     test "has exactly one H1" do
@@ -73,7 +75,7 @@ defmodule AudioProxy.LlmsDocsTest do
 
     test "llms-full.txt carries the same lead" do
       lines =
-        @full
+        full()
         |> String.replace(~r/<!--.*?-->/s, "")
         |> lines()
         |> Enum.reject(&(&1 == ""))
@@ -174,7 +176,7 @@ defmodule AudioProxy.LlmsDocsTest do
   # Prose lines only: a `#` or `-` inside a fenced block is shell, not
   # markdown, and llms.txt gains a fence the moment someone adds an example.
   defp index_lines do
-    @index
+    index()
     |> lines()
     |> Enum.reduce({[], false}, fn
       "```" <> _rest, {kept, fenced?} -> {kept, not fenced?}
@@ -214,14 +216,14 @@ defmodule AudioProxy.LlmsDocsTest do
 
   defp region(name) do
     [_before, inside | _after] =
-      String.split(@full, ["<!-- #{name}-table:start -->", "<!-- #{name}-table:end -->"])
+      String.split(full(), ["<!-- #{name}-table:start -->", "<!-- #{name}-table:end -->"])
 
     lines(inside)
   end
 
   defp signing_example do
     [_before, inside | _after] =
-      String.split(@full, [
+      String.split(full(), [
         "<!-- signing-example:start -->",
         "<!-- signing-example:end -->"
       ])
