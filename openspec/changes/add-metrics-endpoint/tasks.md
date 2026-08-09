@@ -11,9 +11,9 @@
 
 ## 3. Endpoint
 
-- [ ] 3.1 Second Bandit listener on `AP_METRICS_BIND`/`AP_METRICS_PORT` (config + validation); `/metrics` absent from public router
-- [ ] 3.2 Tests: scrape parses (strict line grammar), bind restriction (public listener 404s), end-to-end counters move after a real request cycle
+- [x] 3.1 Second Bandit listener on `AP_METRICS_BIND`/`AP_METRICS_PORT` (config + validation); `/metrics` absent from public router
+- [x] 3.2 Tests: scrape parses (strict line grammar), bind restriction (public listener 404s), end-to-end counters move after a real request cycle
 
 ## 4. Docs
 
-- [ ] 4.1 Update README: metrics list with labels, scrape config example, example PromQL for the four signals
+- [x] 4.1 Update README: metrics list with labels, scrape config example, example PromQL for the four signals

@@ -63,9 +63,11 @@ Example:
 | `GET /{sig}/f:peaks/…/{source}` | Waveform peaks (a *format*, not a separate resource — see §3.3) |
 | `GET /health` | Liveness (unsigned) — `200` whatever the load; a busy proxy is a working proxy |
 | `GET /ready` | Readiness (unsigned) — `200` while the node should receive new work, `503` once queue depth reaches `AP_READY_QUEUE_THRESHOLD`, recovering at half of it. Body: `{"status": "ready"\|"not_ready", "queued": n, "threshold": n}` |
-| `GET /metrics` | Prometheus metrics (unsigned, bind-address-restricted) |
+| `GET /metrics` | Prometheus metrics (unsigned, bind-address-restricted) — see below |
 | `GET /hls/{sig}/{options}/{source}/index.m3u8` | **Reserved for v2** — segmented streaming |
 | `GET /hls/{sig}/{options}/{source}/seg-{n}.m4s` | **Reserved for v2** |
+
+**`/metrics` is on a listener of its own**, bound to `AP_METRICS_BIND:AP_METRICS_PORT` (default `127.0.0.1:9568`), and the main listener answers `404` for the path. The restriction is a bind rather than a peer-address check on the shared listener, because a bind is a guarantee the kernel makes: behind a proxy the peer address is the proxy's, and every check that reads one has to decide how much of `X-Forwarded-For` to believe. `AP_METRICS_BIND` takes an address literal and refuses a hostname — the access control of an unsigned endpoint must not depend on DNS. The response is `text/plain; version=0.0.4` and `no-store`; every label value is a bounded enum, so nothing a client sends can grow a scraper's series count.
 
 **`/ready`'s `503` is a verdict, not an error**, and three consequences follow from that. Its body is `{"status", "queued", "threshold"}` rather than the `{"error", "message"}` envelope of §5 — a client generated from the error table must not expect that shape here. It carries no `Retry-After`, unlike the `429` that backpressure produces: a balancer reading this reroutes to another node immediately rather than waiting, so the header would be advice nobody acts on. And it reports live capacity numbers to an unsigned caller, which is deliberate — they are what make a failing probe diagnosable — but it does mean `/ready` is the one unsigned endpoint that discloses current load, and an operator who cares can strip the body at the edge without affecting the status.
 
@@ -276,6 +278,7 @@ Mid-stream render failure after `200` is signaled by abnormal termination of the
 | `AP_SERVE_MODE` | `redirect` \| `proxy` |
 | `AP_PRESIGN_TTL` | Seconds a HIT's presigned URL stays valid (default: 300); redirect mode only |
 | `AP_LOG_LEVEL` | `debug` \| `info` \| `warning` \| `error` (default: `info`) |
+| `AP_METRICS_BIND`, `AP_METRICS_PORT` | Where the `/metrics` listener binds (default: `127.0.0.1`, `9568`). The endpoint is unsigned, so the bind is its access control; `AP_METRICS_BIND` is an address literal and a hostname is refused at boot, as is a port equal to the listener's |
 | `AP_S3_ENDPOINT` | Origin URL of an S3-compatible store (`http://minio:9000`); unset = AWS proper. An origin and nothing else — a path, query, fragment or embedded credentials are refused at boot |
 | `AP_S3_ADDRESSING` | `virtual` \| `path`: whether a request names its bucket in the host or in the path. Default: `virtual` with no `AP_S3_ENDPOINT`, `path` with one. Signed requests and presigned URLs always use the same style, since the host is inside the signature |
 | `AP_S3_CA_BUNDLE` | PEM bundle to verify the store's certificate against, replacing the system trust store; a readable file at boot. There is no way to disable verification |

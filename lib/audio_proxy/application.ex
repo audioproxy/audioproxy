@@ -85,14 +85,31 @@ defmodule AudioProxy.Application do
   end
 
   # The test suite drives the router through Plug.Test, so it binds no socket.
+  #
+  # Two listeners, because `/metrics` is unsigned and its access control is the
+  # bind address (API doc §2, and `AudioProxy.Metrics.Router` for why a bind
+  # rather than a peer check). The metrics one is not optional and has no
+  # enable flag: it defaults to loopback, where it is reachable by a sidecar
+  # scraper and by nothing off-host.
   defp listener(config) do
     if Application.get_env(:audio_proxy, :start_listener, true) do
       Logger.info("listening on http://0.0.0.0:#{config.port}")
-      [{Bandit, plug: AudioProxy.Router, scheme: :http, port: config.port}]
+      Logger.info("metrics on http://#{bind(config.metrics_bind)}:#{config.metrics_port}")
+
+      [
+        {Bandit, plug: AudioProxy.Router, scheme: :http, port: config.port},
+        {Bandit,
+         plug: AudioProxy.Metrics.Router,
+         scheme: :http,
+         ip: config.metrics_bind,
+         port: config.metrics_port}
+      ]
     else
       []
     end
   end
+
+  defp bind(address), do: address |> :inet.ntoa() |> to_string()
 
   defp vsn, do: :audio_proxy |> Application.spec(:vsn) |> to_string()
 end
