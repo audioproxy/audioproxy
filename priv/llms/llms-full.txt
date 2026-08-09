@@ -1,17 +1,3 @@
-<!--
-  Machine-checked regions. `test/audio_proxy/llms_test.exs` parses the two
-  tables delimited below and compares them, as sets, against the
-  implementation: option keys against `AudioProxy.Options.keys/0`, error rows
-  against `AudioProxy.ErrorJSON.rows/0`. The signing example is recomputed
-  with `AudioProxy.Signature.sign/3`.
-
-  So the tables have a fixed shape. Inside a marked region, every line that
-  starts with `|` and whose first cell is a single backticked token is read as
-  a row; the header and its `|---|` separator are skipped. One row per option
-  key, one row per error row — do not merge, split, or annotate the first cell.
-  Prose outside the markers is yours; prose inside the first cell is not.
--->
-
 # audio_proxy
 
 > An on-the-fly audio transcoding proxy. A signed URL names a source and the variant you want from it — format, bitrate, trim, fades, loudness, waveform peaks — and the proxy renders it with ffmpeg, streams it while it encodes, and caches it for later requests. URLs are the entire API: no request bodies, no server-side state, and the normalized options string is the cache key.
@@ -332,3 +318,21 @@ Each `$SIG` differs: it signs the rest of that particular path.
 `0.x` means the URL contract can still change. It settles at `1.0`, after which a change to what an existing URL means, or to how cache keys are derived, is a major version.
 
 The source of truth for this contract is [docs/audio-proxy-api-v1.md](https://github.com/audioproxy/audioproxy/blob/main/docs/audio-proxy-api-v1.md).
+
+<!--
+  Editing this file: three regions above are machine-checked, and this note
+  lives at the bottom because the convention wants the H1 first.
+
+  `test/audio_proxy/llms_test.exs` parses the two marked tables and compares
+  them, as sets, against the implementation: option keys against
+  `AudioProxy.Options.keys/0`, error rows against
+  `AudioProxy.ErrorJSON.rows/0`. The signing example is recomputed with
+  `AudioProxy.Signature.sign/3`.
+
+  So the tables have a fixed shape. Inside a marked region, every line that
+  starts with `|` and whose first cell is a single backticked token is read as
+  a row; the header and its `|---|` separator are skipped. One row per option
+  key, one row per error row — do not merge, split, or annotate the first cell.
+  Prose outside the markers is yours; prose inside the first cell is not.
+-->
+

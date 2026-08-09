@@ -16,8 +16,11 @@ defmodule AudioProxy.Llms do
 
   Those guards are why `llms-full.txt` has machine-checked regions: its option
   table must name exactly `AudioProxy.Options.keys/0`, and its error table
-  exactly `AudioProxy.ErrorJSON.rows/0`. The file's own header comment states
-  the shape they parse. Prose stays human-owned; only coverage is enforced.
+  exactly `AudioProxy.ErrorJSON.rows/0`. A comment at the *foot* of that file
+  states the shape they parse — at the foot because the convention wants the
+  H1 first, and a reader arriving over HTTP should meet the document rather
+  than a note to its maintainer. Prose stays human-owned; only coverage is
+  enforced.
   """
 
   @dir Path.expand("../../priv/llms", __DIR__)
