@@ -168,7 +168,7 @@ would never get that far.
 | `image-ffmpeg` | `test` | Builds the `test` and `runtime` stages, then `mix test --only ffmpeg` inside the image | Asserts the two stages carry the *same* ffmpeg build, and that its major matches [`VERSIONS.md`](../VERSIONS.md) |
 | `smoke` | `test` | Builds the release image, runs [`bin/smoke-image`](../bin/smoke-image) | Boot, health, an end-to-end render off a read-only mount, an `s3://` render against MinIO (and `502` once the store is gone), an `s3://` variant store served proxied and then redirected from a second container, a signed percent-escaped URL over h2c, config validation, SIGTERM during a render |
 | `capacity` | `test` | Runs [`bin/capacity-matrix --verify`](../bin/capacity-matrix), then builds the release image and runs [`bin/check-capacity`](../bin/check-capacity) twice | Drives a concurrent workload (two-hour source included) and asserts cgroup `memory.peak` stays inside the model [`docs/capacity.md`](capacity.md) publishes; the second run is the guard's own red-path check. The `--verify` step needs no image and checks the other direction — that every cell of that document's decision matrix really is the largest concurrency its column's memory limit holds |
-| `hex-package` | `test` | Runs [`bin/check-hex-package`](../bin/check-hex-package) | Builds the tarball, asserts it holds the curated file list (LICENSE, `llms.txt`, `llms-full.txt` present; `openspec/`, `test/`, `examples/`, `Dockerfile`, `.github/` absent), then unpacks it outside the checkout and compiles it. Runs on pull requests, because a published hex version is permanent |
+| `hex-package` | `test` | Runs [`bin/check-hex-package`](../bin/check-hex-package) | Builds the tarball, asserts it holds the allowlist and nothing else (LICENSE, `llms.txt`, `llms-full.txt` present; `openspec/`, `test/`, `examples/`, `Dockerfile`, `.github/` absent at any depth), unpacks it outside the checkout and compiles it, then builds the docs and asserts every documented link resolves. Runs on pull requests, because a published hex version is permanent |
 | `publish` | `smoke`, `image-ffmpeg`, `capacity`, `license-compliance`, `hex-package` | Pushes to GHCR, and on a tag publishes to hex.pm | Never runs for a pull request; see [Releases](#releases) |
 
 Compilation runs with warnings as errors because the compiler's set-theoretic
@@ -211,9 +211,16 @@ the branch rejects force-pushes and deletion. **Branch protection is a repo
 setting, not a file**, so it does not travel with a clone — a fork has to set it
 up again, under *Settings → Branches → Add rule* for `main`, requiring the
 checks named **format, compile, unit tests**, **ffmpeg-tagged tests against the
-shipped ffmpeg** and **container smoke suite** (GitHub lists status checks by
-job name, not by the job's key in the YAML). `publish` is not a required check —
-it does not run on pull requests at all.
+shipped ffmpeg**, **container smoke suite** and **the hex package is what we
+meant to ship** (GitHub lists status checks by job name, not by the job's key
+in the YAML). `publish` is not a required check — it does not run on pull
+requests at all.
+
+> **`hex-package` has to be added to that list by hand.** It gates `publish`
+> through `needs:`, which stops a *tag* from publishing a bad tarball but does
+> nothing to stop a pull request from merging one — and by the time the tag
+> runs, the fix is a new version rather than an edit. Until the rule names it,
+> a red `hex-package` is advisory.
 
 > **Renaming or removing a job means editing that list in the same breath.** A
 > required check is matched by job name, so one that no longer runs never
@@ -249,14 +256,26 @@ asserts `mix.exs` matches the tag before it does anything, and both are built
 from that same commit — so `ghcr.io/audioproxy/audioproxy:0.4.0` and
 `audio_proxy 0.4.0` are the same code by construction, not by discipline.
 
-**The image is published first, and hex second.** If hex fails after the image
-is out, the release is half-shipped: re-run the publish job, which republishes
-the image harmlessly (same digest, same tags) and retries hex. Hex rejects a
-duplicate version rather than overwriting one, so a retry after a partial
-success is safe too. What cannot be undone is a *successful* bad publish — hex
-versions are permanent, and `mix hex.retire` marks one rather than removing it.
-That asymmetry is why [`bin/check-hex-package`](../bin/check-hex-package) runs
-on every pull request instead of only at the tag.
+**The image is published first, then the package, then the docs** — three
+steps, and the order is what makes a partial failure recoverable:
+
+| Failed after | State | Recovery |
+|---|---|---|
+| the image | image out, nothing on hex | Re-run the job. The image republishes harmlessly (same digest, same tags) |
+| the package | image and package out, no docs | Re-run **just the docs**: `MIX_ENV=dev mix hex.publish docs --yes`. Docs have no republish limit |
+| nothing | all three out | — |
+
+The package and the docs are two steps rather than one `mix hex.publish` for
+exactly that middle row. A published package version can only be overwritten
+within an hour of publishing it, and only with `--replace` — so a plain re-run
+of a combined command dies on the package half with "already published" and
+never reaches the docs it was re-run for.
+
+What cannot be undone is a *successful* bad publish. `mix hex.publish --revert
+VERSION` works for one hour (24 for a brand-new package) and after that
+`mix hex.retire` only marks a version rather than removing it. That asymmetry
+is why [`bin/check-hex-package`](../bin/check-hex-package) runs on every pull
+request instead of only at the tag.
 
 ### The hex credentials
 
