@@ -1,0 +1,32 @@
+# audio_proxy
+
+> An on-the-fly audio transcoding proxy. A signed URL names a source and the variant you want from it — format, bitrate, trim, fades, loudness, waveform peaks — and the proxy renders it with ffmpeg, streams it while it encodes, and caches it for later requests. URLs are the entire API: no request bodies, no server-side state, and the normalized options string is the cache key.
+
+The path is `/{signature}/{options}/{source}`. The signature is `base64url(HMAC-SHA256(key, salt ‖ rest-of-path))` over the raw bytes after the signature segment, leading `/` included. Options are `/`-separated `key:value` segments. The source is `plain/{scheme-url}` or `enc/{base64url(scheme-url)}`, naming a file under a configured root (`local://`), an S3 object (`s3://`), or an HTTPS URL.
+
+Two rules an integrator gets wrong first: sign the path in exactly the spelling you will request it in, because verification runs over the raw percent-encoded path; and the same URL can answer either chunked (a fresh render, no `Content-Length`, no ranges) or with a length and `Accept-Ranges` (a cache hit), depending on whether that variant happens to be stored.
+
+Besides the signed URL space there are three unsigned endpoints — `GET /health`, `GET /ready` and `GET /metrics`, the last on a bind-restricted listener of its own. `/health` also reports the running version, which is how you tell which release of these documents applies: read them at the matching tag.
+
+## Full reference
+
+- [llms-full.txt](https://github.com/audioproxy/audioproxy/blob/main/llms-full.txt): The complete API reference in one file — URL grammar, every processing option and its value domain, the cross-key validation rules, cache-key derivation, response and caching semantics, the full error table, and a worked signing example. Read this one if you are generating URLs.
+
+## API contract
+
+- [API v1 specification](https://github.com/audioproxy/audioproxy/blob/main/docs/audio-proxy-api-v1.md): The source of truth for the URL grammar, processing options, cache-key rules, response headers and error codes.
+- [Sources](https://github.com/audioproxy/audioproxy/blob/main/docs/sources.md): Source encodings and escaping, what is refused, canonical identity and the allowlist grammar.
+- [ffmpeg arguments](https://github.com/audioproxy/audioproxy/blob/main/docs/ffmpeg-arguments.md): How options become ffmpeg arguments — filter order, per-format flags, known gaps.
+
+## Operating it
+
+- [README](https://github.com/audioproxy/audioproxy/blob/main/README.md): What the proxy is, how to run it, how to sign a URL, every option and every environment variable.
+- [Rendering](https://github.com/audioproxy/audioproxy/blob/main/docs/rendering.md): How a render runs — the subprocess, the chunk stream, coalescing, buffering, timeouts and the kill discipline.
+- [Capacity](https://github.com/audioproxy/audioproxy/blob/main/docs/capacity.md): How much memory a container needs, as a concurrency-per-memory-limit matrix and the formula behind it.
+- [Scaling](https://github.com/audioproxy/audioproxy/blob/main/docs/scaling.md): Running more than one node — the shared variant store it requires, load balancers, Kubernetes probes, queue-depth autoscaling.
+- [S3 providers](https://github.com/audioproxy/audioproxy/blob/main/docs/s3-providers.md): Working configurations for Backblaze B2, DigitalOcean Spaces, Hetzner, Scaleway and Tigris.
+
+## Optional
+
+- [Development](https://github.com/audioproxy/audioproxy/blob/main/docs/development.md): Toolchain, per-slice worktrees and devcontainers, the test suite and its tags, CI.
+- [Versions](https://github.com/audioproxy/audioproxy/blob/main/VERSIONS.md): What the published image is built from, and why a pin bump cuts a release.

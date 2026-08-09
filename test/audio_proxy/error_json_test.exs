@@ -201,4 +201,42 @@ defmodule AudioProxy.ErrorJSONTest do
       assert_raise FunctionClauseError, fn -> ErrorJSON.cache_control(418) end
     end
   end
+
+  describe "rows/0" do
+    test "covers every render/1 clause" do
+      # `rows/0` derives the table by mapping over `@representative_errors`,
+      # so a `render/1` clause nobody adds to that list is silently absent
+      # from it — and `AudioProxy.LlmsDocsTest` would then compare the published
+      # error table against an incomplete set and pass. Counting the clauses
+      # is what makes "the documentation cannot drift" true of every error
+      # rather than of the ones somebody remembered to list.
+      #
+      # Reading the source is the same idiom `AudioProxy.ReadmeExamplesTest`
+      # uses, and for the same reason: a list restated here would be the
+      # drift it is meant to catch.
+      clauses =
+        "lib/audio_proxy/error_json.ex"
+        |> File.read!()
+        |> String.split("\n")
+        |> Enum.count(&String.starts_with?(&1, "  def render("))
+
+      rows = length(ErrorJSON.rows())
+
+      assert clauses == rows,
+             """
+             `render/1` has #{clauses} clauses but `rows/0` derives #{rows} rows.
+
+             Add the new error to `@representative_errors` in the same change
+             that added its `render/1` clause, so it reaches `rows/0` and the
+             llms.txt drift guard can require it to be documented.
+             """
+    end
+
+    test "every row is a status and the word its body carries" do
+      for {status, error} <- ErrorJSON.rows() do
+        assert is_integer(status) and status >= 400
+        assert is_binary(error) and error != ""
+      end
+    end
+  end
 end

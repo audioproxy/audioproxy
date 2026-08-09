@@ -784,6 +784,21 @@ rate(audio_proxy_render_queue_rejections_total[5m])
 
 Two more worth an alert. `audio_proxy_variant_store_write_failures_total` moving at all means the cache has silently stopped filling — clients are being served, so nothing else reports it, and the hit ratio decays over hours. And `audio_proxy_render_queue_depth` is the leading signal for autoscaling: target it well below `AP_READY_QUEUE_THRESHOLD` so the fleet grows before nodes start shedding. See [docs/scaling.md](docs/scaling.md).
 
+## For AI agents
+
+Two files at the repository root carry the API reference as markdown, per the [llms.txt](https://llmstxt.org) convention:
+
+| File | What it is |
+|---|---|
+| [`llms.txt`](llms.txt) | The index: what the proxy is, the URL shape, and links to everything else |
+| [`llms-full.txt`](llms-full.txt) | The whole reference in one document — URL grammar, every option and its value domain, the validation rules, cache-key derivation, response and caching semantics, the full error table, a worked signing example |
+
+Point an agent at `llms-full.txt` and it has everything it needs to construct correct signed URLs; nothing else has to be fetched. They also ride in the hex package, so an embedder finds them in the dependency tree.
+
+**Read them at the tag you are running.** `GET /health` reports the version, so `curl -s $BASE/health` and then reading these files at that tag gives you documentation matched to the deployment in front of you. That matters while the URL contract is still `0.x`.
+
+Three things in `llms-full.txt` are machine-checked rather than trusted: the set of option keys, against the parser; the set of error codes, against the error mapping; and the worked signing example, recomputed from the signer on every run. A new option or a new error code that goes undocumented fails CI. The rest — value ranges, defaults, the configuration table, the prose — is reviewed the way the README is, so treat the guards as covering the part that is easiest to forget rather than the whole document.
+
 ## Stack
 
 Elixir with Plug and [Bandit](https://github.com/mtrudel/bandit), and no Phoenix, because there is no HTML to render and no channels to serve. ffmpeg runs as a subprocess rather than through libav bindings, so it does all decoding and encoding while Elixir stays orchestration; `ffprobe` backs `/info`. There is no database, no queue and no sidecar, because the only state is what lives in S3 and in the URLs themselves. That leaves one container to deploy and nothing to migrate.
@@ -816,6 +831,7 @@ Redistributing your own image built from this one inherits all of the above; kee
 | Document | What it covers |
 |---|---|
 | [docs/audio-proxy-api-v1.md](docs/audio-proxy-api-v1.md) | **The source of truth.** URL grammar, every processing option, cache-key rules, response headers, error codes |
+| [llms.txt](llms.txt), [llms-full.txt](llms-full.txt) | The same contract as markdown, in one file, checked against the code — for agents, and for anyone who wants it in one page. See [For AI agents](#for-ai-agents) |
 | [docs/sources.md](docs/sources.md) | Source encodings and escaping, what is refused, the source-type contract and canonical identity |
 | [docs/s3-providers.md](docs/s3-providers.md) | Working configurations for Backblaze B2, DigitalOcean Spaces, Hetzner and Scaleway, and the limitations to know before committing to one |
 | [docs/development.md](docs/development.md) | Toolchain, per-slice worktrees and devcontainers, the test suite and its tags, CI, how a release is cut |
