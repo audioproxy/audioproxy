@@ -18,16 +18,33 @@ defmodule AudioProxy.Telemetry do
   | `[:audio_proxy, :render, :stop]` | `duration` (native), `bytes` | `format`, `source`, `cache_status`, `outcome` |
   | `[:audio_proxy, :render, :exception]` | `duration` (native), `bytes` | `format`, `source`, `cache_status`, `class`, `exit_status`, `detail` |
 
-  One event stands apart from the render lifecycle:
+  Two events stand apart from the render lifecycle:
 
   | Event | Measurements | Metadata |
   |---|---|---|
+  | `[:audio_proxy, :cache, :lookup]` | `system_time` | `status`, `format` |
   | `[:audio_proxy, :variant_store, :write_failure]` | `system_time` | `key`, `reason` |
 
-  Emitted by the write-back tee when storing a completed render fails — a
-  failure no client sees (their bytes come from the coordinator, not the
-  store), which is exactly why it must be instrumented: nothing else says
-  the cache has silently stopped filling.
+  The lookup event fires once per request that commits to one of §5's three
+  `X-Audio-Proxy` values, and `status` is that value: `:hit`, `:miss` or
+  `:coalesced`. Two consequences follow from tying it to the header rather
+  than to the store read behind it. A request that never commits — a 429, a
+  404, a HEAD, a 304 — emits nothing, so `hit / (hit + miss + coalesced)` is a
+  ratio over variants actually served rather than over a denominator nobody
+  can name. And a `:coalesced` request is not counted as a store miss even
+  though its store lookup missed: it did not render either, and folding it
+  into `:miss` would hide the number this proxy exists to move.
+
+  It overlaps the render events' `cache_status` on purpose. That field
+  describes a render, and there is no render behind a `:hit` — the request
+  that was served one never reached `render_start/1`. One event covering all
+  three is what makes the ratio a single subtraction instead of a join across
+  two event families.
+
+  The write-failure event is emitted by the write-back tee when storing a
+  completed render fails — a failure no client sees (their bytes come from
+  the coordinator, not the store), which is exactly why it must be
+  instrumented: nothing else says the cache has silently stopped filling.
 
   `outcome` is `:ok` for a render the client received whole and `:cancelled`
   for one abandoned because the client went away. `class` is the failure
@@ -66,7 +83,16 @@ defmodule AudioProxy.Telemetry do
   """
 
   @render [:audio_proxy, :render]
+  @cache_lookup [:audio_proxy, :cache, :lookup]
   @store_write_failure [:audio_proxy, :variant_store, :write_failure]
+
+  @typedoc """
+  §5's three `X-Audio-Proxy` values, as the cache lookup event reports them.
+
+  A render only ever sees the last two — `:hit` belongs to the request that
+  never started one.
+  """
+  @type cache_status :: :hit | :miss | :coalesced
 
   @typedoc """
   What every render event describes: the variant, its source, and whether this
@@ -147,6 +173,21 @@ defmodule AudioProxy.Telemetry do
       %{duration: duration(span), bytes: span.bytes},
       metadata
     )
+  end
+
+  @doc "The cache lookup event's name, for consumers attaching to it."
+  @spec cache_lookup_event() :: :telemetry.event_name()
+  def cache_lookup_event, do: @cache_lookup
+
+  @doc """
+  Emits `[:audio_proxy, :cache, :lookup]`.
+
+  Called once by whichever module commits to the answer: `AudioProxy.VariantCache`
+  for a `:hit`, `AudioProxy.Plugs.RenderAction` for a `:miss` or a `:coalesced`.
+  """
+  @spec cache_lookup(%{status: cache_status(), format: atom()}) :: :ok
+  def cache_lookup(meta) do
+    :telemetry.execute(@cache_lookup, %{system_time: System.system_time()}, meta)
   end
 
   @doc "The write-back failure event's name, for consumers attaching to it."

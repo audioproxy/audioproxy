@@ -65,6 +65,10 @@ defmodule AudioProxy.Application do
       [
         AudioProxy.Semaphore,
         AudioProxy.ProbeLimiter,
+        # Behind the semaphore, because a scrape samples it. Ahead of the
+        # listener for the reason `AudioProxy.Readiness` is: once `/metrics` is
+        # served, the first accepted connection may be the scraper's.
+        AudioProxy.Metrics,
         # Reads the semaphore's depth, so it starts behind it — and ahead of
         # the listener, because `/ready` must have somewhere to ask on the
         # first accepted connection.

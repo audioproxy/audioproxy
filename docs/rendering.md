@@ -283,8 +283,12 @@ nothing but `AP_RENDER_TIMEOUT` ends it: the timeout fails the render, the
 coordinator stops, and the slot goes to the next waiter.
 
 Occupancy and queue depth are published as `[:audio_proxy, :semaphore, _]`
-telemetry events (`acquired`, `queued`, `rejected`, `released`, `abandoned`),
-which is what `add-metrics-endpoint` will gauge without touching this path.
+telemetry events (`acquired`, `queued`, `rejected`, `released`, `abandoned`).
+`AudioProxy.Metrics` counts `rejected` from that set, and reads the gauges off
+`Semaphore.stats/2` per scrape rather than from the events — a gauge
+maintained by events needs its increments and decrements to balance for the
+life of the VM, and asking the semaphore what it holds cannot drift. Either
+way this path is untouched.
 
 ## Delivery over HTTP
 

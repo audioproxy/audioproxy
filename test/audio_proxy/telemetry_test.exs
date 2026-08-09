@@ -141,6 +141,63 @@ defmodule AudioProxy.TelemetryTest do
     end
   end
 
+  describe "cache outcomes" do
+    test "a render that started one reports :miss, and a joiner :coalesced" do
+      attach_cache(:cache)
+
+      render("/f:opus/br:96/cb:cache-miss/plain/local://piece.wav")
+      render("/f:opus/br:96/cb:cache-miss/plain/local://piece.wav")
+
+      assert_receive {:cache, [:audio_proxy, :cache, :lookup], measurements, first}
+      assert is_integer(measurements.system_time)
+      assert first == %{status: :miss, format: :opus}
+
+      assert_receive {:cache, [:audio_proxy, :cache, :lookup], _,
+                      %{status: :coalesced, format: :opus}}
+    end
+
+    test "a variant already in the store reports :hit, and nothing renders", %{tmp_dir: tmp_dir} do
+      store = Path.join(tmp_dir, "store")
+      File.mkdir_p!(store)
+      put_config(%{variant_store: {:file, store}, serve_mode: :proxy})
+
+      options = "f:mp3"
+      key = AudioProxy.CacheKey.derive!(options, "local://piece.wav")
+
+      :ok =
+        AudioProxy.VariantStore.put_stream(key, ["stored-variant-bytes"], %{
+          content_type: "audio/mpeg",
+          cache_control: "public, max-age=31536000, immutable, no-transform",
+          etag: ~s("#{key}")
+        })
+
+      attach_cache(:cache)
+      attach(:render)
+
+      render("/#{options}/plain/local://piece.wav")
+
+      assert_receive {:cache, [:audio_proxy, :cache, :lookup], _, %{status: :hit, format: :mp3}}
+
+      # The whole point of a HIT: no span was ever opened, so a hit is not a
+      # render with a zero duration — it is not a render at all.
+      refute_receive {:render, [:audio_proxy, :render, :start], _, _}
+    end
+
+    test "a request that never commits to a header emits nothing" do
+      attach_cache(:cache)
+
+      # A HEAD does not consult the cache, so it has no outcome to report —
+      # counting one would put a request the client was told nothing about into
+      # the ratio's denominator.
+      rest = "/f:mp3/plain/local://piece.wav"
+      path = "/#{Signature.sign(rest, @key, @salt)}#{rest}"
+
+      capture_log(fn -> conn(:head, path) |> AudioProxy.FakeFfmpeg.Router.call(@fake_opts) end)
+
+      refute_receive {:cache, [:audio_proxy, :cache, :lookup], _, _}
+    end
+  end
+
   describe "one instrumentation, two consumers" do
     test "a second handler sees identical data, with no change to the render path" do
       attach(:first)
@@ -180,16 +237,14 @@ defmodule AudioProxy.TelemetryTest do
 
   # Forwards every render event to the test process under `tag`. Detached on
   # exit, so a handler cannot outlive the test that attached it.
-  defp attach(tag) do
+  defp attach(tag), do: attach(tag, AudioProxy.Telemetry.render_events())
+
+  defp attach_cache(tag), do: attach(tag, [AudioProxy.Telemetry.cache_lookup_event()])
+
+  defp attach(tag, events) do
     id = {__MODULE__, tag, self()}
 
-    :ok =
-      :telemetry.attach_many(
-        id,
-        AudioProxy.Telemetry.render_events(),
-        &__MODULE__.forward/4,
-        {tag, self()}
-      )
+    :ok = :telemetry.attach_many(id, events, &__MODULE__.forward/4, {tag, self()})
 
     on_exit(fn -> :telemetry.detach(id) end)
   end
