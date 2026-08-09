@@ -1,0 +1,334 @@
+<!--
+  Machine-checked regions. `test/audio_proxy/llms_test.exs` parses the two
+  tables delimited below and compares them, as sets, against the
+  implementation: option keys against `AudioProxy.Options.keys/0`, error rows
+  against `AudioProxy.ErrorJSON.rows/0`. The signing example is recomputed
+  with `AudioProxy.Signature.sign/3`.
+
+  So the tables have a fixed shape. Inside a marked region, every line that
+  starts with `|` and whose first cell is a single backticked token is read as
+  a row; the header and its `|---|` separator are skipped. One row per option
+  key, one row per error row — do not merge, split, or annotate the first cell.
+  Prose outside the markers is yours; prose inside the first cell is not.
+-->
+
+# audio_proxy
+
+> An on-the-fly audio transcoding proxy. A signed URL names a source and the variant you want from it — format, bitrate, trim, fades, loudness, waveform peaks — and the proxy renders it with ffmpeg, streams it while it encodes, and caches it for later requests. URLs are the entire API: no request bodies, no server-side state, and the normalized options string is the cache key.
+
+This is the complete reference. Everything needed to construct a correct URL and interpret every response is below; no follow-up fetch is required.
+
+## Endpoints
+
+```
+GET /{signature}/{options}/{source}    a rendered audio variant, or waveform peaks
+GET /{signature}/info/{source}         the source's own metadata, as JSON
+GET /health                            liveness, unsigned
+GET /ready                             readiness, unsigned
+GET /llms.txt                          the index form of this document
+GET /llms-full.txt                     this document
+GET /metrics                           Prometheus scrape — on a separate, bind-restricted listener
+```
+
+`/metrics` is deliberately not on the main listener: it is bound to `AP_METRICS_BIND:AP_METRICS_PORT` (default `127.0.0.1:9568`), and a request for `/metrics` on the main port answers `404`.
+
+Only `GET` and `HEAD` are served. Any other method is a `404` everywhere — a `405` would confirm a route's shape without telling a client anything useful.
+
+## Signing a URL
+
+The first path segment is the signature:
+
+```
+base64url(HMAC-SHA256(key, salt ‖ rest-of-path))
+```
+
+- `key` and `salt` are the **hex-decoded** values of the `AP_KEY` and `AP_SALT` environment variables.
+- `rest-of-path` is the exact byte sequence after the signature segment, **leading `/` included**, taken from the raw — still percent-encoded — request path.
+- Output is unpadded base64url. Verification also accepts the canonical single-`=` padded form. Nothing else: over-padding and the variant final characters that decode to the same bytes are rejected, so a signature has exactly two accepted spellings.
+
+Sign the path in the spelling you will request. Re-encoding anything breaks the signature: a key containing a space must appear as `a%20track.wav` in both the signed bytes and the request. The `enc/` source form exists to sidestep this entirely.
+
+### Worked example
+
+Verify your implementation against these exact values before doing anything else.
+
+<!-- signing-example:start -->
+```
+AP_KEY  (hex)   00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF
+AP_SALT (hex)   FFEEDDCCBBAA99887766554433221100
+rest-of-path    /f:opus/br:96/plain/s3://masters/2026/piece-final.wav
+signature       zfLTfPPhQ8kdeYYJOdagqPfog2nFk7KzDFUjtRAf_Ns
+```
+<!-- signing-example:end -->
+
+The request is `/{signature}{rest-of-path}`:
+
+```
+/zfLTfPPhQ8kdeYYJOdagqPfog2nFk7KzDFUjtRAf_Ns/f:opus/br:96/plain/s3://masters/2026/piece-final.wav
+```
+
+In Ruby:
+
+```ruby
+require "openssl"
+require "base64"
+
+sig = Base64.urlsafe_encode64(
+  OpenSSL::HMAC.digest("SHA256", [key_hex].pack("H*"), [salt_hex].pack("H*") + rest),
+  padding: false
+)
+```
+
+**That key is a published test vector.** Never use it as a real key; generate one with `openssl rand -hex 32`. `AP_KEY` must decode to at least 32 bytes or the proxy refuses to boot.
+
+A deployment with `AP_ALLOW_INSECURE=true` accepts the literal segment `insecure` in place of a signature (`/insecure/f:mp3/plain/local://track.wav`). It is a development switch: while it is on, anyone who can reach the port can render anything.
+
+## Sources
+
+The last portion of the path names what to render, in one of two forms:
+
+```
+plain/{source}              percent-escaped, unescaped exactly once
+enc/{base64url(source)}     the source as written, base64url-encoded
+```
+
+Both name the same thing and produce the same cache key. A source that already carries escapes must be escaped again in the `plain/` form, so a URL ending `a%20b.wav` is written `plain/https://h/a%2520b.wav`; `enc/` avoids the question.
+
+Three schemes:
+
+- `local://{path}` — a path relative to `AP_LOCAL_ROOT`. The root does not appear in the cache key, so the same relative path is the same variant however a deployment mounted it. Unset root means local sources are refused outright. Paths are confined to the root after decoding and after symlink resolution, and bounded at 64 components and 1024 bytes.
+- `s3://{bucket}/{key}` — an object. Both halves required. Bounded at 63 bytes of bucket and 1024 of key.
+- `https://{host}/{path}` — a URL at an origin. Bounded at 2048 bytes of URL and 253 of host. `http://` and embedded credentials (`https://user:pass@…`) are refused at the grammar.
+
+`AP_SOURCE_ALLOWLIST` gates the two remote schemes. Entries are an exact name, a trailing-`*` prefix glob for buckets, a leading-`*.` label-anchored suffix glob for hosts, or a bare `*`. Buckets match case-sensitively, hosts fold case. **Unset accepts every bucket and refuses every host** — bucket credentials are already a gate, an outbound fetch has none.
+
+Every source-side refusal — not allowlisted, missing, unreadable, unparseable, unknown scheme — is the same byte-identical `404`. There is no `403`, deliberately: a distinguishable response would make the source policy an existence oracle.
+
+### The source must be audio
+
+A source carrying a video stream is refused with `415` (`video_source`), whatever variant was asked for, on both the render path and `/info`. The audio track is not extracted. Embedded cover art is not video and renders normally.
+
+The check costs a probe, so it does not run on a cache hit (immutable bytes that already passed it) or on `HEAD` (which spawns no subprocess). Both are ways a `200` can answer a URL whose `GET` on a miss is a `415`.
+
+## Processing options
+
+Options are `/`-separated `key:value` segments between the signature and the source. Order does not matter — it is normalized before hashing — but every key may appear at most once. Unknown keys, repeated keys, empty segments and valueless segments are all `422`; there is no last-write-wins and no silent ignoring, because either would let two URLs mean one variant.
+
+<!-- options-table:start -->
+
+| Key | Value | Meaning |
+|---|---|---|
+| `f` | `mp3` `opus` `ogg` `aac` `m4a` `flac` `wav` `peaks` | Output format. Default `mp3`. `aac` is an ADTS stream, `m4a` a fragmented MP4, `peaks` waveform data rather than audio |
+| `br` | integer kbps, 1–10000 | CBR/ABR bitrate. Lossy formats only; excludes `q` |
+| `q` | number | VBR quality on the codec's own scale. Excludes `br`; needs a format whose encoder has a scale |
+| `sr` | integer Hz, 1–384000 | Resample. Default is the source's rate; an explicit value above 48000 is refused for lossy formats |
+| `ch` | `1` \| `2` | Channel count. Default follows the source — except under `f:peaks`, where it is `1` |
+| `bd` | `16` \| `24` \| `32f` | Bit depth. Lossless formats only; `32f` needs `f:wav` |
+| `t` | `start[:duration]` seconds | Trim. `t:30` runs to the end, `t:30:15` is 15 s from 30 s. Duration must be positive |
+| `fade` | `in[:out]` seconds | Fades inside the trimmed region. An omitted out-fade is `0`, not a mirror of the in |
+| `gain` | signed number dB, \|value\| ≤ 100 | Static gain |
+| `norm` | `ebu[:I[:TP[:LRA]]]` | EBU R128 loudness normalization. Targets default to `-16:-1.5:11`; ranges are I −70–−5, TP −9–0, LRA 1–50. Single-pass `loudnorm`: good for previews, not for masters |
+| `pts` | integer, 1–100000 | Peaks only: number of min/max pairs. Default `800` |
+| `pk_fmt` | `json` \| `dat` | Peaks only: serialization. Default `json` |
+| `dl` | filename | Sets `Content-Disposition: attachment`. Opaque, kept percent-encoded, control bytes refused |
+| `cb` | opaque string | Cache-buster; participates in the cache key. Control bytes refused |
+
+<!-- options-table:end -->
+
+Decimals are accepted to three places (millisecond precision) and **rejected beyond that rather than rounded**, so float formatting can never destabilize a cache key. Exponent notation is rejected. `-0` is collapsed to `0` at parse time.
+
+Codec quality scales for `q`: mp3 0–9, ogg −1–10, aac/m4a 0.1–2, opus 0–10, flac 0–12. Out of range is a `422` — `f:flac/q:13` is refused by ffmpeg itself, so refusing it here turns a `500` into a `422`.
+
+### Cross-key rules
+
+Each is a `422` naming the offending segment:
+
+- `br` and `q` are mutually exclusive.
+- `br` requires a lossy format (`mp3`, `opus`, `ogg`, `aac`, `m4a`).
+- `q` requires a format whose encoder has a quality scale, and a value inside that codec's range.
+- `bd` requires a lossless format (`flac`, `wav`); `bd:32f` requires `f:wav`.
+- `pts` and `pk_fmt` require `f:peaks`.
+- `f:peaks` refuses `br`, `q`, `sr`, `bd`, `gain` and `norm` — peaks are computed from the decoded source, so an option that cannot change the output would hand identical bytes two cache keys.
+- `sr` above 48000 is refused for lossy formats.
+- A fade must fit inside a bounded trim, and a fade-out requires the trim to be bounded at all: its start is `duration - out`, and without a duration there is nothing to count back from. A fade-in needs no trim.
+
+### Waveform peaks
+
+`f:peaks` returns [audiowaveform](https://github.com/bbc/audiowaveform)-compatible data, so it drops straight into peaks.js. `pk_fmt:json` is `application/json`:
+
+```json
+{
+  "version": 2,
+  "channels": 1,
+  "sample_rate": 44100,
+  "samples_per_pixel": 5513,
+  "bits": 16,
+  "length": 800,
+  "data": [-31904, 31810, "…1598 more"]
+}
+```
+
+`data` holds `length × 2 × channels` signed 16-bit integers: a minimum and a maximum per pixel per channel, interleaved. `bits` is always 16 and `length` always exactly `pts`. `pk_fmt:dat` is the same numbers as `application/octet-stream` — audiowaveform's binary layout, a little-endian header of version, flags, sample rate, samples-per-pixel, length and channel count, then the values as `int16`. It is roughly a fifth the size.
+
+Peaks respect `t`, `ch` and `fade` and ignore everything about encoding. Pick `pts` to match the pixel width you will draw at.
+
+## Cache keys
+
+```
+lowercase-hex(SHA-256(normalized-options ‖ "\n" ‖ canonical-source))
+```
+
+Normalization is what makes this deterministic: keys are sorted lexicographically, applicable defaults are materialized (`f` always; the `norm` targets when `norm` is present; `ch`, `pts` and `pk_fmt` under `f:peaks`), and every number is rendered minimally (`30`, never `30.0`). So `f:opus/br:96` and `br:96/f:opus` are one variant with one key, while any genuine difference — `cb` included — yields a different one.
+
+Normalization is syntactic, not semantic: `t:0`, `fade:0:0` and `gain:0` are identity renders that keep their own keys, and therefore cost duplicate cache objects.
+
+The cache key is the response's `ETag`.
+
+## Responses
+
+A request for a variant that is not stored renders it (`X-Audio-Proxy: MISS`), or attaches to a render already running for it (`COALESCED`). A request for one that is stored renders nothing (`HIT`). The three answer in different shapes:
+
+| | `MISS` / `COALESCED` | `HIT` |
+|---|---|---|
+| Status | `200` | `200`, or `302` in redirect mode |
+| Framing | `transfer-encoding: chunked` | `content-length` |
+| `accept-ranges` | absent | `bytes` |
+| A `Range` request | ignored, answered in full | `206` with the slice |
+
+**The same URL can answer in either shape**, because which one you get depends on whether the variant happens to be cached at that moment. A client that assumes a length, or assumes a range will be honored, will be wrong on a cold cache. `content-type`, `cache-control` and `etag` are the same either way, and so are the bytes.
+
+Bytes start arriving before the render finishes. There is no way to signal a failure that happens *after* the response has begun, so treat a chunked response that ends without its terminating chunk as a failed download.
+
+A `Range` this proxy does not implement — several ranges at once, a unit other than `bytes` — is ignored and answers the whole variant. A range no byte of a cached variant can satisfy is a `416`.
+
+`If-None-Match` matching the `ETag` answers `304` before anything is rendered or fetched. The signature still gates: an unsigned conditional request is a `401`.
+
+`HEAD` on a signed URL runs signature, options, source authorization and a stat, with no body and no render. It neither decodes nor probes, so it cannot report a source ffmpeg would reject or one that turns out to be video, and it does not consult the variant cache.
+
+### Cache-Control
+
+| Response | `Cache-Control` |
+|---|---|
+| `200` media or peaks | `public, max-age=31536000, immutable, no-transform` |
+| `200` from `/info` | `public, max-age=3600` |
+| `404`, `413`, `415` | `max-age=10` |
+| `401`, `422` | `max-age=60` |
+| `302` cache hit, `416`, `429`, `5xx` | `no-store` |
+| `/health`, `/ready`, `/metrics` | `no-store` |
+
+A rendered variant is genuinely immutable: the URL encodes it completely. `/info` is not, because it describes a file somebody may re-upload.
+
+## `/info`
+
+`info` sits where the options go and answers with the source's own metadata, so a client can size a request to the file before making it:
+
+```
+GET /{signature}/info/{source}
+```
+
+```json
+{"format":"wav","duration":184.32,"sample_rate":48000,"channels":2,
+ "bit_depth":16,"bitrate":1536000,"size":35389532,
+ "tags":{"title":"Sea Change","artist":"…"}}
+```
+
+- `format` is the `f:` token this source would be, not the container's internal name: an MP4 is `m4a`, Ogg is `opus` or `ogg` depending on contents. A container the proxy cannot itself produce is named plainly (`matroska`).
+- `duration` is seconds as a float; `size` is bytes from storage; `bitrate` is bits per second.
+- **A field the source cannot answer is left out, never `null`.** A lossy source has no `bit_depth`; an untagged file has no `tags`. Test for the key, not for a value.
+
+`info` takes no processing options — `/info/br:128/…` is a `422`. `AP_MAX_SRC_BYTES` does not apply, since a probe reads headers only, and probes have their own shorter `AP_PROBE_TIMEOUT` and their own concurrency ceiling.
+
+## Errors
+
+Failures before the response begins are JSON, one shape everywhere:
+
+```json
+{"error": "…", "message": "…"}
+```
+
+<!-- errors-table:start -->
+
+| Status | `error` | When |
+|---|---|---|
+| `401` | `invalid_signature` | Missing, malformed or wrong signature. A pure function of the URL: it will not become valid |
+| `404` | `not_found` | The source is missing, unreadable, unparseable, or not one this proxy may serve. Deliberately indistinguishable — this status tells you nothing about what exists |
+| `413` | `source_too_large` | The source exceeds `AP_MAX_SRC_BYTES`. Renders only; `/info` describes a source of any size |
+| `415` | `undecodable_source` | The source format is not decodable, or on `/info` carries no audio at all |
+| `415` | `video_source` | The source contains a video stream, and this proxy serves audio only. Cover art is not video |
+| `416` | `range_not_satisfiable` | A `Range` no byte of a cached variant can satisfy. Carries `Content-Range: bytes */size`. Unreachable on an uncached variant, where ranges are ignored |
+| `422` | `invalid_options` | Invalid or conflicting options. The message names the offending segment |
+| `429` | `queue_full` | A pool is full: the render queue, a wait for a render slot that ran out of budget, or the probe ceiling. Carries `Retry-After`; the causes are deliberately indistinguishable |
+| `500` | `render_failed` | The render failed for a reason that is not yours. Worth retrying |
+| `500` | `probe_failed` | A probe failed for a reason that is not yours. Worth retrying |
+| `500` | `not_configured` | The storage backend is misconfigured — no credentials, or the wrong region or endpoint. An operator has to fix it; retrying will not |
+| `502` | `upstream_unavailable` | The storage backend could not be reached. Says nothing about whether your object exists. Worth retrying |
+| `504` | `render_timeout` | A render started and then exceeded `AP_RENDER_TIMEOUT`. Time spent waiting for a slot is a `429`, not this |
+| `504` | `probe_timeout` | A probe exceeded `AP_PROBE_TIMEOUT`. On a render URL, the audio-only check ran out of time before encoding started |
+
+<!-- errors-table:end -->
+
+`/ready`'s `503` is not in this table and does not use this envelope: it is a verdict, with a body of `{"status", "queued", "threshold"}` and no `Retry-After`.
+
+## Configuration
+
+All configuration is `AP_`-prefixed environment variables, read and validated once at boot; a malformed value aborts startup naming the variable. Booleans accept `1`/`true`/`yes`/`on` and their negatives. The listener port is `AP_PORT`, then `PORT`, then `4000`.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `AP_KEY` | unset | HMAC key for signatures, hex, ≥ 32 bytes decoded |
+| `AP_SALT` | unset | HMAC salt, hex |
+| `AP_ALLOW_INSECURE` | `false` | Accept the literal `insecure` in place of a signature. Development only |
+| `AP_SOURCE_ALLOWLIST` | empty | Permitted buckets and hosts. Empty accepts every bucket, refuses every host |
+| `AP_LOCAL_ROOT` | unset | Root for `local://` sources; unset disables them |
+| `AP_VARIANT_STORE` | unset | Where completed renders are kept (`file:///path` or `s3://bucket`); unset means every request renders |
+| `AP_SERVE_MODE` | `redirect` | Serve cache hits by `302` to a presigned URL, or proxied. `redirect` needs an `s3://` store |
+| `AP_PRESIGN_TTL` | `300` | Seconds a hit's presigned URL stays valid |
+| `AP_MAX_CONCURRENCY` | schedulers online | Simultaneous ffmpeg processes. Coalesced requests share a slot, so this counts encodes |
+| `AP_MAX_PROBE_CONCURRENCY` | `4 ×` the above | Simultaneous ffprobe processes, so a probe never queues behind a render |
+| `AP_QUEUE_SIZE` | `32` | Requests that may wait for a render slot before the next is `429`ed |
+| `AP_READY_QUEUE_THRESHOLD` | half `AP_QUEUE_SIZE` | Queue depth at which `/ready` answers `503`; `0` disables the check |
+| `AP_MAX_SRC_BYTES` | `2000000000` | Sources above this are `413`. Does not apply to `/info` |
+| `AP_MAX_VARIANT_BYTES` | `AP_MAX_SRC_BYTES` | Bytes one render may hold in memory before it is killed |
+| `AP_RENDER_TIMEOUT` | `300` | Seconds a render may take before it is killed and answered `504` |
+| `AP_PROBE_TIMEOUT` | `10` | Seconds a probe may take before it is killed and answered `504` |
+| `AP_LOG_LEVEL` | `info` | Lowest level written to stdout |
+| `AP_METRICS_BIND` | `127.0.0.1` | Interface the `/metrics` listener binds. An address literal; a hostname is refused |
+| `AP_METRICS_PORT` | `9568` | Port for the `/metrics` listener |
+| `AP_S3_ENDPOINT` | unset | An S3-compatible store instead of AWS. Origin only |
+| `AP_S3_ADDRESSING` | `virtual`, or `path` with an endpoint | Whether a request names its bucket in the host or the path |
+| `AP_S3_CA_BUNDLE` | unset | PEM bundle replacing the system trust store, for a store behind a private CA |
+
+S3 credentials are the standard `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_REGION` (plus optional `AWS_SESSION_TOKEN`), validated as a group at boot — all three or none. They come from the environment only: there is no IMDS or STS lookup, so an instance role does not work.
+
+## Worked requests
+
+```bash
+BASE=localhost:4000
+SRC='plain/local://piece.wav'
+
+# 30-second Opus preview at 96 kbps, starting 12.5 s in, with fades.
+curl "$BASE/$SIG/f:opus/br:96/t:12.5:30/fade:0.5:1/$SRC"
+
+# Mono 16 kHz WAV, the shape a speech-to-text pipeline wants.
+curl "$BASE/$SIG/f:wav/ch:1/sr:16000/$SRC"
+
+# Normalised to −16 LUFS for podcast delivery.
+curl "$BASE/$SIG/f:mp3/br:128/norm:ebu/$SRC"
+
+# 800 min/max pairs as JSON, to draw a waveform.
+curl "$BASE/$SIG/f:peaks/pts:800/$SRC"
+
+# Two minutes of 24-bit FLAC, offered to the browser as a download.
+curl -OJ "$BASE/$SIG/f:flac/bd:24/t:60:120/dl:excerpt.flac/$SRC"
+
+# What is this file?
+curl "$BASE/$SIG/info/$SRC"
+```
+
+Each `$SIG` differs: it signs the rest of that particular path.
+
+## Version
+
+`0.x` means the URL contract can still change. It settles at `1.0`, after which a change to what an existing URL means, or to how cache keys are derived, is a major version.
+
+The source of truth for this contract is [docs/audio-proxy-api-v1.md](https://github.com/audioproxy/audioproxy/blob/main/docs/audio-proxy-api-v1.md).

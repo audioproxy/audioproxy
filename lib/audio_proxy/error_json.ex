@@ -173,6 +173,47 @@ defmodule AudioProxy.ErrorJSON do
   @spec not_found_reasons() :: [atom()]
   def not_found_reasons, do: @source_not_found
 
+  # One representative error per row of the moduledoc table — the input a
+  # caller would hand `render/1` to produce that row. It exists so `rows/0`
+  # can *derive* the table rather than restate it, and so it must grow with
+  # the table: a row added here without a clause below crashes `rows/0`, and a
+  # clause added below without a row here is caught by the llms.txt drift
+  # guard, which compares the documented error table against `rows/0`. The
+  # 404 row takes the first source reason, since every one of them renders
+  # byte-identically.
+  @representative_errors [
+    :invalid_signature,
+    hd(@source_not_found),
+    :source_too_large,
+    :undecodable_source,
+    :video_source,
+    {:range_not_satisfiable, 0},
+    %OptionError{segment: "f:xyz", reason: :invalid_value},
+    {:queue_full, 1},
+    :render_failed,
+    :probe_failed,
+    :not_configured,
+    :upstream_unavailable,
+    :render_timeout,
+    :probe_timeout
+  ]
+
+  @doc """
+  The error contract as data: one `{status, error}` pair per row of the table.
+
+  Public for the same reason `not_found_reasons/0` is — so a check of what the
+  documentation claims runs against this module's own mapping rather than a
+  copy of it. `AudioProxy.LlmsTest` compares it with the error table in
+  `priv/llms/llms-full.txt`, both directions.
+  """
+  @spec rows() :: [{pos_integer(), String.t()}]
+  def rows do
+    Enum.map(@representative_errors, fn error ->
+      {status, _headers, body} = render(error)
+      {status, JSON.decode!(body)["error"]}
+    end)
+  end
+
   @doc """
   Maps a structured error to its `{status, headers, body}` triple.
 
