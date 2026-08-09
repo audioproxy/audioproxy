@@ -18,10 +18,10 @@ AI agents are increasingly the ones integrating APIs — generating signed URLs,
 
 ### Modified Capabilities
 
-<!-- none — new unsigned routes only -->
+- `observability`: the router's endpoint-class enumeration gains `llms`. Found during implementation — the class list is spec'd as complete, and leaving the new routes out would log and count a documentation fetch as `unknown`, which is what an *unrouted* path means. One more bounded value; no new cardinality risk.
 
 ## Impact
 
-- New: `priv/llms/llms.txt`, `priv/llms/llms-full.txt` (or module attributes), routes in the router, drift-guard tests.
-- Modified: CLAUDE.md conventions section.
+- New: `priv/llms/llms.txt`, `priv/llms/llms-full.txt`, `AudioProxy.Llms` (compile-time embedding), routes in the router, `AudioProxy.ErrorJSON.rows/0`, drift-guard tests.
+- Modified: CLAUDE.md conventions section, README (`For AI agents`, the caching table, the metrics label list, the documentation table), API doc §2 endpoint table.
 - Depends on: the options parser and error table (merged) that the drift guards check against. Position: **after `add-metrics-endpoint` and `add-ready-endpoint`, before `add-hex-publishing`** — the drift guards cover option keys and error codes but not the endpoint list or config table, so llms content written before those two endpoints would go stale with no test failing. Landing last-but-one means the content is born complete.
