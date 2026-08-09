@@ -1,9 +1,9 @@
-defmodule AudioProxy.LlmsTest do
+defmodule AudioProxy.LlmsDocsTest do
   @moduledoc """
-  The llms.txt pair: that it is served, that it is shaped like an llms.txt,
-  and — the part that earns its keep — that it still describes this build.
+  `llms.txt` and `llms-full.txt`: that they are shaped like an llms.txt, and —
+  the part that earns its keep — that they still describe this build.
 
-  A document an agent reads instead of the code is only worth serving while
+  A document an agent reads instead of the code is only worth publishing while
   the two agree, and prose cannot be checked. Coverage can: the option table
   must name exactly the keys the parser knows, the error table exactly the
   rows `AudioProxy.ErrorJSON` renders, and the worked signing example must be
@@ -12,57 +12,24 @@ defmodule AudioProxy.LlmsTest do
   this test.
 
   The parsed regions are delimited by HTML comments in the file itself, whose
-  header comment states the shape. Everything outside them is prose.
+  footer comment states the shape. Everything outside them is prose.
+
+  Sibling of `AudioProxy.ReadmeExamplesTest`, and for the same reason: reading
+  the published file beats restating its contents here, since a copy would
+  drift in exactly the way this is meant to prevent.
   """
 
   use ExUnit.Case, async: true
 
-  import Plug.Conn
-  import Plug.Test
-
   alias AudioProxy.ErrorJSON
-  alias AudioProxy.Llms
   alias AudioProxy.Options
   alias AudioProxy.Signature
 
-  @opts AudioProxy.Router.init([])
+  @external_resource "llms.txt"
+  @external_resource "llms-full.txt"
 
-  describe "serving" do
-    for {path, fun} <- [{"/llms.txt", :index}, {"/llms-full.txt", :full}] do
-      test "GET #{path} answers markdown without a signature" do
-        conn = request(:get, unquote(path))
-
-        assert conn.status == 200
-        assert get_resp_header(conn, "content-type") == ["text/markdown; charset=utf-8"]
-        assert conn.resp_body == apply(Llms, unquote(fun), [])
-        assert conn.resp_body != ""
-      end
-
-      test "GET #{path} is cacheable for a day" do
-        # Not the year a variant gets: these URLs are not content-addressed,
-        # so a deploy changes what they answer.
-        conn = request(:get, unquote(path))
-
-        assert get_resp_header(conn, "cache-control") == ["public, max-age=86400"]
-      end
-
-      test "HEAD #{path} answers the same head, bodiless" do
-        conn = request(:head, unquote(path))
-
-        assert conn.status == 200
-        assert conn.resp_body == ""
-        assert get_resp_header(conn, "content-type") == ["text/markdown; charset=utf-8"]
-        assert get_resp_header(conn, "cache-control") == ["public, max-age=86400"]
-      end
-    end
-
-    test "both documents name themselves in the log and the metrics" do
-      # Without a class of its own a fetch would be logged and counted as
-      # `unknown`, which is what an unrouted path is.
-      assert request(:get, "/llms.txt").assigns[:endpoint_class] == :llms
-      assert request(:get, "/llms-full.txt").assigns[:endpoint_class] == :llms
-    end
-  end
+  @index File.read!("llms.txt")
+  @full File.read!("llms-full.txt")
 
   describe "llms.txt format" do
     test "has exactly one H1" do
@@ -78,7 +45,7 @@ defmodule AudioProxy.LlmsTest do
       assert String.starts_with?(hd(rest), "> ")
     end
 
-    test "every list item under an H2 is a well-formed link entry" do
+    test "every list item is a well-formed link entry" do
       # `- [name](url): description` — the convention's own shape. A bare
       # bullet or a link with no gloss is what this catches.
       for line <- index_lines(), String.starts_with?(line, "-") do
@@ -105,10 +72,8 @@ defmodule AudioProxy.LlmsTest do
     end
 
     test "llms-full.txt carries the same lead" do
-      # The file opens with the HTML comment describing its machine-checked
-      # regions, so the lead is found rather than assumed to be line one.
       lines =
-        Llms.full()
+        @full
         |> String.replace(~r/<!--.*?-->/s, "")
         |> lines()
         |> Enum.reject(&(&1 == ""))
@@ -132,14 +97,14 @@ defmodule AudioProxy.LlmsTest do
              """
              Option keys the parser knows but llms-full.txt does not document: \
              #{inspect(missing)}
-             Add a row for each to the options table in priv/llms/llms-full.txt.
+             Add a row for each to the options table in llms-full.txt.
              """
 
       assert stale == [],
              """
              Option keys llms-full.txt documents that the parser does not know: \
              #{inspect(stale)}
-             Remove the stale rows from priv/llms/llms-full.txt.
+             Remove the stale rows from llms-full.txt.
              """
     end
 
@@ -158,20 +123,20 @@ defmodule AudioProxy.LlmsTest do
              """
              Error rows this proxy answers but llms-full.txt does not document: \
              #{inspect(missing)}
-             Add them to the error table in priv/llms/llms-full.txt.
+             Add them to the error table in llms-full.txt.
              """
 
       assert stale == [],
              """
              Error rows llms-full.txt documents that nothing renders: \
              #{inspect(stale)}
-             Remove them from priv/llms/llms-full.txt.
+             Remove them from llms-full.txt.
              """
     end
 
     test "neither table repeats a row" do
       # The guards compare sets, so a duplicated row collapses and passes —
-      # and the copy, with whatever prose it carries, is served unchecked.
+      # and the copy, with whatever prose it carries, is published unchecked.
       # Cheap to close, and the only way the set comparison can be satisfied
       # by a document that is visibly wrong.
       keys = Enum.map(table("options"), fn [key | _rest] -> key end)
@@ -181,10 +146,7 @@ defmodule AudioProxy.LlmsTest do
       assert errors -- Enum.uniq(errors) == [], "the error table repeats a row"
     end
 
-    test "every documented option key parses with the value the table names" do
-      # Coverage is a set comparison; this is the weaker but complementary
-      # check that a documented key is a real segment rather than a typo that
-      # happens to match a known key's spelling.
+    test "every documented option key is one the parser knows" do
       for [key | _rest] <- table("options") do
         assert key in Options.keys()
       end
@@ -196,7 +158,7 @@ defmodule AudioProxy.LlmsTest do
 
       assert Signature.sign(path, Base.decode16!(key), Base.decode16!(salt)) == signature,
              """
-             The signing example in priv/llms/llms-full.txt no longer verifies.
+             The signing example in llms-full.txt no longer verifies.
              An agent validating its own HMAC against it would conclude its
              implementation is wrong.
              """
@@ -207,12 +169,12 @@ defmodule AudioProxy.LlmsTest do
 
   defp difference(a, b), do: a |> MapSet.difference(b) |> Enum.sort()
 
-  defp request(method, path), do: method |> conn(path) |> AudioProxy.Router.call(@opts)
+  defp lines(document), do: document |> String.split("\n") |> Enum.map(&String.trim/1)
 
   # Prose lines only: a `#` or `-` inside a fenced block is shell, not
   # markdown, and llms.txt gains a fence the moment someone adds an example.
   defp index_lines do
-    Llms.index()
+    @index
     |> lines()
     |> Enum.reduce({[], false}, fn
       "```" <> _rest, {kept, fenced?} -> {kept, not fenced?}
@@ -222,8 +184,6 @@ defmodule AudioProxy.LlmsTest do
     |> elem(0)
     |> Enum.reverse()
   end
-
-  defp lines(document), do: document |> String.split("\n") |> Enum.map(&String.trim/1)
 
   # Rows of a marked table, as lists of their backticked cell tokens. A line
   # counts as a row only when its first cell is a single backticked token,
@@ -254,14 +214,14 @@ defmodule AudioProxy.LlmsTest do
 
   defp region(name) do
     [_before, inside | _after] =
-      String.split(Llms.full(), ["<!-- #{name}-table:start -->", "<!-- #{name}-table:end -->"])
+      String.split(@full, ["<!-- #{name}-table:start -->", "<!-- #{name}-table:end -->"])
 
     lines(inside)
   end
 
   defp signing_example do
     [_before, inside | _after] =
-      String.split(Llms.full(), [
+      String.split(@full, [
         "<!-- signing-example:start -->",
         "<!-- signing-example:end -->"
       ])

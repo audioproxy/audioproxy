@@ -5,8 +5,6 @@ defmodule AudioProxy.Router do
   `/health` is unsigned liveness and `/ready` unsigned readiness — the first
   says the VM is up, the second says this node should be sent new work (see
   `AudioProxy.Readiness`, and `docs/scaling.md` for how to wire them).
-  `/llms.txt` and `/llms-full.txt` are unsigned too, and necessarily so: a
-  document explaining how to sign a URL cannot itself sit behind a signature.
   Everything else in the signed URL space — the render endpoint and `/info`,
   which share a route — is dispatched to a pipeline that verifies the
   signature before any other processing; an unsigned or badly-signed request
@@ -36,7 +34,6 @@ defmodule AudioProxy.Router do
 
   use Plug.Router
 
-  alias AudioProxy.Llms
   alias AudioProxy.Plugs.RenderPipeline
   alias AudioProxy.Readiness
 
@@ -91,21 +88,6 @@ defmodule AudioProxy.Router do
     |> send_resp(ready_status(ready?), "")
   end
 
-  # The llms.txt pair (llmstxt.org): unsigned, like the probes, because a
-  # document describing how to sign a URL is no use behind a signature.
-  #
-  # Cacheable for a day rather than the year a variant gets: these URLs are
-  # not content-addressed, so a deploy changes what they answer, and an edge
-  # holding yesterday's copy would describe yesterday's API. A day is long
-  # enough that an agent re-reading the docs costs the origin nothing.
-  match "/llms.txt", via: [:get, :head] do
-    send_markdown(conn, Llms.index())
-  end
-
-  match "/llms-full.txt", via: [:get, :head] do
-    send_markdown(conn, Llms.full())
-  end
-
   # `/metrics` is served on its own listener (`AudioProxy.Metrics.Router`), and
   # saying so here is the only way this listener answers what it means. Without
   # the route it would match the signed one below with an empty `rest`, and an
@@ -144,16 +126,6 @@ defmodule AudioProxy.Router do
 
   defp ready_status(true), do: 200
   defp ready_status(false), do: 503
-
-  # HEAD answers the GET's status and headers bodiless, as `/health` and
-  # `/ready` do — by construction here rather than by adapter stripping.
-  defp send_markdown(conn, body) do
-    conn
-    |> assign(:endpoint_class, :llms)
-    |> put_resp_content_type("text/markdown")
-    |> put_resp_header("cache-control", "public, max-age=86400")
-    |> send_resp(200, if(conn.method == "HEAD", do: "", else: body))
-  end
 
   defp send_json(conn, status, body) do
     conn

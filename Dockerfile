@@ -61,12 +61,6 @@ RUN mix deps.get --only prod && mix deps.compile
 COPY config config
 COPY lib lib
 COPY rel rel
-# priv/ is a *compile-time* input here, not an asset directory: `AudioProxy.Llms`
-# reads priv/llms/*.txt into module attributes with `File.read!`, so a build
-# missing this line does not produce an image without its docs — it fails to
-# compile, in the builder, before anything is packaged. Anything else that
-# lands under priv/ inherits the same treatment.
-COPY priv priv
 
 # Warnings are errors here for the same reason they are in CI: the compiler's
 # set-theoretic type checker reports through warnings, so this is the type gate.
@@ -100,7 +94,6 @@ RUN mix deps.get && mix deps.compile
 
 COPY config config
 COPY lib lib
-COPY priv priv
 COPY test test
 COPY .formatter.exs README.md ./
 

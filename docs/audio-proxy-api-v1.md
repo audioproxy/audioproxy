@@ -64,8 +64,6 @@ Example:
 | `GET /health` | Liveness (unsigned) — `200` whatever the load; a busy proxy is a working proxy |
 | `GET /ready` | Readiness (unsigned) — `200` while the node should receive new work, `503` once queue depth reaches `AP_READY_QUEUE_THRESHOLD`, recovering at half of it. Body: `{"status": "ready"\|"not_ready", "queued": n, "threshold": n}` |
 | `GET /metrics` | Prometheus metrics (unsigned, bind-address-restricted) — see below |
-| `GET /llms.txt` | The [llms.txt](https://llmstxt.org) index (unsigned) — `text/markdown`, `public, max-age=86400` |
-| `GET /llms-full.txt` | This contract as one self-contained markdown document (unsigned), so an agent integrating against a deployment needs no other fetch. Its option and error tables are checked against the parser and the error mapping in CI |
 | `GET /hls/{sig}/{options}/{source}/index.m3u8` | **Reserved for v2** — segmented streaming |
 | `GET /hls/{sig}/{options}/{source}/seg-{n}.m4s` | **Reserved for v2** |
 

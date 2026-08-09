@@ -641,7 +641,6 @@ The proxy is built to sit behind a CDN without special configuration on either s
 | `429`, `500`, `502`, `504` | `no-store` | Transient — caching a transient failure amplifies it (`429` carries `Retry-After`, and a cached `502` would suppress the retry that would have worked) |
 | `200` from `/info` | `public, max-age=3600` | Not `immutable`, and not a year: the metadata describes a source somebody may re-upload, so caches must be able to revalidate it. See [Asking what a source is](#asking-what-a-source-is) |
 | `/health`, `/ready`, `/metrics` | `no-store` | Liveness is only worth anything fresh, a stored readiness verdict is advice about a load level that has since moved, and a cached scrape is a measurement of a moment that has passed |
-| `/llms.txt`, `/llms-full.txt` | `public, max-age=86400` | Documentation, not a variant: these URLs are not content-addressed, so a deploy changes what they answer and a year would be a lie. A day keeps an agent re-reading them off the origin. See [For AI agents](#for-ai-agents) |
 
 The error rows are a deliberate relaxation, worth knowing if you operate a shared cache: without them every response would carry Plug's `max-age=0, private, must-revalidate`, so errors were previously not cacheable at all and never shareable. Dropping `private` is safe here because an error body is a pure function of the URL — no cookies, no auth headers, nothing per-user in it. The practical effect is that a hot 404 or a bad-signature storm is absorbed at the edge instead of reaching the origin every time. If you need the old behavior for a specific deployment, an edge rule overriding `Cache-Control` on 4xx is the place to do it; the proxy has no knob for it by design.
 
@@ -738,7 +737,7 @@ audio_proxy_renders_total{format="mp3",outcome="success"} 412
 | `audio_proxy_variant_store_write_failures_total` | counter | — |
 | `audio_proxy_http_requests_total` | counter | `endpoint`, `status` |
 
-`format` is the output format (`mp3`, `opus`, `peaks`, …). `outcome` on a render is `success`, `cancelled` (the client went away mid-stream), or the failure class from the [Errors](#errors) table (`timeout`, `undecodable`, `not_found`, …); on a cache lookup it is `hit`, `miss` or `coalesced`, the same three values the `X-Audio-Proxy` header carries. `endpoint` is the route class (`render`, `info`, `health`, `ready`, `metrics`, `llms`, `unknown`) and `status` a code family (`2xx`, `4xx`, …).
+`format` is the output format (`mp3`, `opus`, `peaks`, …). `outcome` on a render is `success`, `cancelled` (the client went away mid-stream), or the failure class from the [Errors](#errors) table (`timeout`, `undecodable`, `not_found`, …); on a cache lookup it is `hit`, `miss` or `coalesced`, the same three values the `X-Audio-Proxy` header carries. `endpoint` is the route class (`render`, `info`, `health`, `ready`, `metrics`, `unknown`) and `status` a code family (`2xx`, `4xx`, …).
 
 Every label is a fixed, bounded set. Nothing derived from a request — not the source, not the options, not the cache key — becomes a label, so no client can grow your scraper's series count.
 
@@ -787,20 +786,18 @@ Two more worth an alert. `audio_proxy_variant_store_write_failures_total` moving
 
 ## For AI agents
 
-Two unsigned endpoints serve the API reference as markdown, per the [llms.txt](https://llmstxt.org) convention:
+Two files at the repository root carry the API reference as markdown, per the [llms.txt](https://llmstxt.org) convention:
 
-| Endpoint | What it is |
+| File | What it is |
 |---|---|
-| `GET /llms.txt` | The index: what the proxy is, the URL shape, and links to everything else |
-| `GET /llms-full.txt` | The whole reference in one document — URL grammar, every option and its value domain, the validation rules, cache-key derivation, response and caching semantics, the full error table, a worked signing example |
+| [`llms.txt`](llms.txt) | The index: what the proxy is, the URL shape, and links to everything else |
+| [`llms-full.txt`](llms-full.txt) | The whole reference in one document — URL grammar, every option and its value domain, the validation rules, cache-key derivation, response and caching semantics, the full error table, a worked signing example |
 
-```bash
-curl -s localhost:4000/llms-full.txt
-```
+Point an agent at `llms-full.txt` and it has everything it needs to construct correct signed URLs; nothing else has to be fetched. They also ride in the hex package, so an embedder finds them in the dependency tree.
 
-Point an agent at `/llms-full.txt` and it has everything it needs to construct correct signed URLs against *your* deployment; nothing else has to be fetched. Both are `text/markdown`, cacheable for a day, and carried inside the release, so they describe the build that is answering rather than whatever is on `main`.
+**Read them at the tag you are running.** `GET /health` reports the version, so `curl -s $BASE/health` and then reading these files at that tag gives you documentation matched to the deployment in front of you. That matters while the URL contract is still `0.x`.
 
-Three things in `/llms-full.txt` are machine-checked rather than trusted: the set of option keys, against the parser; the set of error codes, against the error mapping; and the worked signing example, recomputed from the signer on every run. A new option or a new error code that goes undocumented fails CI. The rest — value ranges, defaults, the configuration table, the prose — is reviewed the way the README is, so treat the guards as covering the part that is easiest to forget rather than the whole document.
+Three things in `llms-full.txt` are machine-checked rather than trusted: the set of option keys, against the parser; the set of error codes, against the error mapping; and the worked signing example, recomputed from the signer on every run. A new option or a new error code that goes undocumented fails CI. The rest — value ranges, defaults, the configuration table, the prose — is reviewed the way the README is, so treat the guards as covering the part that is easiest to forget rather than the whole document.
 
 ## Stack
 
@@ -834,7 +831,7 @@ Redistributing your own image built from this one inherits all of the above; kee
 | Document | What it covers |
 |---|---|
 | [docs/audio-proxy-api-v1.md](docs/audio-proxy-api-v1.md) | **The source of truth.** URL grammar, every processing option, cache-key rules, response headers, error codes |
-| `GET /llms-full.txt` | The same contract as one markdown file, served by the proxy itself and checked against the code — for agents, and for anyone who wants it in one page. See [For AI agents](#for-ai-agents) |
+| [llms.txt](llms.txt), [llms-full.txt](llms-full.txt) | The same contract as markdown, in one file, checked against the code — for agents, and for anyone who wants it in one page. See [For AI agents](#for-ai-agents) |
 | [docs/sources.md](docs/sources.md) | Source encodings and escaping, what is refused, the source-type contract and canonical identity |
 | [docs/s3-providers.md](docs/s3-providers.md) | Working configurations for Backblaze B2, DigitalOcean Spaces, Hetzner and Scaleway, and the limitations to know before committing to one |
 | [docs/development.md](docs/development.md) | Toolchain, per-slice worktrees and devcontainers, the test suite and its tags, CI, how a release is cut |

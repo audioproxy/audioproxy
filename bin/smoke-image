@@ -305,26 +305,6 @@ def check_render(fixtures)
     sh!("docker", "exec", cid, "id", "-u").strip != "0"
   end
 
-  # The llms.txt documents are compiled into the release out of priv/, so this
-  # asserts something the unit suite structurally cannot: that the *image*
-  # carries them. The first build of this feature failed exactly here — the
-  # Dockerfile copied lib/ and rel/ and not priv/ — and reading the bytes back
-  # over HTTP is what turns that from a build step nobody thought about into a
-  # named failure.
-  Dir.mktmpdir do |out|
-    doc = File.join(out, "llms-full.txt")
-    headers, ok = curl("http://127.0.0.1:#{port}/llms-full.txt", doc)
-
-    check "/llms-full.txt answers 200 as markdown" do
-      ok && headers.first.include?("200") &&
-        headers.any? { |h| h.downcase.start_with?("content-type: text/markdown") }
-    end
-    check "/llms-full.txt carries the embedded reference" do
-      body = File.read(doc)
-      body.start_with?("# audio_proxy") && body.include?("options-table:start")
-    end
-  end
-
   Dir.mktmpdir do |out|
     rendered = File.join(out, "rendered.mp3")
     url = "http://127.0.0.1:#{port}/insecure/f:mp3/br:128/plain/local://tone%20one.wav"

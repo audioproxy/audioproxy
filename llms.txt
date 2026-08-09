@@ -6,21 +6,17 @@ The path is `/{signature}/{options}/{source}`. The signature is `base64url(HMAC-
 
 Two rules an integrator gets wrong first: sign the path in exactly the spelling you will request it in, because verification runs over the raw percent-encoded path; and the same URL can answer either chunked (a fresh render, no `Content-Length`, no ranges) or with a length and `Accept-Ranges` (a cache hit), depending on whether that variant happens to be stored.
 
+Besides the signed URL space there are three unsigned endpoints — `GET /health`, `GET /ready` and `GET /metrics`, the last on a bind-restricted listener of its own. `/health` also reports the running version, which is how you tell which release of these documents applies: read them at the matching tag.
+
 ## Full reference
 
-- [/llms-full.txt](/llms-full.txt): The complete API reference in one file — URL grammar, every processing option and its value domain, the cross-key validation rules, cache-key derivation, response and caching semantics, the full error table, and a worked signing example. Read this one if you are generating URLs.
+- [llms-full.txt](https://github.com/audioproxy/audioproxy/blob/main/llms-full.txt): The complete API reference in one file — URL grammar, every processing option and its value domain, the cross-key validation rules, cache-key derivation, response and caching semantics, the full error table, and a worked signing example. Read this one if you are generating URLs.
 
 ## API contract
 
 - [API v1 specification](https://github.com/audioproxy/audioproxy/blob/main/docs/audio-proxy-api-v1.md): The source of truth for the URL grammar, processing options, cache-key rules, response headers and error codes.
 - [Sources](https://github.com/audioproxy/audioproxy/blob/main/docs/sources.md): Source encodings and escaping, what is refused, canonical identity and the allowlist grammar.
 - [ffmpeg arguments](https://github.com/audioproxy/audioproxy/blob/main/docs/ffmpeg-arguments.md): How options become ffmpeg arguments — filter order, per-format flags, known gaps.
-
-## Live endpoints
-
-- [/health](/health): Liveness, unsigned. `200` whatever the load; a busy proxy is a working proxy.
-- [/ready](/ready): Readiness, unsigned. `200` while this node should receive new work, `503` once the render queue is deep. Not a liveness probe.
-- [/llms.txt](/llms.txt): This file.
 
 ## Operating it
 

@@ -206,7 +206,7 @@ defmodule AudioProxy.ErrorJSONTest do
     test "covers every render/1 clause" do
       # `rows/0` derives the table by mapping over `@representative_errors`,
       # so a `render/1` clause nobody adds to that list is silently absent
-      # from it — and `AudioProxy.LlmsTest` would then compare the published
+      # from it — and `AudioProxy.LlmsDocsTest` would then compare the published
       # error table against an incomplete set and pass. Counting the clauses
       # is what makes "the documentation cannot drift" true of every error
       # rather than of the ones somebody remembered to list.

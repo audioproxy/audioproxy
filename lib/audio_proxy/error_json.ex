@@ -207,8 +207,8 @@ defmodule AudioProxy.ErrorJSON do
 
   Public for the same reason `not_found_reasons/0` is — so a check of what the
   documentation claims runs against this module's own mapping rather than a
-  copy of it. `AudioProxy.LlmsTest` compares it with the error table in
-  `priv/llms/llms-full.txt`, both directions.
+  copy of it. `AudioProxy.LlmsDocsTest` compares it with the error table in
+  `llms-full.txt`, both directions.
   """
   @spec rows() :: [{pos_integer(), String.t()}]
   def rows do

@@ -11,8 +11,6 @@ GET /{signature}/{options}/{source}    a rendered audio variant, or waveform pea
 GET /{signature}/info/{source}         the source's own metadata, as JSON
 GET /health                            liveness, unsigned
 GET /ready                             readiness, unsigned
-GET /llms.txt                          the index form of this document
-GET /llms-full.txt                     this document
 GET /metrics                           Prometheus scrape — on a separate, bind-restricted listener
 ```
 
@@ -323,7 +321,7 @@ The source of truth for this contract is [docs/audio-proxy-api-v1.md](https://gi
   Editing this file: three regions above are machine-checked, and this note
   lives at the bottom because the convention wants the H1 first.
 
-  `test/audio_proxy/llms_test.exs` parses the two marked tables and compares
+  `test/llms_docs_test.exs` parses the two marked tables and compares
   them, as sets, against the implementation: option keys against
   `AudioProxy.Options.keys/0`, error rows against
   `AudioProxy.ErrorJSON.rows/0`. The signing example is recomputed with
