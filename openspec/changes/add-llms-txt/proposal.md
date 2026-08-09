@@ -20,6 +20,10 @@ AI agents are increasingly the ones integrating APIs — generating signed URLs,
 
 - `observability`: the router's endpoint-class enumeration gains `llms`. Found during implementation — the class list is spec'd as complete, and leaving the new routes out would log and count a documentation fetch as `unknown`, which is what an *unrouted* path means. One more bounded value; no new cardinality risk.
 
+## Deferred
+
+- **The configuration table is not guarded.** 22 variables and their defaults, hand-transcribed into `llms-full.txt`, with nothing failing when one goes stale — `Config` publishes no list of the names it reads, so the guard needs a seam before it needs a test. Deferred to **`guard-config-documentation`**, which is on the board. The table is correct as of this change; what is missing is the thing that keeps it correct.
+
 ## Impact
 
 - New: `priv/llms/llms.txt`, `priv/llms/llms-full.txt`, `AudioProxy.Llms` (compile-time embedding), routes in the router, `AudioProxy.ErrorJSON.rows/0`, drift-guard tests.
