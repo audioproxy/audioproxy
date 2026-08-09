@@ -1,6 +1,8 @@
 # audio_proxy
 
 [![CI](https://github.com/audioproxy/audioproxy/actions/workflows/ci.yml/badge.svg)](https://github.com/audioproxy/audioproxy/actions/workflows/ci.yml)
+[![Hex.pm](https://img.shields.io/hexpm/v/audio_proxy.svg)](https://hex.pm/packages/audio_proxy)
+[![Documentation](https://img.shields.io/badge/hexdocs-docs-purple.svg)](https://hexdocs.pm/audio_proxy)
 
 Transcode audio on demand, from a URL.
 
@@ -184,6 +186,25 @@ PORT=4000 mix run --no-halt
 ```
 
 That path needs `ffmpeg` and `ffprobe` on `PATH`. For a development container that already has them, and for the test suite, see [docs/development.md](docs/development.md).
+
+### Embedding it in your own release
+
+The proxy is also published to hex as an OTP application, so it can run inside a BEAM node you already deploy rather than as a container of its own:
+
+```elixir
+# mix.exs
+{:audio_proxy, "~> 0.3"}
+```
+
+**Know what starting it does before you add it.** `audio_proxy` is an application, not a library: it has no API you call, and adding the dependency is the whole integration. When your release starts it, it
+
+- **reads and validates the `AP_*` environment** and refuses to boot on an invalid value, so a bad `AP_KEY` or an unreadable `AP_LOCAL_ROOT` fails the node's start-up rather than the first request. See [Configuration](#configuration); there is nothing to put in `config/*.exs`, because none of it is read from there.
+- **binds two listeners**: the proxy on `AP_PORT` (falling back to `PORT`, so it will contend with whatever else in the node reads that), and `/metrics` on `AP_METRICS_PORT`, bound to loopback. Ports are yours to keep distinct from the rest of the node's.
+- **expects `ffmpeg` and `ffprobe` on `PATH`**, in the image *your* release ships. The proxy's own container carries a pinned pair ([VERSIONS.md](VERSIONS.md)); an embedding one has to, too, and a different ffmpeg encodes the same URL to different bytes.
+
+That is the contract, and it is the intended one: an embedder wants the proxy serving, not a set of functions. If you need the code without the listener, the honest answer today is to run the container.
+
+API documentation is on [hexdocs](https://hexdocs.pm/audio_proxy), and the package carries [`llms.txt` and `llms-full.txt`](#for-ai-agents) so the full URL contract is in `deps/audio_proxy/` at the version you depend on.
 
 ## Signing URLs
 
