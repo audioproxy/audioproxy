@@ -8,7 +8,7 @@
 
 - [ ] 2.1 hex.pm account/org, write-scoped key → `HEX_API_KEY` repo secret (manual; document in docs/development.md release procedure)
 - [ ] 2.2 CI: `mix hex.publish --yes` in the tag publish job (`needs: smoke`), after the image push
-- [ ] 2.3 Tarball-content check in CI: `mix hex.build`, assert LICENSE **and `priv/llms/llms.txt` + `priv/llms/llms-full.txt`** present, and no `openspec/`/`test/`/`examples/`/`Dockerfile`/`.github/` paths. The llms assertion is the one that catches a package that cannot compile: `AudioProxy.Llms` reads those two files at compile time, so omitting them breaks every consumer's build rather than degrading anything
+- [ ] 2.3 Tarball-content check in CI: `mix hex.build`, assert LICENSE **and `llms.txt` + `llms-full.txt`** present, and no `openspec/`/`test/`/`examples/`/`Dockerfile`/`.github/` paths
 - [ ] 2.4 Compile the built tarball outside the repo — unpack, `mix compile` — so "the package builds for a consumer" is tested rather than inferred from the file list
 - [ ] 2.5 Dry-run locally (`mix hex.build` + inspect) before the first tagged publish
 
