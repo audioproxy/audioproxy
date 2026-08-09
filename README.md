@@ -800,7 +800,7 @@ curl -s localhost:4000/llms-full.txt
 
 Point an agent at `/llms-full.txt` and it has everything it needs to construct correct signed URLs against *your* deployment; nothing else has to be fetched. Both are `text/markdown`, cacheable for a day, and carried inside the release, so they describe the build that is answering rather than whatever is on `main`.
 
-They cannot drift, either. The option table and the error table in `/llms-full.txt` are checked against the parser and the error mapping by the test suite — a new option or a new error code that is not documented fails CI — and the signing example is recomputed from the signer on every run. What the documents claim about options, errors and signing is what this build does.
+Three things in `/llms-full.txt` are machine-checked rather than trusted: the set of option keys, against the parser; the set of error codes, against the error mapping; and the worked signing example, recomputed from the signer on every run. A new option or a new error code that goes undocumented fails CI. The rest — value ranges, defaults, the configuration table, the prose — is reviewed the way the README is, so treat the guards as covering the part that is easiest to forget rather than the whole document.
 
 ## Stack
 

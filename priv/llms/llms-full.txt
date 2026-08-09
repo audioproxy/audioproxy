@@ -168,7 +168,7 @@ Normalization is what makes this deterministic: keys are sorted lexicographicall
 
 Normalization is syntactic, not semantic: `t:0`, `fade:0:0` and `gain:0` are identity renders that keep their own keys, and therefore cost duplicate cache objects.
 
-The cache key is the response's `ETag`.
+The response's `ETag` is this digest, quoted: the header reads `etag: "6f1c…"`, so strip the quotes before comparing it with a cache key you derived yourself.
 
 ## Responses
 
@@ -272,7 +272,7 @@ All configuration is `AP_`-prefixed environment variables, read and validated on
 | `AP_MAX_CONCURRENCY` | schedulers online | Simultaneous ffmpeg processes. Coalesced requests share a slot, so this counts encodes |
 | `AP_MAX_PROBE_CONCURRENCY` | `4 ×` the above | Simultaneous ffprobe processes, so a probe never queues behind a render |
 | `AP_QUEUE_SIZE` | `32` | Requests that may wait for a render slot before the next is `429`ed |
-| `AP_READY_QUEUE_THRESHOLD` | half `AP_QUEUE_SIZE` | Queue depth at which `/ready` answers `503`; `0` disables the check |
+| `AP_READY_QUEUE_THRESHOLD` | half `AP_QUEUE_SIZE`, rounded down, minimum 1 — and `0` when `AP_QUEUE_SIZE` is `0` | Queue depth at which `/ready` answers `503`, recovering at half the threshold, rounded down. `0` disables the check |
 | `AP_MAX_SRC_BYTES` | `2000000000` | Sources above this are `413`. Does not apply to `/info` |
 | `AP_MAX_VARIANT_BYTES` | `AP_MAX_SRC_BYTES` | Bytes one render may hold in memory before it is killed |
 | `AP_RENDER_TIMEOUT` | `300` | Seconds a render may take before it is killed and answered `504` |
@@ -284,7 +284,7 @@ All configuration is `AP_`-prefixed environment variables, read and validated on
 | `AP_S3_ADDRESSING` | `virtual`, or `path` with an endpoint | Whether a request names its bucket in the host or the path |
 | `AP_S3_CA_BUNDLE` | unset | PEM bundle replacing the system trust store, for a store behind a private CA |
 
-S3 credentials are the standard `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_REGION` (plus optional `AWS_SESSION_TOKEN`), validated as a group at boot — all three or none. They come from the environment only: there is no IMDS or STS lookup, so an instance role does not work.
+S3 credentials are the standard `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_REGION` — or `AWS_DEFAULT_REGION`, which is read when `AWS_REGION` is unset — plus an optional `AWS_SESSION_TOKEN`. They are validated as a group at boot — all three or none. They come from the environment only: there is no IMDS or STS lookup, so an instance role does not work.
 
 ## Worked requests
 

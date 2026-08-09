@@ -169,6 +169,18 @@ defmodule AudioProxy.LlmsTest do
              """
     end
 
+    test "neither table repeats a row" do
+      # The guards compare sets, so a duplicated row collapses and passes —
+      # and the copy, with whatever prose it carries, is served unchecked.
+      # Cheap to close, and the only way the set comparison can be satisfied
+      # by a document that is visibly wrong.
+      keys = Enum.map(table("options"), fn [key | _rest] -> key end)
+      errors = Enum.map(table("errors"), fn [status, error | _rest] -> {status, error} end)
+
+      assert keys -- Enum.uniq(keys) == [], "the options table repeats a key"
+      assert errors -- Enum.uniq(errors) == [], "the error table repeats a row"
+    end
+
     test "every documented option key parses with the value the table names" do
       # Coverage is a set comparison; this is the weaker but complementary
       # check that a documented key is a real segment rather than a typo that

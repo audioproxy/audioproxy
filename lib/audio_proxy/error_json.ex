@@ -175,12 +175,16 @@ defmodule AudioProxy.ErrorJSON do
 
   # One representative error per row of the moduledoc table — the input a
   # caller would hand `render/1` to produce that row. It exists so `rows/0`
-  # can *derive* the table rather than restate it, and so it must grow with
-  # the table: a row added here without a clause below crashes `rows/0`, and a
-  # clause added below without a row here is caught by the llms.txt drift
-  # guard, which compares the documented error table against `rows/0`. The
-  # 404 row takes the first source reason, since every one of them renders
-  # byte-identically.
+  # can *derive* the table rather than restate it. The 404 row takes the first
+  # source reason, since every one of them renders byte-identically.
+  #
+  # It has to grow with `render/1`, and neither direction is self-enforcing.
+  # A row here without a clause below crashes `rows/0` loudly. A clause below
+  # without a row here does *not* — `rows/0` would simply omit it, and the
+  # llms.txt drift guard would then compare the document against an
+  # incomplete set and pass. `AudioProxy.ErrorJSONTest` closes that direction
+  # by counting the clauses; without it "the docs cannot drift" would be true
+  # only of the errors somebody remembered to list.
   @representative_errors [
     :invalid_signature,
     hd(@source_not_found),
