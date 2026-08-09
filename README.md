@@ -22,7 +22,7 @@ docker run --rm -p 4000:4000 \
   ghcr.io/audioproxy/audioproxy:0.3.0
 ```
 
-> On Apple Silicon, add `--platform linux/amd64`. The image is x86-64 only for now and runs under emulation; arm64 is [its own slice](openspec/changes/add-multi-arch-images).
+> On Apple Silicon, add `--platform linux/amd64`. The image is x86-64 only for now and runs under emulation; arm64 is [its own slice](https://github.com/audioproxy/audioproxy/tree/main/openspec/changes/add-multi-arch-images).
 
 Now ask for a variant, from another shell. `SRC` names a file *relative to the directory you mounted*, so `track.wav` means `/path/to/your/audio/track.wav`:
 
@@ -48,7 +48,7 @@ To hear it rather than download it, save this as `player.html` and open it in a 
 <audio controls src="http://localhost:4000/insecure/f:mp3/br:128/plain/local://track.wav"></audio>
 ```
 
-Playback starts before the render finishes, which is the point. `f:mp3` because every browser plays it; Safari will not play Ogg or Opus. For something to poke at rather than a single tag, [`examples/player.html`](examples/player.html) has presets for every format and shows what the browser makes of the response.
+Playback starts before the render finishes, which is the point. `f:mp3` because every browser plays it; Safari will not play Ogg or Opus. For something to poke at rather than a single tag, [`examples/player.html`](https://github.com/audioproxy/audioproxy/blob/main/examples/player.html) has presets for every format and shows what the browser makes of the response.
 
 **While it renders, the duration reads as unknown and you cannot seek**, because a render in progress has no length and nothing to seek into: it is delivered chunked, with no `Content-Length` and no `Accept-Ranges`. Once the whole thing has arrived the browser can scrub within what it holds, so on a short file this is barely visible. What you cannot do, at any point, is jump to a position that has not been received — without `Accept-Ranges` the browser has to fetch everything up to that point first, which on a long file is the difference between seeking and waiting. Range requests need a *cached* variant with a known size, so with a [variant store](#variant-store) configured this describes the first play only: every request after it declares a length and seeks normally. See [Cache semantics](#cache-semantics).
 
@@ -140,7 +140,7 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 
 - **HLS and segmented streaming.** A v2 goal rather than a rejected one: the URL space is reserved, and segmented output is the honest answer to mid-stream render failure, which plain chunked HTTP cannot signal. A segment is close to a variant with a trim, so signing, cache keys and deduplication carry over unchanged. The unsolved part is gapless boundaries, since encoding each segment independently gives each one its own encoder priming.
 
-`0.x` means the URL contract can still change. It will settle at `1.0`, after which a change to what an existing URL means, or to how cache keys are derived, is a major version. The per-slice detail, including rationale and trade-offs, lives in [`openspec/changes/`](openspec/changes).
+`0.x` means the URL contract can still change. It will settle at `1.0`, after which a change to what an existing URL means, or to how cache keys are derived, is a major version. The per-slice detail, including rationale and trade-offs, lives in [`openspec/changes/`](https://github.com/audioproxy/audioproxy/tree/main/openspec/changes).
 
 ## Design
 
@@ -185,7 +185,7 @@ mix deps.get
 PORT=4000 mix run --no-halt
 ```
 
-That path needs `ffmpeg` and `ffprobe` on `PATH`. For a development container that already has them, and for the test suite, see [docs/development.md](docs/development.md).
+That path needs `ffmpeg` and `ffprobe` on `PATH`. For a development container that already has them, and for the test suite, see [docs/development.md](https://github.com/audioproxy/audioproxy/blob/main/docs/development.md).
 
 ### Embedding it in your own release
 
@@ -855,8 +855,8 @@ Redistributing your own image built from this one inherits all of the above; kee
 | [llms.txt](llms.txt), [llms-full.txt](llms-full.txt) | The same contract as markdown, in one file, checked against the code — for agents, and for anyone who wants it in one page. See [For AI agents](#for-ai-agents) |
 | [docs/sources.md](docs/sources.md) | Source encodings and escaping, what is refused, the source-type contract and canonical identity |
 | [docs/s3-providers.md](docs/s3-providers.md) | Working configurations for Backblaze B2, DigitalOcean Spaces, Hetzner and Scaleway, and the limitations to know before committing to one |
-| [docs/development.md](docs/development.md) | Toolchain, per-slice worktrees and devcontainers, the test suite and its tags, CI, how a release is cut |
-| [examples/](examples) | A one-file browser player for trying variants, and why it has to be served rather than opened |
+| [docs/development.md](https://github.com/audioproxy/audioproxy/blob/main/docs/development.md) | Toolchain, per-slice worktrees and devcontainers, the test suite and its tags, CI, how a release is cut |
+| [examples/](https://github.com/audioproxy/audioproxy/tree/main/examples) | A one-file browser player for trying variants, and why it has to be served rather than opened |
 | [VERSIONS.md](VERSIONS.md) | What the image is built from: Debian, Elixir/OTP and ffmpeg pins, why not Alpine, and how to bump one |
 | [docs/ffmpeg-arguments.md](docs/ffmpeg-arguments.md) | How options become ffmpeg arguments: filter order, per-format flags, known gaps |
 | [docs/rendering.md](docs/rendering.md) | How a render runs: the subprocess, the chunk stream, coalescing, buffering and lifecycle guarantees |

@@ -82,6 +82,20 @@ defmodule AudioProxy.MixProject do
     ]
   end
 
+  # The extras are the package's *documentation*, which is a smaller set than
+  # the package's files. Two rules decide what is on the list.
+  #
+  # `llms.txt` and `llms-full.txt` are here because the README — the front page,
+  # via `main: "readme"` — links to them prominently. A relative link from an
+  # extra to a file ex_doc was never given resolves to nothing, so leaving them
+  # off published a front page whose two most-pointed-at links were dead.
+  #
+  # `docs/development.md` is deliberately *not* here, though it does ship in
+  # the tarball. It is about working on this repository — worktrees,
+  # devcontainers, the release procedure — which is not a question a package
+  # consumer has, and every one of its links points at a `bin/` script or a
+  # dotfile the package does not carry. Links out to repository-only paths are
+  # absolute GitHub URLs for that same reason.
   defp docs do
     [
       main: "readme",
@@ -95,7 +109,8 @@ defmodule AudioProxy.MixProject do
         "docs/ffmpeg-arguments.md",
         "docs/scaling.md",
         "docs/capacity.md",
-        "docs/development.md",
+        "llms.txt",
+        "llms-full.txt",
         "VERSIONS.md",
         "LICENSE"
       ]

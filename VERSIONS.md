@@ -46,7 +46,7 @@ Two consequences worth keeping in mind:
 ## What CI asserts
 
 The ffmpeg major is recorded once, on the line below, and both
-[`bin/smoke-image`](bin/smoke-image) and the `image-ffmpeg` CI job parse *that
+[`bin/smoke-image`](https://github.com/audioproxy/audioproxy/blob/main/bin/smoke-image) and the `image-ffmpeg` CI job parse *that
 line*. It is written as a key/value rather than as prose so there is exactly one
 place to change and no second copy to fall out of step:
 
@@ -82,4 +82,4 @@ bytes for the same URL — so it is a release, not a silent update. The procedur
    a correct table under a stale matrix is a wrong memory limit with an audit
    trail. Needs no docker; commit both in the same change.
 6. Run `bin/smoke-image` locally, then let CI run it again.
-7. Cut a patch release (see [docs/development.md](docs/development.md#releases)).
+7. Cut a patch release (see [docs/development.md](https://github.com/audioproxy/audioproxy/blob/main/docs/development.md#releases)).
