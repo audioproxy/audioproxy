@@ -26,7 +26,7 @@ defmodule AudioProxy.MetricsEndpointTest do
   import Plug.Conn, only: [get_resp_header: 2]
   import Plug.Test
 
-  alias AudioProxy.{Metrics, RawHttp, Signature}
+  alias AudioProxy.{Metrics, RawHttp}
 
   @moduletag tmp_dir: "metrics_endpoint"
 
@@ -179,7 +179,7 @@ defmodule AudioProxy.MetricsEndpointTest do
       Metrics.reset()
 
       rest = "/f:mp3/cb:metrics-e2e/plain/local://piece.wav"
-      path = "/#{Signature.sign(rest, key(), salt())}#{rest}"
+      path = signed(rest)
 
       capture_log(fn ->
         socket = RawHttp.get(path, public)

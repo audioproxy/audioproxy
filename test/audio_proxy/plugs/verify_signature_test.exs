@@ -36,7 +36,7 @@ defmodule AudioProxy.Plugs.VerifySignatureTest do
 
     test "verifies the raw path, not a re-encoded form" do
       rest = "/f:mp3/plain/s3://bucket/a%20track.wav"
-      conn = call("/#{Signature.sign(rest, key(), salt())}#{rest}")
+      conn = call(signed(rest))
 
       refute conn.halted
       assert conn.assigns[:rest_of_path] == rest

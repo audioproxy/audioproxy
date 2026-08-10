@@ -82,7 +82,7 @@ defmodule AudioProxy.Plugs.VerifySignatureIntegrationTest do
   test "a plain signed URL verifies", %{port: port} do
     rest = "/f:opus/br:96/plain/s3://masters/2026/piece-final.wav"
 
-    assert {200, body} = get("/#{Signature.sign(rest, key(), salt())}#{rest}", port)
+    assert {200, body} = get(signed(rest), port)
     assert String.starts_with?(body, rest)
   end
 

@@ -26,7 +26,7 @@ defmodule AudioProxy.RenderSemaphoreTest do
   import Plug.Conn
   import Plug.Test
 
-  alias AudioProxy.{RenderCoordinator, RenderHarness, Semaphore, Signature, VariantStore}
+  alias AudioProxy.{RenderCoordinator, RenderHarness, Semaphore, VariantStore}
   alias AudioProxy.Ffmpeg.RenderSupervisor
 
   @moduletag tmp_dir: "render_semaphore"
@@ -459,7 +459,7 @@ defmodule AudioProxy.RenderSemaphoreTest do
   defp joined(acc), do: acc.chunks |> Enum.reverse() |> IO.iodata_to_binary()
 
   defp render(rest) do
-    signed = "/#{Signature.sign(rest, key(), salt())}#{rest}"
+    signed = signed(rest)
 
     conn(:get, signed) |> AudioProxy.FakeFfmpeg.Router.call(@fake_opts)
   end

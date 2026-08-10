@@ -21,7 +21,7 @@ defmodule AudioProxy.VariantCacheS3Test do
   import Plug.Conn
   import Plug.Test
 
-  alias AudioProxy.{CacheKey, MinioHelper, Signature, VariantStore}
+  alias AudioProxy.{CacheKey, MinioHelper, VariantStore}
 
   @moduletag :minio
   @moduletag timeout: 120_000
@@ -70,7 +70,7 @@ defmodule AudioProxy.VariantCacheS3Test do
   end
 
   defp request(rest) do
-    "/#{Signature.sign(rest, key(), salt())}#{rest}"
+    signed(rest)
     |> then(&conn(:get, &1))
     |> AudioProxy.Router.call(@opts)
   end

@@ -21,7 +21,7 @@ defmodule AudioProxy.InfoEndpointFfmpegTest do
   import AudioProxy.SignedRequest, except: [header: 2]
   import AudioProxy.ProbeCoalesceHelper
 
-  alias AudioProxy.{RawHttp, Signature}
+  alias AudioProxy.RawHttp
 
   @moduletag :ffmpeg
   @moduletag timeout: 120_000
@@ -165,7 +165,7 @@ defmodule AudioProxy.InfoEndpointFfmpegTest do
   # is the right reader: it stops at the declared length rather than waiting on
   # the close, which keeps a wrong length visible as a hang rather than hidden.
   defp request(rest, %{port: port}, opts \\ []) do
-    "/#{Signature.sign(rest, key(), salt())}#{rest}"
+    signed(rest)
     |> RawHttp.get(port, opts)
     |> RawHttp.read_one()
   end

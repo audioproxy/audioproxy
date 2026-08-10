@@ -23,7 +23,7 @@ defmodule AudioProxy.RenderEndpointFfmpegTest do
   import AudioProxy.ConfigHelper
   import AudioProxy.SignedRequest
 
-  alias AudioProxy.{RawHttp, Signature}
+  alias AudioProxy.RawHttp
 
   @moduletag :ffmpeg
 
@@ -136,7 +136,7 @@ defmodule AudioProxy.RenderEndpointFfmpegTest do
       # request lands while ffmpeg is still encoding, so it exercises the
       # backlog-then-live seam rather than the post-completion linger.
       rest = "/f:mp3/plain/local://long.wav"
-      path = "/#{Signature.sign(rest, key(), salt())}#{rest}"
+      path = signed(rest)
 
       first = Task.async(fn -> path |> RawHttp.get(port) |> RawHttp.read(@deadline) end)
       Process.sleep(500)
@@ -216,7 +216,7 @@ defmodule AudioProxy.RenderEndpointFfmpegTest do
   end
 
   defp render(rest, port) do
-    "/#{Signature.sign(rest, key(), salt())}#{rest}"
+    signed(rest)
     |> RawHttp.get(port)
     |> RawHttp.read(@deadline)
   end

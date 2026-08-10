@@ -25,7 +25,7 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
   import AudioProxy.ConfigHelper
   import AudioProxy.SignedRequest
 
-  alias AudioProxy.{RawHttp, Signature}
+  alias AudioProxy.RawHttp
 
   @moduletag :ffmpeg
   @moduletag timeout: 120_000
@@ -321,7 +321,7 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
   end
 
   defp render(rest, port) do
-    "/#{Signature.sign(rest, key(), salt())}#{rest}"
+    signed(rest)
     |> RawHttp.get(port)
     |> RawHttp.read(@deadline)
   end
