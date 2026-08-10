@@ -26,6 +26,7 @@ defmodule AudioProxy.RenderEndpointStreamTest do
   import AudioProxy.ConfigHelper
   import AudioProxy.SignedRequest
   import AudioProxy.ProbeCoalesceHelper
+  import AudioProxy.Eventually
 
   alias AudioProxy.RawHttp
 
@@ -213,18 +214,5 @@ defmodule AudioProxy.RenderEndpointStreamTest do
     |> Enum.map(fn line ->
       line |> String.trim_leading() |> String.split(" ", parts: 2) |> hd() |> String.to_integer()
     end)
-  end
-
-  defp gone_within?(_os_pid, remaining) when remaining <= 0, do: false
-
-  defp gone_within?(os_pid, remaining) do
-    case System.cmd("kill", ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true) do
-      {_, 0} ->
-        Process.sleep(25)
-        gone_within?(os_pid, remaining - 25)
-
-      {_, _nonzero} ->
-        true
-    end
   end
 end

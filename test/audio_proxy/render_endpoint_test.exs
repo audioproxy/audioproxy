@@ -21,6 +21,7 @@ defmodule AudioProxy.RenderEndpointTest do
   import AudioProxy.SignedRequest, except: [conn: 3]
   import Plug.Conn
   import Plug.Test
+  import AudioProxy.Eventually
 
   alias AudioProxy.Signature
   alias AudioProxy.SignedRequest
@@ -576,18 +577,6 @@ defmodule AudioProxy.RenderEndpointTest do
 
       {:ok, stream} = AudioProxy.VariantStore.get_stream(key, nil)
       assert stream |> Enum.to_list() |> IO.iodata_to_binary() == conn.resp_body
-    end
-  end
-
-  @deadline 5_000
-
-  defp wait_until(condition, remaining \\ @deadline)
-  defp wait_until(_condition, remaining) when remaining <= 0, do: flunk("condition never held")
-
-  defp wait_until(condition, remaining) do
-    unless condition.() do
-      Process.sleep(10)
-      wait_until(condition, remaining - 10)
     end
   end
 end

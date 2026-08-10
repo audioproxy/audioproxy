@@ -17,6 +17,7 @@ defmodule AudioProxy.RenderCoordinatorTest do
   import AudioProxy.CoalesceHelper
   import AudioProxy.ProbeCoalesceHelper
   import AudioProxy.ConfigHelper
+  import AudioProxy.Eventually
 
   alias AudioProxy.RenderCoordinator
   alias AudioProxy.RenderHarness
@@ -372,17 +373,6 @@ defmodule AudioProxy.RenderCoordinatorTest do
 
   defp unique_key, do: "key-#{System.unique_integer([:positive, :monotonic])}"
 
-  defp wait_until(condition, remaining \\ @deadline)
-
-  defp wait_until(_condition, remaining) when remaining <= 0, do: flunk("condition never held")
-
-  defp wait_until(condition, remaining) do
-    unless condition.() do
-      Process.sleep(10)
-      wait_until(condition, remaining - 10)
-    end
-  end
-
   defp spec(directives), do: [args: directives, executable: RenderHarness.fake_cmd()]
 
   # Subscribes, drains to the terminal message, and reports what this
@@ -494,20 +484,5 @@ defmodule AudioProxy.RenderCoordinatorTest do
 
   defp consumer(render) do
     render |> :sys.get_state() |> Map.get(:consumer)
-  end
-
-  defp alive?(os_pid) do
-    match?({_output, 0}, System.cmd("kill", ["-0", to_string(os_pid)], stderr_to_stdout: true))
-  end
-
-  defp gone_within?(_os_pid, remaining) when remaining <= 0, do: false
-
-  defp gone_within?(os_pid, remaining) do
-    if alive?(os_pid) do
-      Process.sleep(25)
-      gone_within?(os_pid, remaining - 25)
-    else
-      true
-    end
   end
 end

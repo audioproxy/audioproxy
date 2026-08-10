@@ -20,6 +20,8 @@ defmodule AudioProxy.ProbeLimiterPropertyTest do
   """
 
   use ExUnit.Case, async: true
+
+  import AudioProxy.Eventually
   use ExUnitProperties
 
   alias AudioProxy.ProbeLimiter
@@ -49,7 +51,7 @@ defmodule AudioProxy.ProbeLimiterPropertyTest do
       assert {:within_capacity, high_water} = Task.await(sampler, @deadline)
       assert high_water >= 1
 
-      wait_until(fn -> ProbeLimiter.stats(limiter).held == 0 end)
+      wait_until(fn -> ProbeLimiter.stats(limiter).held == 0 end, @deadline)
     end
   end
 
@@ -107,16 +109,5 @@ defmodule AudioProxy.ProbeLimiterPropertyTest do
     })
 
     name
-  end
-
-  defp wait_until(condition, remaining \\ @deadline)
-
-  defp wait_until(_condition, remaining) when remaining <= 0, do: flunk("condition never held")
-
-  defp wait_until(condition, remaining) do
-    unless condition.() do
-      Process.sleep(10)
-      wait_until(condition, remaining - 10)
-    end
   end
 end

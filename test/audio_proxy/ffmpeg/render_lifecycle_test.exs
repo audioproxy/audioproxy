@@ -14,6 +14,8 @@ defmodule AudioProxy.Ffmpeg.RenderLifecycleTest do
 
   use ExUnit.Case, async: true
 
+  import AudioProxy.Eventually
+
   alias AudioProxy.Ffmpeg.Render
   alias AudioProxy.Ffmpeg.RenderSupervisor
   alias AudioProxy.RenderHarness
@@ -247,7 +249,7 @@ defmodule AudioProxy.Ffmpeg.RenderLifecycleTest do
 
       # The file appears when the wrapper shell applies its redirect, which is
       # a moment after the port opens rather than at the same instant.
-      assert eventually(fn -> File.exists?(path) end), "stderr file was never created"
+      assert eventually?(fn -> File.exists?(path) end, 2_000), "stderr file was never created"
 
       :ok = Render.cancel(render)
 
@@ -287,40 +289,5 @@ defmodule AudioProxy.Ffmpeg.RenderLifecycleTest do
         :never -> :ok
       end
     end)
-  end
-
-  defp eventually(check, deadline \\ 2_000) do
-    cond do
-      check.() ->
-        true
-
-      deadline <= 0 ->
-        false
-
-      true ->
-        Process.sleep(25)
-        eventually(check, deadline - 25)
-    end
-  end
-
-  defp gone_within?(os_pid, deadline) do
-    cond do
-      not alive?(os_pid) ->
-        true
-
-      deadline <= 0 ->
-        false
-
-      true ->
-        Process.sleep(25)
-        gone_within?(os_pid, deadline - 25)
-    end
-  end
-
-  defp alive?(os_pid) do
-    {_output, status} =
-      System.cmd("kill", ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true)
-
-    status == 0
   end
 end

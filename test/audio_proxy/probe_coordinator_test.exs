@@ -16,6 +16,7 @@ defmodule AudioProxy.ProbeCoordinatorTest do
 
   import AudioProxy.ConfigHelper
   import AudioProxy.ProbeCoalesceHelper
+  import AudioProxy.Eventually
 
   alias AudioProxy.{FakeFfmpeg, ProbeCoordinator}
 
@@ -208,18 +209,5 @@ defmodule AudioProxy.ProbeCoordinatorTest do
   # race dressed up as a property.
   defp registered?(name) do
     Registry.lookup(ProbeCoordinator.Registry, "local://#{name}") != []
-  end
-
-  defp wait_until(condition, remaining \\ 5_000)
-
-  defp wait_until(_condition, remaining) when remaining <= 0 do
-    flunk("condition never held")
-  end
-
-  defp wait_until(condition, remaining) do
-    unless condition.() do
-      Process.sleep(25)
-      wait_until(condition, remaining - 25)
-    end
   end
 end

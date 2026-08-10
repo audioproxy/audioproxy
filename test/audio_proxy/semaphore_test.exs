@@ -13,6 +13,8 @@ defmodule AudioProxy.SemaphoreTest do
 
   use ExUnit.Case, async: true
 
+  import AudioProxy.Eventually
+
   alias AudioProxy.Semaphore
 
   @deadline 2_000
@@ -161,7 +163,7 @@ defmodule AudioProxy.SemaphoreTest do
       Process.exit(doomed, :kill)
       # The drop is observable before anything is released, which is the half
       # of this that a "the survivor got it" assertion alone would not prove.
-      wait_until(fn -> Semaphore.stats(semaphore).queued == 1 end)
+      wait_until(fn -> Semaphore.stats(semaphore).queued == 1 end, @deadline)
 
       release(holder)
 
@@ -181,7 +183,7 @@ defmodule AudioProxy.SemaphoreTest do
       for _ <- 1..50 do
         {waiter, :queued} = start_holder(semaphore)
         Process.exit(waiter, :kill)
-        wait_until(fn -> Semaphore.stats(semaphore).queued == 0 end)
+        wait_until(fn -> Semaphore.stats(semaphore).queued == 0 end, @deadline)
       end
 
       assert %{held: 1, queued: 0} = Semaphore.stats(semaphore)
@@ -360,20 +362,6 @@ defmodule AudioProxy.SemaphoreTest do
       message -> message
     after
       0 -> :empty
-    end
-  end
-
-  defp wait_until(condition, remaining \\ @deadline) do
-    cond do
-      condition.() ->
-        :ok
-
-      remaining <= 0 ->
-        flunk("condition never held")
-
-      true ->
-        Process.sleep(10)
-        wait_until(condition, remaining - 10)
     end
   end
 end

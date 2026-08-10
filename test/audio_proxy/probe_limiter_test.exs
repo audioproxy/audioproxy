@@ -14,6 +14,7 @@ defmodule AudioProxy.ProbeLimiterTest do
   use ExUnit.Case, async: false
 
   import AudioProxy.ConfigHelper
+  import AudioProxy.Eventually
 
   alias AudioProxy.ProbeLimiter
 
@@ -226,16 +227,5 @@ defmodule AudioProxy.ProbeLimiterTest do
     )
 
     on_exit(fn -> :telemetry.detach(id) end)
-  end
-
-  defp wait_until(condition, remaining \\ @deadline)
-
-  defp wait_until(_condition, remaining) when remaining <= 0, do: flunk("condition never held")
-
-  defp wait_until(condition, remaining) do
-    unless condition.() do
-      Process.sleep(25)
-      wait_until(condition, remaining - 25)
-    end
   end
 end

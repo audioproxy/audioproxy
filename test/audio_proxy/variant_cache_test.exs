@@ -21,6 +21,7 @@ defmodule AudioProxy.VariantCacheTest do
   import AudioProxy.ConfigHelper
   import AudioProxy.SignedRequest
   import Plug.Conn
+  import AudioProxy.Eventually
 
   alias AudioProxy.{CacheKey, PresigningStore, SignedRequest, VariantStore}
 
@@ -81,18 +82,6 @@ defmodule AudioProxy.VariantCacheTest do
 
   defp no_render_spawned? do
     DynamicSupervisor.which_children(AudioProxy.RenderCoordinator.Supervisor) == []
-  end
-
-  @deadline 5_000
-
-  defp wait_until(condition, remaining \\ @deadline)
-  defp wait_until(_condition, remaining) when remaining <= 0, do: flunk("condition never held")
-
-  defp wait_until(condition, remaining) do
-    unless condition.() do
-      Process.sleep(10)
-      wait_until(condition, remaining - 10)
-    end
   end
 
   describe "a stored variant is served without rendering" do

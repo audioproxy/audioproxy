@@ -24,6 +24,7 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
   import AudioProxy.ProbeCoalesceHelper
   import AudioProxy.ConfigHelper
   import AudioProxy.SignedRequest
+  import AudioProxy.Eventually
 
   alias AudioProxy.RawHttp
 
@@ -222,7 +223,7 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
 
       # The write-back is a subscriber to the same render, so it may still be
       # finishing when the first response is complete.
-      assert eventually(fn -> render(rest, port).head =~ "x-audio-proxy: hit" end)
+      assert eventually?(fn -> render(rest, port).head =~ "x-audio-proxy: hit" end, 2_000)
 
       second = render(rest, port)
 
@@ -324,14 +325,6 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
     signed(rest)
     |> RawHttp.get(port)
     |> RawHttp.read(@deadline)
-  end
-
-  defp eventually(check, attempts \\ 40) do
-    cond do
-      check.() -> true
-      attempts <= 1 -> false
-      true -> Process.sleep(50) && eventually(check, attempts - 1)
-    end
   end
 
   defp sine(seconds) do
