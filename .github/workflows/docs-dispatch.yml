@@ -1,0 +1,33 @@
+# Tells the docs site (audioproxy/audioproxy-docs) that operator docs changed
+# on main; its sync workflow re-imports them and Netlify redeploys.
+#
+# Needs the DOCS_DISPATCH_TOKEN secret: a fine-grained PAT scoped to the
+# audioproxy-docs repository with contents read/write (repository_dispatch
+# cannot be sent cross-repo with the default GITHUB_TOKEN). Without the
+# secret the job skips with a notice rather than failing the push.
+name: dispatch docs sync
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "README.md"
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: notify audioproxy-docs
+        env:
+          TOKEN: ${{ secrets.DOCS_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::notice::DOCS_DISPATCH_TOKEN not set; docs site will sync on its weekly schedule instead"
+            exit 0
+          fi
+          curl -sf -X POST \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/audioproxy/audioproxy-docs/dispatches \
+            -d '{"event_type":"proxy-docs-updated","client_payload":{"sha":"'"$GITHUB_SHA"'"}}'
