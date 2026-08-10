@@ -280,19 +280,41 @@ request instead of only at the tag.
 ### The hex credentials
 
 Publishing needs a `HEX_API_KEY` repository secret, and it is the one part of
-the release path that is set up by hand:
+the release path that is set up by hand.
 
-```bash
-# Once per maintainer, against your own hex.pm account:
-mix hex.user auth                    # or `mix hex.user register`
-mix hex.user key generate --key-name audioproxy-ci --permission api:write
-```
+**The key is generated on hex.pm, not from the CLI.** Hex has no
+user-key task — `mix hex.user` does `whoami`, `auth` and `deauth` and nothing
+else (checked against hex 2.5.1). The page is
+[hex.pm/dashboard/keys](https://hex.pm/dashboard/keys), signed in, and it is
+not linked from anywhere obvious:
 
-Put that key in **Settings → Secrets and variables → Actions** as
-`HEX_API_KEY`. Scope it to `api:write` and nothing more; it is a
-publish credential, not an account credential, and it can be revoked with
-`mix hex.user key revoke --key-name audioproxy-ci` without touching the
-account.
+1. **Generate New Key**
+2. A key name — `publish-ci`
+3. An expiration (see below)
+4. Under **Key permissions**, check **Write** beneath **API**
+5. **Generate Key**
+
+The value is shown once, at creation.
+
+**Whatever expiration you pick is a future release failure with a date on it.**
+When the key lapses, the tag pushes the image and then fails on the hex step —
+the loud-but-late half of the partial state above, months after anyone
+remembers setting it. Pick a length you will notice, and treat the renewal as
+part of the release calendar rather than something to discover at a tag.
+
+Two things that are *not* the route here, both of which look like it:
+
+- `mix hex.user auth` mints a key, but stores it encrypted in
+  `~/.hex/hex.config` for that machine — there is no plaintext to copy.
+- `mix hex.organization key ORG generate --key-name … --permission api:write`
+  is the organization-level equivalent, and this project deliberately has no
+  hex organization (see the change's *Goals / Non-Goals*). `audio_proxy` is a
+  personal-account package, so its key is a user key from the dashboard.
+
+Put the generated value in **Settings → Secrets and variables → Actions** as
+`HEX_API_KEY`. Give it write access to the API and nothing more: it is a
+publish credential, not an account credential, and it can be revoked from the
+same page without touching the account or the other keys.
 
 A tag pushed before that secret exists fails the publish job **after** the image
 has been pushed — deliberately loud, because a release that quietly shipped one
