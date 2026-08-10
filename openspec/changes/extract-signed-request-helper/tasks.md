@@ -32,7 +32,17 @@
 - [x] 4.2 `grep -rn "00112233445566778899AABBCCDDEEFF" test` returns exactly one hit, in the support module
   - Two hits. The second is inside `signature_test.exs`'s Python generator comment, which exists to be pasted and run — a known-answer vector loses its point if it references the value it is meant to check independently. The hex is no longer *defined* anywhere but the support module. The comment now says it is the same material and must be regenerated if that changes.
 - [x] 4.3 `grep -rn "max_src_bytes: 2_000_000_000" test` returns one hit in the support module, plus `config_test.exs`, which tests the config parser itself and is not a caller of the floor
-  - Five hits. Support module and `config_test.exs` as expected, plus `render_coordinator_test.exs`, `render_coordinator_property_test.exs` and `variant_store/tee_test.exs`. Those three set the byte limits but carry no key material and no `local_root`, so they are outside this change's 18 files and cannot call `base_config/1` without either a `local_root` they never read or relaxing the requirement design.md deliberately imposed. Left alone; worth its own change if the duplication is judged to matter.
+  - Five hits. Support module and `config_test.exs` as expected, plus `render_coordinator_test.exs`, `render_coordinator_property_test.exs` and `variant_store/tee_test.exs`. Those three set the byte limits but carry no key material and no `local_root`, so they are outside this change's 18 files and cannot call `base_config/1` without either a `local_root` they never read or relaxing the requirement design.md deliberately imposed. Deferred to **`extract-test-byte-limits`**, on the board.
 - [x] 4.4 Re-read the 1.2 record against the final diff one more time. This is the step that catches a dropped key, and no test failure will do it for you
-  - Done as a mechanical before/after diff of the recorded maps. Every non-floor key survives at its call site with its comment. One key was *added*, deliberately: `source/s3_backend_test.exs` now pins `local_root: nil`. That file has no `local://` source and never read a local root, so the floor previously let an ambient `AP_LOCAL_ROOT` through; nil is what the floor is for. Its tests are `:minio`-tagged and did not run this session (Docker down), so that one line is unexercised.
+  - Done as a mechanical before/after diff of the recorded maps. Every non-floor key survives at its call site with its comment. One key was *added*, deliberately: `source/s3_backend_test.exs` now pins `local_root: nil`. That file has no `local://` source and never read a local root, so the floor previously let an ambient `AP_LOCAL_ROOT` through; nil is what the floor is for. Its tests are `:minio`-tagged and did not run locally (Docker down), so that line was unexercised at authoring time — **CI closed it**: the unit job runs `mix test --include integration --include minio` and passed on PR #66.
 - [x] 4.5 `mix compile --warnings-as-errors` and `mix format --check-formatted`
+  - Both clean. Worth knowing for the next slice: that compile step covers `lib/` only — test files compile under `mix test` without the flag, so a warning introduced in a test would not fail CI. Verified the test tree warning-free by hand instead.
+
+## 5. Deferred
+
+Raised by this change and not done in it, each on the board before this archive:
+
+- **`extract-test-byte-limits`** — the three files at 4.3 that still write the byte limits by hand.
+- **`guard-base-config-keys`** — `base_config/1` accepts any override key, so a typo'd `probe_timout: 1` installs a key nothing reads. Left out because closing it wants a `lib/` change and this slice touched no `lib/`.
+
+Not deferred, recorded: the CI warnings gap at 4.5 is pre-existing and belongs to whoever next touches `.github/workflows/ci.yml`, not to a change of its own.
