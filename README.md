@@ -8,7 +8,7 @@ Transcode audio on demand, from a URL.
 
 Point it at your audio and ask for a variant by URL: a 30-second preview, a mono file for speech-to-text, a normalised podcast MP3, a 24-bit FLAC excerpt. The options are in the path, so one master can serve all of them and you generate none of them in advance. If you know [imgproxy](https://imgproxy.net), this is that, for audio.
 
-> **Status: early, `v0.3.0`.** Transcoding works end to end and you can try it in about a minute. Sources live on a mounted directory (S3-compatible object storage is in flight: the client layer shipped in 0.3.0, and both the source backend and the `s3://` [variant store](#variant-store) are on `main` for the next release — see [docs/s3-providers.md](docs/s3-providers.md) for which providers are covered); with a [variant store](#variant-store) configured, completed renders are kept and served back with `Range` support, so a variant is encoded once rather than per request. See the [Roadmap](#roadmap).
+> **Status: early, `v0.4.0`.** Transcoding works end to end and you can try it in about a minute. Sources live on a mounted directory or in S3-compatible object storage (see [docs/s3-providers.md](docs/s3-providers.md) for which providers are covered); with a [variant store](#variant-store) configured — local or `s3://` — completed renders are kept and served back with `Range` support, so a variant is encoded once rather than per request. See the [Roadmap](#roadmap).
 
 ## Quick start
 
@@ -19,7 +19,7 @@ docker run --rm -p 4000:4000 \
   -e AP_ALLOW_INSECURE=true \
   -e AP_LOCAL_ROOT=/audio \
   -v /path/to/your/audio:/audio:ro \
-  ghcr.io/audioproxy/audioproxy:0.3.0
+  ghcr.io/audioproxy/audioproxy:0.4.0
 ```
 
 > On Apple Silicon, add `--platform linux/amd64`. The image is x86-64 only for now and runs under emulation; arm64 is [its own slice](https://github.com/audioproxy/audioproxy/tree/main/openspec/changes/add-multi-arch-images).
@@ -31,7 +31,7 @@ BASE=localhost:4000
 SRC='plain/local://track.wav'
 
 curl -s "$BASE/health"
-# {"status":"ok","version":"0.3.0"}
+# {"status":"ok","version":"0.4.0"}
 
 # A 30-second preview: Opus at 96 kbps, fading in and out.
 curl -o preview.opus "$BASE/insecure/f:opus/br:96/t:0:30/fade:1:1/$SRC"
@@ -95,31 +95,27 @@ curl "$BASE/insecure/info/$SRC"
 
 Each URL describes its output completely, so the same URL always means the same bytes. The first request for a variant renders it and streams it while it encodes; later requests are served from the variant bucket with `Range` support.
 
-> **Which of these work today?** All of them: the audio formats and `info` in the `0.3.0` image above, and the two `f:peaks` examples on a build from `main` — peaks are merged but not yet released. See the [Roadmap](#roadmap). Every option string here is checked against the parser by the test suite, so none of them are aspirational spellings.
+> **Which of these work today?** All of them, in the `0.4.0` image above. Every option string here is checked against the parser by the test suite, so none of them are aspirational spellings.
 
 ## Roadmap
 
 No dates. It is built in small releases, each one usable, in roughly this order.
 
-**Working now (`v0.3.0`)**
+**Working now (`v0.4.0`)**
 
 - Signed URLs, the full processing-options grammar, and the cache-key rules
 - Transcoding to MP3, AAC/M4A, Opus, Vorbis, FLAC and WAV, with trimming, fades, loudness normalisation, channel and sample-rate control
-- Renders stream while they encode, from files in a mounted directory
+- Renders stream while they encode
 - Concurrent requests for the same variant share one render, with mid-render joiners catching up from the start
-- Sources on a mounted directory; the S3 client layer (SigV4, addressing styles, MinIO test harness — the plumbing the S3 source backend is built on)
-- A variant cache: completed renders persist to a local directory and are served back without rendering, with `Range` support
-- A cap on simultaneous renders with a bounded wait queue, so a burst queues (and then sheds, with `Retry-After`) instead of thrashing the machine
+- Sources on a mounted directory **or in S3**: ffmpeg reads the object through a presigned URL, so a trim fetches only the bytes it needs, and an unreachable store answers `502` rather than a `404` that would report a deletion that did not happen
+- A variant store on a local directory **or in S3**, so the cache survives a restart and is shared between nodes — and with it `AP_SERVE_MODE=redirect`, where a hit answers `302` to a short-lived storage URL and the proxy leaves the hot path entirely
+- `f:peaks`, waveform min/max data in audiowaveform's JSON and binary formats, cached like any other variant
+- A cap on simultaneous renders with a bounded wait queue, so a burst queues (and then sheds, with `Retry-After`) instead of thrashing the machine; `ffprobe` runs under a bound of its own
 - `GET /info`, giving duration, sample rate, channels and tags, so clients can size their variant URLs to the source
-- A single container, published per release
-
-**Merged, in the next release**
-
-- `f:peaks`, waveform min/max data in audiowaveform's JSON and binary formats, cached like any other variant. It is on `main` but not in the `0.3.0` image the Quick start pins.
-- `s3://` sources. ffmpeg reads the object through a presigned URL, so a trim fetches only the bytes it needs, and an unreachable store answers `502` rather than a `404` that would report a deletion that did not happen. Same caveat as above: on `main`, not in the `0.3.0` image.
-- An `s3://` **variant store**, so the cache survives a restart and is shared between nodes — and with it, `AP_SERVE_MODE=redirect`, which has been the documented default all along and had no backend that could presign until now. A hit answers `302` to a short-lived storage URL and the proxy leaves the hot path entirely.
-
-- A Prometheus `/metrics` endpoint on a bind-restricted listener of its own, reporting queue depth, render durations, cache hit ratio and error rates. Same caveat as above: on `main`, not in the `0.3.0` image. See [Metrics](#metrics).
+- `GET /ready`, reporting queue depth with hysteresis, so a busy node leaves the pool without being restarted
+- A Prometheus `GET /metrics` endpoint on a bind-restricted listener of its own, reporting queue depth, render durations, cache hit ratio and error rates. See [Metrics](#metrics)
+- Video input refused rather than transcoded, enforced rather than intended
+- A single container, published per release — and the package on hex, for embedding it in a release of your own
 
 **After that**
 
@@ -170,12 +166,12 @@ docker run --rm -p 4000:4000 \
   -e AP_SERVE_MODE=proxy \
   -v /path/to/your/audio:/audio:ro \
   -v audioproxy-cache:/var/cache/audio_proxy \
-  ghcr.io/audioproxy/audioproxy:0.3.0
+  ghcr.io/audioproxy/audioproxy:0.4.0
 ```
 
 That is the whole configuration for serving files off a mounted directory, with completed renders cached on a named volume: no credentials, no bucket, no database. Drop the two `AP_VARIANT_*` lines and it still works — every request just renders. The store is [unbounded](#variant-store); the volume is yours to watch.
 
-**Pin a version.** `:0.3.0` and `:sha-<commit>` name an exact image; `:0.3` follows patch releases; `:latest` and `:edge` move under you, and `:edge` is whatever last landed on `main`. Pinning matters more here than for most services, because a different ffmpeg encodes the same URL to different bytes, which is also why a pin bump always cuts a release. The pinned versions are in [VERSIONS.md](VERSIONS.md).
+**Pin a version.** `:0.4.0` and `:sha-<commit>` name an exact image; `:0.4` follows patch releases; `:latest` and `:edge` move under you, and `:edge` is whatever last landed on `main`. Pinning matters more here than for most services, because a different ffmpeg encodes the same URL to different bytes, which is also why a pin bump always cuts a release. The pinned versions are in [VERSIONS.md](VERSIONS.md).
 
 To run it from a checkout instead, for development or to build your own image:
 
@@ -193,7 +189,7 @@ The proxy is also published to hex as an OTP application, so it can run inside a
 
 ```elixir
 # mix.exs
-{:audio_proxy, "~> 0.3"}
+{:audio_proxy, "~> 0.4"}
 ```
 
 **Know what starting it does before you add it.** `audio_proxy` is an application, not a library: it has no API you call, and adding the dependency is the whole integration. When your release starts it, it
@@ -461,7 +457,7 @@ docker run -p 4000:4000 \
   -e AP_ALLOW_INSECURE=true \
   -e AP_LOCAL_ROOT=/srv/audio \
   -v /path/to/your/audio:/srv/audio:ro \
-  ghcr.io/audioproxy/audioproxy:0.3.0
+  ghcr.io/audioproxy/audioproxy:0.4.0
 
 # …renders /srv/audio/previews/track.wav
 curl "$BASE/insecure/f:mp3/br:128/plain/local://previews/track.wav"
