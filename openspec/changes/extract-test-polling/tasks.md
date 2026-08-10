@@ -57,4 +57,4 @@
 
 ## Deferred out of this change
 
-`metrics_endpoint_test.exs`'s `await_scrape/3` and `metrics_test.exs`'s `await_restart/2` are poll loops and stay where they are. Both **return the value they waited for** — a scrape body, a restarted pid — which `wait_until/2` and `eventually?/2` cannot express, and both carry a bespoke failure message. Folding them in means either widening the module's contract or rewriting the two tests to poll-then-re-read, neither of which is a deduplication. Raised for its own change rather than smuggled in here.
+`metrics_endpoint_test.exs`'s `await_scrape/3` and `metrics_test.exs`'s `await_restart/2` are poll loops and stay where they are. Both **return the value they waited for** — a scrape body, a restarted pid — which `wait_until/2` and `eventually?/2` cannot express, and both carry a bespoke failure message. Folding them in means either widening the module's contract or rewriting the two tests to poll-then-re-read, neither of which is a deduplication — and the second reopens the race the poll exists to close. Deferred to **`extract-test-value-waits`**, which is on the board and states the shape decision it has to make.
