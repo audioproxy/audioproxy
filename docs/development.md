@@ -280,19 +280,22 @@ request instead of only at the tag.
 ### The hex credentials
 
 Publishing needs a `HEX_API_KEY` repository secret, and it is the one part of
-the release path that is set up by hand:
+the release path that is set up by hand.
 
-```bash
-# Once per maintainer, against your own hex.pm account:
-mix hex.user auth                    # or `mix hex.user register`
-mix hex.user key generate --key-name audioproxy-ci --permission api:write
-```
+**The key is generated on hex.pm, not from the CLI.** Hex has no
+key-generation task — `mix hex.user` does `whoami`, `auth` and `deauth` and
+nothing else (checked against hex 2.5.1). Sign in at
+[hex.pm](https://hex.pm), open your account's **Keys** section, and generate
+one with **API write** permission. The value is shown once, at creation.
 
-Put that key in **Settings → Secrets and variables → Actions** as
-`HEX_API_KEY`. Scope it to `api:write` and nothing more; it is a
-publish credential, not an account credential, and it can be revoked with
-`mix hex.user key revoke --key-name audioproxy-ci` without touching the
-account.
+`mix hex.user auth` is not a route to this. It does mint a key, but stores it
+encrypted in `~/.hex/hex.config` for that machine, so there is no plaintext to
+copy into a secret.
+
+Put the generated value in **Settings → Secrets and variables → Actions** as
+`HEX_API_KEY`. Give it write access to the API and nothing more: it is a
+publish credential, not an account credential, and it can be revoked from the
+same page without touching the account or the other keys.
 
 A tag pushed before that secret exists fails the publish job **after** the image
 has been pushed — deliberately loud, because a release that quietly shipped one
