@@ -146,7 +146,9 @@ defmodule AudioProxy.ProbeCoordinatorTest do
       # One slow probe holds the only slot for half a second; a second, distinct
       # source arrives while it does.
       held = Task.async(fn -> probe(dir, "probeslow.wav") end)
-      wait_until(fn -> FakeFfmpeg.probe_count(dir) == 1 end)
+      # Explicitly 5 s, not this file's `@deadline`: that budget is for awaiting
+      # a probe, and this wait only needs one to have started.
+      wait_until(fn -> FakeFfmpeg.probe_count(dir) == 1 end, 5_000)
 
       assert {:error, {:queue_full, retry_after}} = probe(dir, "piece.wav")
       assert retry_after >= 1

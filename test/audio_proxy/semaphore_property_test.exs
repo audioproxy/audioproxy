@@ -16,9 +16,9 @@ defmodule AudioProxy.SemaphorePropertyTest do
   """
 
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   import AudioProxy.Eventually
-  use ExUnitProperties
 
   alias AudioProxy.Semaphore
 

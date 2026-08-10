@@ -14,7 +14,7 @@
 
   | File | Helper | Deadline | Interval | Now |
   |---|---|---|---|---|
-  | `probe_coordinator_test.exs` | `wait_until` | 5 s (literal, not its `@deadline`) | 25 ms | default |
+  | `probe_coordinator_test.exs` | `wait_until` | 5 s (literal, not its `@deadline`) | 25 ms | explicit `5_000`, so the file's 10 s `@deadline` cannot be misread as the budget |
   | `probe_endpoint_test.exs` | `wait_until` | `@deadline` 10 s | 10 ms | explicit `@deadline` |
   | `probe_limiter_property_test.exs` | `wait_until` | `@deadline` 10 s | 10 ms | explicit `@deadline` |
   | `probe_limiter_test.exs` | `wait_until` | `@deadline` 5 s | 25 ms | default |
@@ -28,7 +28,7 @@
   | `render_endpoint_stream_test.exs` | `gone_within?` (inlined `kill`) | passed per call | 25 ms | unchanged |
   | `ffmpeg/render_ffmpeg_test.exs` | `gone_within?`, `alive?` | passed per call | 25 ms | unchanged |
   | `ffmpeg/render_lifecycle_test.exs` | `eventually`, `gone_within?`, `alive?` | 2 s / per call | 25 ms | explicit `2_000` |
-  | `peaks_endpoint_ffmpeg_test.exs` | `eventually` | 40 attempts ≈ 2 s | 50 ms | explicit `2_000` |
+  | `peaks_endpoint_ffmpeg_test.exs` | `eventually` | 40 attempts, a render each | 50 ms | explicit `10_000` — see 2.4 |
   | `readiness_test.exs` | `await` | `@deadline` 2 s | 10 ms | explicit `@deadline` |
   | `ready_endpoint_test.exs` | `await` | `@deadline` 2 s | 10 ms | explicit `@deadline` |
 
@@ -39,7 +39,7 @@
 - [x] 2.1 `test/support/eventually.ex` with `wait_until/2` (flunks, message names the exceeded deadline), `eventually?/2` (boolean), `gone_within?/2` and `alive?/1` — the last two written in terms of `eventually?/2`, not as their own loop
 - [x] 2.2 Moduledoc explaining the flunk/boolean split and why the deadline stays a parameter while the interval does not. This is the file's real content; the four functions are trivial
 - [x] 2.3 Replace the copies in the nine `wait_until` files, preserving each file's `@deadline` exactly — eleven files, per 1.2
-- [x] 2.4 Replace the two `eventually` files — `peaks_endpoint_ffmpeg_test.exs` counts attempts rather than milliseconds (`attempts \\ 40` at 50 ms), so convert to a millisecond deadline and check the arithmetic: 40 × 50 ms is 2 s, not the 60 s its `@deadline` suggests. Converted to an explicit `2_000`; the file's `@deadline` belongs to `RawHttp.read/2` and is untouched
+- [x] 2.4 Replace the two `eventually` files — `peaks_endpoint_ffmpeg_test.exs` counts attempts rather than milliseconds (`attempts \\ 40` at 50 ms), so convert to a millisecond deadline and check the arithmetic: 40 × 50 ms is 2 s, not the 60 s its `@deadline` suggests. Converted to an explicit deadline; the file's `@deadline` belongs to `RawHttp.read/2` and is untouched. **The 2 s that arithmetic implies is wrong**, as the adversarial review caught: the condition is a full render through ffmpeg and ffprobe, and the old scheme charged the budget for sleeps only, so 40 attempts meant 40 renders however long each took. Under a wall-clock deadline 2 s buys roughly six attempts on a loaded runner. It is `10_000`, with a comment saying the budget is renders rather than polls
 - [x] 2.5 Replace `gone_within?`/`alive?` in the four files that have them, including `render_endpoint_stream_test.exs`, whose copy inlines `System.cmd("kill", …)` rather than calling a local `alive?`
 - [x] 2.6 Confirm `mix compile --warnings-as-errors` is clean — an unused private function is the compiler telling you a deletion was missed. Clean; `mix test` additionally surfaced two now-unused `@deadline` attributes (both 5 s, the module default), deleted rather than kept
 

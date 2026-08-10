@@ -223,7 +223,11 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
 
       # The write-back is a subscriber to the same render, so it may still be
       # finishing when the first response is complete.
-      assert eventually?(fn -> render(rest, port).head =~ "x-audio-proxy: hit" end, 2_000)
+      #
+      # Each attempt is a full render through ffmpeg and ffprobe, so this budget
+      # is several renders, not several polls — the deadline it replaced counted
+      # 40 attempts, not 2 s of wall clock.
+      assert eventually?(fn -> render(rest, port).head =~ "x-audio-proxy: hit" end, 10_000)
 
       second = render(rest, port)
 

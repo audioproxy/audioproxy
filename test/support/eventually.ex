@@ -22,9 +22,10 @@ defmodule AudioProxy.Eventually do
       negative one (`refute eventually?(...)`). Its caller wants the answer,
       not a failure.
 
-  Before this module the two lived in different files under different names
-  (`wait_until` in eleven, `eventually` in two) and were told apart only by
-  which file you happened to be reading.
+  Before this module the two lived in seventeen files under four names
+  (`wait_until` in eleven, `eventually` in two, `await` in two, and the
+  `gone_within?`/`alive?` pair in four) and were told apart only by which file
+  you happened to be reading.
 
   ## The deadline is a parameter; the interval is not
 
@@ -35,15 +36,20 @@ defmodule AudioProxy.Eventually do
   whose budget is not 5 s passes its own at the call site.
 
   How *often* it is checked is a property of nothing. The copies polled at 5,
-  10, 20 and 25 ms, and no file had a reason for its number; six already used
-  10 ms, so 10 ms it is. Nothing in the suite asserts on how often a condition
-  is checked, and a caller that ever needs its own interval should get one
-  added here rather than reintroducing a local loop.
+  10, 20, 25 and 50 ms, and no file had a reason for its number; six already
+  used 10 ms, so 10 ms it is. Nothing in the suite asserts on how often a
+  condition is checked, and a caller that ever needs its own interval should
+  get one added here rather than reintroducing a local loop.
 
   The deadline is measured against the monotonic clock rather than by counting
   sleeps, so `"never held within 5000ms"` names the time that actually passed
   — including time spent evaluating a slow condition, which several of the
   old copies silently excluded.
+
+  It is checked *between* evaluations, never during one, so a condition that
+  blocks overruns the deadline by however long it blocks. That matters when
+  the condition is a request rather than a peek: budget such a caller in
+  conditions rather than in milliseconds, and say so where it is written.
   """
 
   import ExUnit.Assertions, only: [flunk: 1]

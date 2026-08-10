@@ -202,16 +202,18 @@ covers everything that sends a message when it happens — and for the rest:
 | `eventually?/2` | Polls, returns a boolean. For a wait that *is* the assertion, including `refute`. |
 | `gone_within?/2`, `alive?/1` | The OS-process pair, via `kill -0`. `gone_within?/2` is `eventually?/2` over `not alive?/1`. |
 
-Two rules, for the two things thirteen local copies disagreed about:
+Two rules, for the two things seventeen local copies disagreed about:
 
-- **The poll loop is imported, not written.** Fourteen authors needing a wait
-  produced fourteen loops at four different intervals with three different
-  failure messages, none of them chosen. The interval lives in the module and
-  nowhere else; a caller that genuinely needs its own gets an option added
-  there rather than a private `defp`.
+- **The poll loop is imported, not written.** Seventeen authors needing a wait
+  produced seventeen loops, under four names, at five different intervals with
+  three different failure messages, none of them chosen. The interval lives in
+  the module and nowhere else; a caller that genuinely needs its own gets an
+  option added there rather than a private `defp`.
 - **The deadline stays at the call site.** It is the one part that legitimately
   varies — 2 s to 10 s, for real reasons — so a file whose budget is not the
   module's 5 s default passes `@deadline` explicitly, where the test is read.
+  Budget a wait whose condition is a *request* in conditions rather than in
+  milliseconds: the deadline is checked between evaluations, never during one.
 
 ## Open questions (decide as they come up)
 
