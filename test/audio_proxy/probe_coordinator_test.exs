@@ -16,6 +16,7 @@ defmodule AudioProxy.ProbeCoordinatorTest do
 
   import AudioProxy.ConfigHelper
   import AudioProxy.ProbeCoalesceHelper
+  import AudioProxy.Eventually
 
   alias AudioProxy.{FakeFfmpeg, ProbeCoordinator}
 
@@ -145,7 +146,9 @@ defmodule AudioProxy.ProbeCoordinatorTest do
       # One slow probe holds the only slot for half a second; a second, distinct
       # source arrives while it does.
       held = Task.async(fn -> probe(dir, "probeslow.wav") end)
-      wait_until(fn -> FakeFfmpeg.probe_count(dir) == 1 end)
+      # Explicitly 5 s, not this file's `@deadline`: that budget is for awaiting
+      # a probe, and this wait only needs one to have started.
+      wait_until(fn -> FakeFfmpeg.probe_count(dir) == 1 end, 5_000)
 
       assert {:error, {:queue_full, retry_after}} = probe(dir, "piece.wav")
       assert retry_after >= 1
@@ -208,18 +211,5 @@ defmodule AudioProxy.ProbeCoordinatorTest do
   # race dressed up as a property.
   defp registered?(name) do
     Registry.lookup(ProbeCoordinator.Registry, "local://#{name}") != []
-  end
-
-  defp wait_until(condition, remaining \\ 5_000)
-
-  defp wait_until(_condition, remaining) when remaining <= 0 do
-    flunk("condition never held")
-  end
-
-  defp wait_until(condition, remaining) do
-    unless condition.() do
-      Process.sleep(25)
-      wait_until(condition, remaining - 25)
-    end
   end
 end

@@ -13,6 +13,7 @@ defmodule AudioProxy.ReadyEndpointTest do
   use ExUnit.Case, async: false
 
   import AudioProxy.ConfigHelper
+  import AudioProxy.Eventually
   import Plug.Conn
   import Plug.Test
 
@@ -141,14 +142,6 @@ defmodule AudioProxy.ReadyEndpointTest do
     before = Semaphore.stats().queued
     Process.exit(waiter, :kill)
 
-    await(fn -> Semaphore.stats().queued < before end)
-  end
-
-  defp await(condition, remaining \\ @deadline) do
-    cond do
-      condition.() -> :ok
-      remaining <= 0 -> flunk("queue depth did not settle within #{@deadline}ms")
-      true -> Process.sleep(10) && await(condition, remaining - 10)
-    end
+    wait_until(fn -> Semaphore.stats().queued < before end, @deadline)
   end
 end

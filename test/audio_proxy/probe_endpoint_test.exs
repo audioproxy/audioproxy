@@ -25,6 +25,7 @@ defmodule AudioProxy.ProbeEndpointTest do
   import AudioProxy.ProbeCoalesceHelper
   import Plug.Conn
   import Plug.Test
+  import AudioProxy.Eventually
 
   alias AudioProxy.{
     CacheKey,
@@ -122,7 +123,7 @@ defmodule AudioProxy.ProbeEndpointTest do
       # One slow probe holds the only slot; a request for a *different* source
       # arrives while it does, so there is nothing to coalesce onto.
       held = Task.async(fn -> get("/f:mp3/plain/local://probeslow.wav") end)
-      wait_until(fn -> FakeFfmpeg.probe_count(dir) == 1 end)
+      wait_until(fn -> FakeFfmpeg.probe_count(dir) == 1 end, @deadline)
 
       conn = get("/f:mp3/plain/local://piece.wav")
 
@@ -144,7 +145,7 @@ defmodule AudioProxy.ProbeEndpointTest do
       put_config(%{max_concurrency: 1, queue_size: 0})
 
       hanging = Task.async(fn -> get("/f:mp3/plain/local://hang.wav") end)
-      wait_until(fn -> Semaphore.stats().held == 1 end)
+      wait_until(fn -> Semaphore.stats().held == 1 end, @deadline)
 
       # Captured *before*, because the hanging render's own gate probe has
       # already made the count 1: asserting `>= 1` afterwards would hold for a
@@ -182,7 +183,7 @@ defmodule AudioProxy.ProbeEndpointTest do
       put_config(%{max_probe_concurrency: 1, max_concurrency: 1, queue_size: 0})
 
       held = Task.async(fn -> get("/f:mp3/plain/local://probeslow.wav") end)
-      wait_until(fn -> FakeFfmpeg.probe_count(dir) == 1 end)
+      wait_until(fn -> FakeFfmpeg.probe_count(dir) == 1 end, @deadline)
 
       conn = get(rest)
 
@@ -198,7 +199,10 @@ defmodule AudioProxy.ProbeEndpointTest do
 
       # And then wait for the render that held the probe slot to finish being
       # written back, since this is the one test with somewhere to write.
-      wait_until(fn -> DynamicSupervisor.which_children(RenderCoordinator.Supervisor) == [] end)
+      wait_until(
+        fn -> DynamicSupervisor.which_children(RenderCoordinator.Supervisor) == [] end,
+        @deadline
+      )
     end
 
     test "a 304 revalidation needs neither either", %{dir: dir} do
@@ -226,16 +230,5 @@ defmodule AudioProxy.ProbeEndpointTest do
     1..count
     |> Task.async_stream(fn _ -> request.() end, max_concurrency: count, timeout: @deadline)
     |> Enum.map(fn {:ok, conn} -> conn end)
-  end
-
-  defp wait_until(condition, remaining \\ @deadline)
-
-  defp wait_until(_condition, remaining) when remaining <= 0, do: flunk("condition never held")
-
-  defp wait_until(condition, remaining) do
-    unless condition.() do
-      Process.sleep(10)
-      wait_until(condition, remaining - 10)
-    end
   end
 end

@@ -17,6 +17,8 @@ defmodule AudioProxy.Ffmpeg.RenderFfmpegTest do
 
   use ExUnit.Case, async: true
 
+  import AudioProxy.Eventually
+
   alias AudioProxy.Ffmpeg.Command
   alias AudioProxy.Ffmpeg.Render
   alias AudioProxy.Options
@@ -214,26 +216,5 @@ defmodule AudioProxy.Ffmpeg.RenderFfmpegTest do
   defp parse_float(string) do
     {value, _rest} = Float.parse(string)
     value
-  end
-
-  defp gone_within?(os_pid, deadline) do
-    cond do
-      not alive?(os_pid) ->
-        true
-
-      deadline <= 0 ->
-        false
-
-      true ->
-        Process.sleep(25)
-        gone_within?(os_pid, deadline - 25)
-    end
-  end
-
-  defp alive?(os_pid) do
-    {_output, status} =
-      System.cmd("kill", ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true)
-
-    status == 0
   end
 end

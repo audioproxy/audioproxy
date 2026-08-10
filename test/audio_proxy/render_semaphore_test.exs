@@ -25,6 +25,7 @@ defmodule AudioProxy.RenderSemaphoreTest do
   import AudioProxy.SignedRequest, except: [conn: 3]
   import Plug.Conn
   import Plug.Test
+  import AudioProxy.Eventually
 
   alias AudioProxy.{RenderCoordinator, RenderHarness, Semaphore, VariantStore}
   alias AudioProxy.Ffmpeg.RenderSupervisor
@@ -63,7 +64,7 @@ defmodule AudioProxy.RenderSemaphoreTest do
 
       coordinators = for _ <- 1..4, do: start_subscriber(unique_key(), @forever)
 
-      wait_until(fn -> length(running_renders()) == 2 end)
+      wait_until(fn -> length(running_renders()) == 2 end, @deadline)
 
       # Held rather than merely reached: a cap that let the third through a
       # moment later would satisfy the line above.
@@ -118,19 +119,19 @@ defmodule AudioProxy.RenderSemaphoreTest do
 
       # The one slot, taken by something that will not give it back on its own.
       blocker = start_subscriber(unique_key(), @forever)
-      wait_until(fn -> phase(blocker) == :rendering end)
+      wait_until(fn -> phase(blocker) == :rendering end, @deadline)
 
       key = unique_key()
       starter = Task.async(fn -> subscribe_and_collect(key, @paced) end)
 
-      wait_until(fn -> registered(key) != nil end)
+      wait_until(fn -> registered(key) != nil end, @deadline)
       assert phase(registered(key)) == :queued
 
       # Joining something that has not started is the case that only exists
       # because slots do: before this slice a coordinator was always rendering
       # by the time anyone could find it.
       joiner = Task.async(fn -> subscribe_and_collect(key, @paced) end)
-      wait_until(fn -> length(subscribers(registered(key))) == 2 end)
+      wait_until(fn -> length(subscribers(registered(key))) == 2 end, @deadline)
 
       stop_subscriber(blocker)
 
@@ -155,12 +156,12 @@ defmodule AudioProxy.RenderSemaphoreTest do
       put_config(%{max_concurrency: 1, queue_size: 4, variant_store: {:file, store_root()}})
 
       blocker = start_subscriber(unique_key(), @forever)
-      wait_until(fn -> phase(blocker) == :rendering end)
+      wait_until(fn -> phase(blocker) == :rendering end, @deadline)
 
       key = store_key()
       collector = Task.async(fn -> subscribe_and_collect(key, @paced, metadata: @metadata) end)
 
-      wait_until(fn -> registered(key) != nil end)
+      wait_until(fn -> registered(key) != nil end, @deadline)
       assert phase(registered(key)) == :queued
 
       stop_subscriber(blocker)
@@ -170,7 +171,7 @@ defmodule AudioProxy.RenderSemaphoreTest do
       # The tee starts with the render rather than with the coordinator, so the
       # thing to prove is that starting it late loses nothing: the store holds
       # the whole stream, not the tail after the grant.
-      wait_until(fn -> stored(key) == @paced_bytes end)
+      wait_until(fn -> stored(key) == @paced_bytes end, @deadline)
     end
 
     test "a cache hit is served with every slot busy and the queue full" do
@@ -183,7 +184,7 @@ defmodule AudioProxy.RenderSemaphoreTest do
 
       # Render it once, so the store holds it.
       assert render("/f:mp3/plain/local://piece.wav").status == 200
-      wait_until(fn -> render("/f:mp3/plain/local://piece.wav") |> hit?() end)
+      wait_until(fn -> render("/f:mp3/plain/local://piece.wav") |> hit?() end, @deadline)
 
       # Now take the only slot and leave nowhere to wait, so anything needing a
       # render would be refused outright.
@@ -204,7 +205,7 @@ defmodule AudioProxy.RenderSemaphoreTest do
       put_config(%{max_concurrency: 1, queue_size: 4, variant_store: {:file, store_root()}})
 
       blocker = start_subscriber(unique_key(), @forever)
-      wait_until(fn -> phase(blocker) == :rendering end)
+      wait_until(fn -> phase(blocker) == :rendering end, @deadline)
 
       key = store_key()
       client = start_subscriber(key, @paced, metadata: @metadata)
@@ -223,7 +224,7 @@ defmodule AudioProxy.RenderSemaphoreTest do
 
       # Nothing rendered, so nothing was stored, and the slot went nowhere.
       refute stored?(key)
-      wait_until(fn -> match?(%{held: 0, queued: 0}, Semaphore.stats()) end)
+      wait_until(fn -> match?(%{held: 0, queued: 0}, Semaphore.stats()) end, @deadline)
     end
   end
 
@@ -232,7 +233,7 @@ defmodule AudioProxy.RenderSemaphoreTest do
       put_config(%{max_concurrency: 1, queue_size: 0})
 
       blocker = start_subscriber(unique_key(), @forever)
-      wait_until(fn -> phase(blocker) == :rendering end)
+      wait_until(fn -> phase(blocker) == :rendering end, @deadline)
 
       key = unique_key()
       assert {:error, {:queue_full, retry_after}} = subscribe(key, @paced)
@@ -327,7 +328,7 @@ defmodule AudioProxy.RenderSemaphoreTest do
       # refuses locally and cannot refuse for a remote backend. The slot has to
       # come back from the timeout, because nothing else will end this.
       stalled = Task.async(fn -> subscribe_and_collect(unique_key(), @forever) end)
-      wait_until(fn -> length(running_renders()) == 1 end)
+      wait_until(fn -> length(running_renders()) == 1 end, @deadline)
 
       queued = Task.async(fn -> subscribe_and_collect(unique_key(), @paced) end)
 
@@ -341,7 +342,7 @@ defmodule AudioProxy.RenderSemaphoreTest do
 
       # And the accounting survived a render that hung rather than failed:
       # nothing is still held by a coordinator that is gone.
-      wait_until(fn -> match?(%{held: 0, queued: 0}, Semaphore.stats()) end)
+      wait_until(fn -> match?(%{held: 0, queued: 0}, Semaphore.stats()) end, @deadline)
     end
   end
 
@@ -483,20 +484,6 @@ defmodule AudioProxy.RenderSemaphoreTest do
     case Registry.lookup(RenderCoordinator.Registry, key) do
       [{pid, _value}] -> pid
       [] -> nil
-    end
-  end
-
-  defp wait_until(condition, remaining \\ @deadline) do
-    cond do
-      condition.() ->
-        :ok
-
-      remaining <= 0 ->
-        flunk("condition never held")
-
-      true ->
-        Process.sleep(20)
-        wait_until(condition, remaining - 20)
     end
   end
 end

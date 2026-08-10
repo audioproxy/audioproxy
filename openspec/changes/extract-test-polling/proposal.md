@@ -1,8 +1,10 @@
 ## Why
 
-Nine test files define `wait_until/2`. Two more define `eventually/2`. Four define `gone_within?/2` and `alive?/1`. All of it is the same idea — poll a condition until it holds or a deadline runs out — and none of the copies agree.
+Eleven test files define `wait_until/2`. Two more define `eventually/2`. Two define `await/2`. Four define `gone_within?/2` and `alive?/1`. All of it is the same idea — poll a condition until it holds or a deadline runs out — and none of the copies agree.
 
-The sleep interval is 5 ms in `semaphore_property_test.exs`, 10 ms in five files, 20 ms in `render_semaphore_test.exs`, 25 ms in `probe_coordinator_test.exs`. The failure message is `"the semaphore never returned to empty"` in one and `"condition never held"` in the other eight. Three files spell the body with `cond`, six with `unless`. `alive?/1` calls `Integer.to_string` in two files and `to_string` in one.
+*(Counts corrected during implementation: the census below was written against nine `wait_until` files and missed `await/2` entirely. Seventeen files hold a copy, not thirteen. `tasks.md` §1.2 has the file-by-file table.)*
+
+The sleep interval is 5 ms in `semaphore_property_test.exs`, 10 ms in five files, 20 ms in `render_semaphore_test.exs`, 25 ms in `probe_coordinator_test.exs`, 50 ms in `peaks_endpoint_ffmpeg_test.exs`. The failure message is `"the semaphore never returned to empty"` in one, `"queue depth did not settle within Nms"` in two, and `"condition never held"` in the rest. Three files spell the body with `cond`, six with `unless`. `alive?/1` calls `Integer.to_string` in two files and `to_string` in one.
 
 None of that variation is meaningful. It is what happens when the fourteenth author needs a poll loop and writes one rather than finding the thirteen that exist.
 
@@ -14,7 +16,7 @@ There is one distinction underneath the noise that *is* meaningful, and the dupl
   - `wait_until/2` — polls, flunks on expiry. One interval, one message.
   - `eventually?/2` — polls, returns a boolean. For callers that assert on the answer.
   - `gone_within?/2` and `alive?/1` — the OS-process pair, expressed in terms of `eventually?/2` rather than hand-rolling their own loop a fourth time.
-- The 13 files lose their local copies and import it.
+- The 17 files lose their local copies and import it.
 - A **Test support** section in `CLAUDE.md` recording that poll loops come from this module, so the fifteenth author finds it instead of writing the tenth copy.
 
 **Deliberately not changed:** per-file deadlines. `@deadline` varies from 2 s to 10 s across these files for real reasons — a probe timeout test wants a different budget from a semaphore drain — so the deadline stays a call-site argument with a modest default, exactly as it is now. Only the *polling interval* is unified, because no file has a reason for its interval and several would be surprised to learn what theirs is.

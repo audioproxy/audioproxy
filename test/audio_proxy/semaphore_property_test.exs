@@ -18,6 +18,8 @@ defmodule AudioProxy.SemaphorePropertyTest do
   use ExUnit.Case, async: true
   use ExUnitProperties
 
+  import AudioProxy.Eventually
+
   alias AudioProxy.Semaphore
 
   @capacity 3
@@ -54,7 +56,7 @@ defmodule AudioProxy.SemaphorePropertyTest do
       # Every worker has returned, so every slot has been released, crashed out
       # of, or timed out of — and the monitors that cover the last two have
       # fired, because the pids are gone.
-      wait_until(fn -> Semaphore.stats(semaphore) == empty() end)
+      wait_until(fn -> Semaphore.stats(semaphore) == empty() end, @deadline)
     end
   end
 
@@ -110,18 +112,4 @@ defmodule AudioProxy.SemaphorePropertyTest do
   end
 
   defp empty, do: %{held: 0, queued: 0, capacity: @capacity, queue_size: 64}
-
-  defp wait_until(condition, remaining \\ @deadline) do
-    cond do
-      condition.() ->
-        :ok
-
-      remaining <= 0 ->
-        flunk("the semaphore never returned to empty")
-
-      true ->
-        Process.sleep(5)
-        wait_until(condition, remaining - 5)
-    end
-  end
 end

@@ -17,6 +17,7 @@ defmodule AudioProxy.VariantStore.TeeTest do
   import AudioProxy.CoalesceHelper
   import AudioProxy.ProbeCoalesceHelper
   import AudioProxy.ConfigHelper
+  import AudioProxy.Eventually
 
   alias AudioProxy.{RenderCoordinator, RenderHarness, VariantStore}
 
@@ -60,16 +61,6 @@ defmodule AudioProxy.VariantStore.TeeTest do
   defp stored!(key) do
     {:ok, stream} = VariantStore.get_stream(key, nil)
     stream |> Enum.to_list() |> IO.iodata_to_binary()
-  end
-
-  defp wait_until(condition, remaining \\ @deadline)
-  defp wait_until(_condition, remaining) when remaining <= 0, do: flunk("condition never held")
-
-  defp wait_until(condition, remaining) do
-    unless condition.() do
-      Process.sleep(10)
-      wait_until(condition, remaining - 10)
-    end
   end
 
   defp collect(render, chunks \\ []) do
