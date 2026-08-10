@@ -72,10 +72,42 @@ defmodule AudioProxy.Source.RemotePropertyTest do
 
       # The attack the anchor exists to refuse: the domain as a *prefix* of a
       # name someone else can register.
-      refute Allowlist.matches?(:host, pattern, Enum.join(labels ++ attacker, "."))
+      #
+      # Only an attack when the result is not itself under the domain, and the
+      # generator does reach cases where it is: drawing `["lv", "m"]` for both
+      # `labels` and `attacker` builds `lv.m.lv.m`, which is the host `lv.m`
+      # sitting under the domain `lv.m` and must therefore match. Decided by
+      # the constructed name rather than by `attacker != labels`, because three
+      # domain labels reach the same place another way — `labels = [c, b, c]`
+      # with `attacker = [b, c]` builds `c.b.c.b.c`, a real subdomain of
+      # `c.b.c` — so the cheaper guard would have left the same hole open at a
+      # lower rate, which is the worse failure.
+      prefixed = Enum.join(labels ++ attacker, ".")
+
+      if prefixed == domain or String.ends_with?(prefixed, "." <> domain) do
+        assert Allowlist.matches?(:host, pattern, prefixed)
+      else
+        refute Allowlist.matches?(:host, pattern, prefixed)
+      end
 
       # And the anchor itself — a label that merely ends in the domain's bytes.
       refute Allowlist.matches?(:host, pattern, "x" <> domain)
+    end
+  end
+
+  # The property above found this by generating it, then only sometimes: it
+  # needs `attacker` to coincide with `labels`, which took 26 runs to hit once
+  # and did not recur in 40 local seeds. Pinned here so the pair of claims it
+  # actually makes is checked on every run rather than on a lucky draw — the
+  # real prefix attack is refused, and a name that happens to repeat the
+  # domain's own labels is not an attack at all.
+  describe "a leading-*. entry, on the two names that look alike" do
+    test "refuses the domain as a prefix of someone else's registration" do
+      refute Allowlist.matches?(:host, "*.ex.com", "ex.com.evil.com")
+    end
+
+    test "admits a subdomain that repeats the domain's labels" do
+      assert Allowlist.matches?(:host, "*.lv.m", "lv.m.lv.m")
     end
   end
 
