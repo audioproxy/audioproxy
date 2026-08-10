@@ -156,6 +156,18 @@ signature verification plug → options parser (options string = normalized cach
 writing a helper in a test file, look here — the suite has repeatedly grown its
 tenth copy of something that already existed.
 
+The shared modules, and what a test file is therefore not allowed to write for
+itself:
+
+| Module | Owns | The rule |
+|---|---|---|
+| `AudioProxy.SignedRequest` | Signing key material, the config floor, the URL grammar, conn builders. | An endpoint test starts from `base_config/1`. |
+| `AudioProxy.Eventually` | Waiting for a condition that nothing announces. | A poll loop is imported, never written. |
+
+Promoting another duplicated helper adds a row here and a subsection below. The
+section is meant to grow a row at a time; nothing above needs rewriting to make
+room.
+
 `AudioProxy.SignedRequest` owns the signing preamble every endpoint test shares:
 
 | Function | Holds |
@@ -180,6 +192,26 @@ Two rules that are easy to get wrong:
 `put_config/1` stays an explicit call in each file's `setup`: it writes global
 state, which is what makes `async: false` mandatory, and hiding it would make
 that requirement invisible.
+
+`AudioProxy.Eventually` owns polling. Reach for `assert_receive` first — it
+covers everything that sends a message when it happens — and for the rest:
+
+| Function | Holds |
+|---|---|
+| `wait_until/2` | Polls, flunks on expiry, naming the deadline it exceeded. For a precondition. |
+| `eventually?/2` | Polls, returns a boolean. For a wait that *is* the assertion, including `refute`. |
+| `gone_within?/2`, `alive?/1` | The OS-process pair, via `kill -0`. `gone_within?/2` is `eventually?/2` over `not alive?/1`. |
+
+Two rules, for the two things thirteen local copies disagreed about:
+
+- **The poll loop is imported, not written.** Fourteen authors needing a wait
+  produced fourteen loops at four different intervals with three different
+  failure messages, none of them chosen. The interval lives in the module and
+  nowhere else; a caller that genuinely needs its own gets an option added
+  there rather than a private `defp`.
+- **The deadline stays at the call site.** It is the one part that legitimately
+  varies — 2 s to 10 s, for real reasons — so a file whose budget is not the
+  module's 5 s default passes `@deadline` explicitly, where the test is read.
 
 ## Open questions (decide as they come up)
 
