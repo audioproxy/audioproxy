@@ -16,29 +16,20 @@ defmodule AudioProxy.RequestLoggingIntegrationTest do
   use ExUnit.Case, async: false
 
   import AudioProxy.ConfigHelper
+  import AudioProxy.SignedRequest
   import ExUnit.CaptureLog
 
-  alias AudioProxy.{RawHttp, Signature}
+  alias AudioProxy.RawHttp
 
   @moduletag :integration
   @moduletag tmp_dir: "request_logging_integration"
-
-  @key Base.decode16!("00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF")
-  @salt Base.decode16!("FFEEDDCCBBAA99887766554433221100")
 
   @handler_id {__MODULE__, :probe}
 
   setup %{tmp_dir: tmp_dir} do
     File.write!(Path.join(tmp_dir, "piece.wav"), "RIFF-fake-wav-bytes")
 
-    put_config(%{
-      key: @key,
-      salt: @salt,
-      allow_insecure: false,
-      local_root: tmp_dir,
-      max_src_bytes: 2_000_000_000,
-      max_variant_bytes: 2_000_000_000
-    })
+    put_config(base_config(local_root: tmp_dir))
 
     bandit =
       start_supervised!(
@@ -100,8 +91,6 @@ defmodule AudioProxy.RequestLoggingIntegrationTest do
     assert [_, id] = Regex.run(~r/x-request-id: (\S+)/, head)
     assert String.downcase(log) =~ "request_id=#{id}"
   end
-
-  defp signed(rest), do: "/#{Signature.sign(rest, @key, @salt)}#{rest}"
 
   # Returns the response head, and only returns once the socket has closed —
   # so the `:stop` event has certainly fired by the time a test asserts on it.

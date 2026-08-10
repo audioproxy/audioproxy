@@ -16,15 +16,11 @@ defmodule AudioProxy.TelemetryTest do
   import AudioProxy.CoalesceHelper
   import AudioProxy.ProbeCoalesceHelper
   import AudioProxy.ConfigHelper
+  import AudioProxy.SignedRequest, except: [conn: 3]
   import ExUnit.CaptureLog
   import Plug.Test
 
-  alias AudioProxy.Signature
-
   @moduletag tmp_dir: "telemetry"
-
-  @key Base.decode16!("00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF")
-  @salt Base.decode16!("FFEEDDCCBBAA99887766554433221100")
 
   @fake_opts AudioProxy.FakeFfmpeg.Router.init([])
   @payload_bytes 18
@@ -33,14 +29,7 @@ defmodule AudioProxy.TelemetryTest do
     File.write!(Path.join(tmp_dir, "piece.wav"), "RIFF-fake-wav-bytes")
     File.write!(Path.join(tmp_dir, "notaudio.txt"), "definitely not audio")
 
-    put_config(%{
-      key: @key,
-      salt: @salt,
-      allow_insecure: false,
-      local_root: tmp_dir,
-      max_src_bytes: 2_000_000_000,
-      max_variant_bytes: 2_000_000_000
-    })
+    put_config(base_config(local_root: tmp_dir))
 
     # `cache_status` is only meaningful against a known-empty registry: a
     # coordinator left lingering by another test would turn a `:miss` here
@@ -190,7 +179,7 @@ defmodule AudioProxy.TelemetryTest do
       # counting one would put a request the client was told nothing about into
       # the ratio's denominator.
       rest = "/f:mp3/plain/local://piece.wav"
-      path = "/#{Signature.sign(rest, @key, @salt)}#{rest}"
+      path = signed(rest)
 
       capture_log(fn -> conn(:head, path) |> AudioProxy.FakeFfmpeg.Router.call(@fake_opts) end)
 
@@ -222,7 +211,7 @@ defmodule AudioProxy.TelemetryTest do
   # What the handler *says* is `AudioProxy.LogHandlerTest`'s subject, not this
   # file's — here the log is a side effect to be swallowed.
   defp render(rest) do
-    path = "/#{Signature.sign(rest, @key, @salt)}#{rest}"
+    path = signed(rest)
 
     capture_log(fn -> conn(:get, path) |> AudioProxy.FakeFfmpeg.Router.call(@fake_opts) end)
   end

@@ -57,16 +57,14 @@ defmodule AudioProxy.Source.S3BackendTest do
   import AudioProxy.CoalesceHelper
   import AudioProxy.ProbeCoalesceHelper
   import AudioProxy.ConfigHelper
+  import AudioProxy.SignedRequest, except: [conn: 3]
   import Plug.Test
 
-  alias AudioProxy.{ErrorJSON, S3, Signature}
+  alias AudioProxy.{ErrorJSON, S3}
   alias AudioProxy.Source.S3, as: SourceS3
 
   @moduletag :minio
   @moduletag timeout: 120_000
-
-  @key Base.decode16!("00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF")
-  @salt Base.decode16!("FFEEDDCCBBAA99887766554433221100")
 
   @fake_opts AudioProxy.FakeFfmpeg.Router.init([])
 
@@ -81,28 +79,28 @@ defmodule AudioProxy.Source.S3BackendTest do
   end
 
   setup %{endpoint: endpoint} do
-    put_config(%{
-      key: @key,
-      salt: @salt,
-      allow_insecure: false,
-      presign_ttl: 900,
-      max_src_bytes: 2_000_000_000,
-      max_variant_bytes: 2_000_000_000,
-      # Empty is "everything": the proxy's own credentials are the first gate,
-      # and the allowlist is `AudioProxy.Source.AllowlistTest`'s subject.
-      source_allowlist: [],
-      s3: %{
-        region: "us-east-1",
-        access_key_id: "minioadmin",
-        secret_access_key: "minioadmin",
-        session_token: nil,
-        endpoint: endpoint,
-        # MinIO is reached by hostname and port, so `bucket.minio` would need
-        # DNS nobody configured — same constraint as `AudioProxy.S3Test`.
-        addressing: :path,
-        ca_bundle: nil
-      }
-    })
+    put_config(
+      base_config(
+        # Every source here is `s3://`, so nothing reads a local root — and
+        # pinning it to nil keeps an `AP_LOCAL_ROOT` in the environment out.
+        local_root: nil,
+        presign_ttl: 900,
+        # Empty is "everything": the proxy's own credentials are the first gate,
+        # and the allowlist is `AudioProxy.Source.AllowlistTest`'s subject.
+        source_allowlist: [],
+        s3: %{
+          region: "us-east-1",
+          access_key_id: "minioadmin",
+          secret_access_key: "minioadmin",
+          session_token: nil,
+          endpoint: endpoint,
+          # MinIO is reached by hostname and port, so `bucket.minio` would need
+          # DNS nobody configured — same constraint as `AudioProxy.S3Test`.
+          addressing: :path,
+          ca_bundle: nil
+        }
+      )
+    )
 
     ensure_bucket!()
     reset_coordinators()
@@ -307,16 +305,7 @@ defmodule AudioProxy.Source.S3BackendTest do
   defp info(key), do: request("/info/plain/s3://#{@bucket}/#{key}")
 
   defp request(rest) do
-    path = "/#{Signature.sign(rest, @key, @salt)}#{rest}"
-
-    conn(:get, path) |> AudioProxy.FakeFfmpeg.Router.call(@fake_opts)
-  end
-
-  defp header(conn, name) do
-    case Plug.Conn.get_resp_header(conn, name) do
-      [value | _rest] -> value
-      [] -> nil
-    end
+    conn(:get, signed(rest)) |> AudioProxy.FakeFfmpeg.Router.call(@fake_opts)
   end
 
   ## Fixture

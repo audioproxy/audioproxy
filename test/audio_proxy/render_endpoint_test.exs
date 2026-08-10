@@ -18,15 +18,14 @@ defmodule AudioProxy.RenderEndpointTest do
   import AudioProxy.CoalesceHelper
   import AudioProxy.ProbeCoalesceHelper
   import AudioProxy.ConfigHelper
+  import AudioProxy.SignedRequest, except: [conn: 3]
   import Plug.Conn
   import Plug.Test
 
   alias AudioProxy.Signature
+  alias AudioProxy.SignedRequest
 
   @moduletag tmp_dir: "render_endpoint"
-
-  @key Base.decode16!("00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF")
-  @salt Base.decode16!("FFEEDDCCBBAA99887766554433221100")
 
   @opts AudioProxy.Router.init([])
   @fake_opts AudioProxy.FakeFfmpeg.Router.init([])
@@ -47,16 +46,7 @@ defmodule AudioProxy.RenderEndpointTest do
       File.write!(Path.join(tmp_dir, name), "fake-bytes")
     end
 
-    # Pin every config value the chain reads: a boot-time AP_MAX_SRC_BYTES in
-    # the environment must not be able to flip these tests' 501s to 413s.
-    put_config(%{
-      key: @key,
-      salt: @salt,
-      allow_insecure: false,
-      local_root: tmp_dir,
-      max_src_bytes: 2_000_000_000,
-      max_variant_bytes: 2_000_000_000
-    })
+    put_config(base_config(local_root: tmp_dir))
 
     # Every request below is its own render unless the test says otherwise —
     # see `AudioProxy.CoalesceHelper` for why that needs saying.
@@ -78,13 +68,8 @@ defmodule AudioProxy.RenderEndpointTest do
   end
 
   defp request(method, path, headers \\ []) do
-    headers
-    |> Enum.reduce(conn(method, path), fn {k, v}, c -> put_req_header(c, k, v) end)
+    SignedRequest.conn(method, path, headers)
     |> AudioProxy.FakeFfmpeg.Router.call(@fake_opts)
-  end
-
-  defp signed(rest) do
-    "/#{Signature.sign(rest, @key, @salt)}#{rest}"
   end
 
   defp quoted_etag(options, source) do
@@ -105,7 +90,7 @@ defmodule AudioProxy.RenderEndpointTest do
 
     test "a tampered path is 401" do
       rest = "/f:opus/br:96/plain/local://piece.wav"
-      sig = Signature.sign(rest, @key, @salt)
+      sig = Signature.sign(rest, key(), salt())
 
       assert get("/#{sig}/f:opus/br:128/plain/local://piece.wav").status == 401
     end

@@ -18,14 +18,12 @@ defmodule AudioProxy.VariantCacheStreamTest do
   use ExUnit.Case, async: false
 
   import AudioProxy.ConfigHelper
+  import AudioProxy.SignedRequest
 
-  alias AudioProxy.{CacheKey, RawHttp, Signature, VariantStore}
+  alias AudioProxy.{CacheKey, RawHttp, VariantStore}
 
   @moduletag :integration
   @moduletag tmp_dir: "variant_cache_stream"
-
-  @key Base.decode16!("00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF")
-  @salt Base.decode16!("FFEEDDCCBBAA99887766554433221100")
 
   @deadline 5_000
 
@@ -44,16 +42,9 @@ defmodule AudioProxy.VariantCacheStreamTest do
     store = Path.join(tmp_dir, "store")
     File.mkdir_p!(store)
 
-    put_config(%{
-      key: @key,
-      salt: @salt,
-      allow_insecure: false,
-      local_root: tmp_dir,
-      max_src_bytes: 2_000_000_000,
-      max_variant_bytes: 2_000_000_000,
-      variant_store: {:file, store},
-      serve_mode: :proxy
-    })
+    put_config(
+      base_config(local_root: tmp_dir, variant_store: {:file, store}, serve_mode: :proxy)
+    )
 
     bandit =
       start_supervised!(
@@ -63,8 +54,6 @@ defmodule AudioProxy.VariantCacheStreamTest do
     {:ok, {{127, 0, 0, 1}, port}} = ThousandIsland.listener_info(bandit)
     {:ok, port: port}
   end
-
-  defp signed(rest), do: "/#{Signature.sign(rest, @key, @salt)}#{rest}"
 
   defp store!(bytes) do
     key = CacheKey.derive!(@options, "local://cached.wav")

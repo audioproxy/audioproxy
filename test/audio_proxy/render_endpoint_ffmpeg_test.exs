@@ -21,17 +21,15 @@ defmodule AudioProxy.RenderEndpointFfmpegTest do
   import AudioProxy.CoalesceHelper
   import AudioProxy.ProbeCoalesceHelper
   import AudioProxy.ConfigHelper
+  import AudioProxy.SignedRequest
 
-  alias AudioProxy.{RawHttp, Signature}
+  alias AudioProxy.RawHttp
 
   @moduletag :ffmpeg
 
   # Encoding the long fixture is what the streaming assertions need to be
   # slower than a single mailbox round trip; 60 s is the ExUnit default.
   @moduletag timeout: 120_000
-
-  @key Base.decode16!("00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF")
-  @salt Base.decode16!("FFEEDDCCBBAA99887766554433221100")
 
   @deadline 60_000
 
@@ -64,15 +62,7 @@ defmodule AudioProxy.RenderEndpointFfmpegTest do
   end
 
   setup %{root: root} do
-    put_config(%{
-      key: @key,
-      salt: @salt,
-      allow_insecure: false,
-      local_root: root,
-      max_src_bytes: 2_000_000_000,
-      max_variant_bytes: 2_000_000_000,
-      render_timeout: 60
-    })
+    put_config(base_config(local_root: root, render_timeout: 60))
 
     reset_coordinators()
     reset_probes()
@@ -146,7 +136,7 @@ defmodule AudioProxy.RenderEndpointFfmpegTest do
       # request lands while ffmpeg is still encoding, so it exercises the
       # backlog-then-live seam rather than the post-completion linger.
       rest = "/f:mp3/plain/local://long.wav"
-      path = "/#{Signature.sign(rest, @key, @salt)}#{rest}"
+      path = signed(rest)
 
       first = Task.async(fn -> path |> RawHttp.get(port) |> RawHttp.read(@deadline) end)
       Process.sleep(500)
@@ -226,7 +216,7 @@ defmodule AudioProxy.RenderEndpointFfmpegTest do
   end
 
   defp render(rest, port) do
-    "/#{Signature.sign(rest, @key, @salt)}#{rest}"
+    signed(rest)
     |> RawHttp.get(port)
     |> RawHttp.read(@deadline)
   end

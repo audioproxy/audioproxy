@@ -2,19 +2,17 @@ defmodule AudioProxy.Plugs.VerifySignatureTest do
   use ExUnit.Case, async: false
 
   import AudioProxy.ConfigHelper
+  import AudioProxy.SignedRequest, except: [conn: 3]
   import Plug.Conn
   import Plug.Test
 
   alias AudioProxy.Plugs.VerifySignature
   alias AudioProxy.Signature
 
-  @key Base.decode16!("00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF")
-  @salt Base.decode16!("FFEEDDCCBBAA99887766554433221100")
-
   @rest "/f:opus/br:96/plain/s3://masters/2026/piece-final.wav"
 
   setup do
-    put_config(%{key: @key, salt: @salt, allow_insecure: false})
+    put_config(%{key: key(), salt: salt(), allow_insecure: false})
     :ok
   end
 
@@ -24,21 +22,21 @@ defmodule AudioProxy.Plugs.VerifySignatureTest do
 
   describe "a valid signature" do
     test "passes the conn through unhalted" do
-      conn = call("/#{Signature.sign(@rest, @key, @salt)}#{@rest}")
+      conn = call("/#{Signature.sign(@rest, key(), salt())}#{@rest}")
 
       assert conn.status == nil
       refute conn.halted
     end
 
     test "stashes the rest-of-path in assigns for downstream parsers" do
-      conn = call("/#{Signature.sign(@rest, @key, @salt)}#{@rest}")
+      conn = call("/#{Signature.sign(@rest, key(), salt())}#{@rest}")
 
       assert conn.assigns[:rest_of_path] == @rest
     end
 
     test "verifies the raw path, not a re-encoded form" do
       rest = "/f:mp3/plain/s3://bucket/a%20track.wav"
-      conn = call("/#{Signature.sign(rest, @key, @salt)}#{rest}")
+      conn = call(signed(rest))
 
       refute conn.halted
       assert conn.assigns[:rest_of_path] == rest
@@ -60,7 +58,8 @@ defmodule AudioProxy.Plugs.VerifySignatureTest do
     end
 
     test "a tampered rest-of-path is 401" do
-      conn = call("/#{Signature.sign(@rest, @key, @salt)}/f:opus/br:128/plain/s3://masters/x.wav")
+      conn =
+        call("/#{Signature.sign(@rest, key(), salt())}/f:opus/br:128/plain/s3://masters/x.wav")
 
       assert conn.status == 401
     end
@@ -116,7 +115,7 @@ defmodule AudioProxy.Plugs.VerifySignatureTest do
     end
 
     test "a signed request reaches downstream" do
-      sig = Signature.sign(@rest, @key, @salt)
+      sig = Signature.sign(@rest, key(), salt())
       conn = conn(:get, "/#{sig}#{@rest}") |> BoundaryPipeline.call([])
 
       assert conn.status == 200
@@ -126,7 +125,7 @@ defmodule AudioProxy.Plugs.VerifySignatureTest do
 
   describe "signature coverage invariants" do
     test "the query string is not covered by the signature" do
-      sig = Signature.sign(@rest, @key, @salt)
+      sig = Signature.sign(@rest, key(), salt())
       conn = call("/#{sig}#{@rest}?anything=x")
 
       # Pinned deliberately: verification ignores the query, so downstream
@@ -136,14 +135,14 @@ defmodule AudioProxy.Plugs.VerifySignatureTest do
     end
 
     test "the HTTP method is not covered by the signature" do
-      sig = Signature.sign(@rest, @key, @salt)
+      sig = Signature.sign(@rest, key(), salt())
       conn = conn(:post, "/#{sig}#{@rest}") |> VerifySignature.call([])
 
       refute conn.halted
     end
 
     test "a request for /{sig}/ carries an empty rest-of-path" do
-      sig = Signature.sign("/", @key, @salt)
+      sig = Signature.sign("/", key(), salt())
       conn = call("/#{sig}/")
 
       refute conn.halted

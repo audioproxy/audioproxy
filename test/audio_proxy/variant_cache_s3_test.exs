@@ -17,10 +17,11 @@ defmodule AudioProxy.VariantCacheS3Test do
   use ExUnit.Case, async: false
 
   import AudioProxy.ConfigHelper
+  import AudioProxy.SignedRequest, except: [conn: 3]
   import Plug.Conn
   import Plug.Test
 
-  alias AudioProxy.{CacheKey, MinioHelper, Signature, VariantStore}
+  alias AudioProxy.{CacheKey, MinioHelper, VariantStore}
 
   @moduletag :minio
   @moduletag timeout: 120_000
@@ -29,9 +30,6 @@ defmodule AudioProxy.VariantCacheS3Test do
   @moduletag tmp_dir: "variant_cache_s3"
 
   @bucket "audio-proxy-variants"
-
-  @key Base.decode16!("00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF")
-  @salt Base.decode16!("FFEEDDCCBBAA99887766554433221100")
 
   @opts AudioProxy.Router.init([])
 
@@ -47,8 +45,8 @@ defmodule AudioProxy.VariantCacheS3Test do
 
   setup %{tmp_dir: tmp_dir} do
     MinioHelper.configure!(%{
-      key: @key,
-      salt: @salt,
+      key: key(),
+      salt: salt(),
       allow_insecure: false,
       local_root: tmp_dir,
       variant_store: {:s3, @bucket},
@@ -72,7 +70,7 @@ defmodule AudioProxy.VariantCacheS3Test do
   end
 
   defp request(rest) do
-    "/#{Signature.sign(rest, @key, @salt)}#{rest}"
+    signed(rest)
     |> then(&conn(:get, &1))
     |> AudioProxy.Router.call(@opts)
   end

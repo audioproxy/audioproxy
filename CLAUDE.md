@@ -150,6 +150,37 @@ signature verification plug → options parser (options string = normalized cach
 - **Slices are sized for review.** Target well under ~500 changed LOC per PR, tests included — the slices merged so far ran past 1000, which is too much to review confidently. When planning, prefer more, smaller changes split along module seams (contract vs. backends, mechanism vs. HTTP wiring, happy path vs. hardening). When implementing, a change heading past the target gets split or lands as stacked PRs rather than growing the diff.
 - **Commits are atomic and follow [Conventional Commits](https://www.conventionalcommits.org).** One logical change per commit, each compiling with `mix test` green on its own — never a broken intermediate state that a later commit repairs. Scopes track the module or area touched (`feat(config):`, `feat(http):`, `build(devcontainer):`). Prefer a vertical slice (code plus its tests) over splitting code from the tests that cover it. Types in use: `feat`, `fix`, `refactor`, `perf`, `test`, `docs`, `build`, `ci`, `chore`.
 
+## Test support
+
+`test/support/` is where anything more than one test file needs lives. Before
+writing a helper in a test file, look here — the suite has repeatedly grown its
+tenth copy of something that already existed.
+
+`AudioProxy.SignedRequest` owns the signing preamble every endpoint test shares:
+
+| Function | Holds |
+|---|---|
+| `key/0`, `salt/0` | The suite's signing key material. **Fixed test vectors, not secrets** — never loaded by `lib/`, never an operational default. |
+| `base_config/1` | The config floor, with the caller's overrides merged over it. Requires `local_root`. Carries the reason the floor exists. |
+| `signed/1` | A request remainder to a signed path, per API doc §2. Deliberately an independent implementation of the grammar, so a divergence from `lib/` fails a test. |
+| `conn/3` | A `Plug.Test` conn with request headers folded in. Call it qualified; a file importing `Plug.Test` too imports this module `except: [conn: 3]`. |
+| `header/2` | The first response header, or `nil`. |
+
+Two rules that are easy to get wrong:
+
+- **A new endpoint test starts from `base_config/1`, not a fresh literal map.**
+  The floor pins every config value the request chain reads so that an
+  `AP_MAX_SRC_BYTES` in a developer's shell cannot flip a 501 assertion into a
+  413 failure. A file that writes its own map opts out of that silently.
+- **A value the test is *about* goes in the overrides, where a reader sees it.**
+  `base_config(local_root: tmp_dir, probe_timeout: 1)` reads as floor-plus-subject.
+  Never bury a test's subject inside the floor, and never widen the floor to
+  accommodate one file.
+
+`put_config/1` stays an explicit call in each file's `setup`: it writes global
+state, which is what makes `async: false` mandatory, and hiding it would make
+that requirement invisible.
+
 ## Open questions (decide as they come up)
 
 - ~~Project/binary name~~ — settled for now: OTP app `audio_proxy`, still a working title. Renaming is a cheap find/replace while the project is small.

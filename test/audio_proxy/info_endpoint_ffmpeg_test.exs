@@ -16,15 +16,15 @@ defmodule AudioProxy.InfoEndpointFfmpegTest do
   use ExUnit.Case, async: false
 
   import AudioProxy.ConfigHelper
+  # `header/2` here reads a raw HTTP head with a regex, which is a different
+  # job from the helper's conn-based one; this file keeps its own.
+  import AudioProxy.SignedRequest, except: [header: 2]
   import AudioProxy.ProbeCoalesceHelper
 
-  alias AudioProxy.{RawHttp, Signature}
+  alias AudioProxy.RawHttp
 
   @moduletag :ffmpeg
   @moduletag timeout: 120_000
-
-  @key Base.decode16!("00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF")
-  @salt Base.decode16!("FFEEDDCCBBAA99887766554433221100")
 
   @duration 3
 
@@ -65,15 +65,7 @@ defmodule AudioProxy.InfoEndpointFfmpegTest do
   end
 
   setup %{root: root} do
-    put_config(%{
-      key: @key,
-      salt: @salt,
-      allow_insecure: false,
-      local_root: root,
-      max_src_bytes: 2_000_000_000,
-      max_variant_bytes: 2_000_000_000,
-      probe_timeout: 30
-    })
+    put_config(base_config(local_root: root, probe_timeout: 30))
 
     reset_probes()
 
@@ -173,7 +165,7 @@ defmodule AudioProxy.InfoEndpointFfmpegTest do
   # is the right reader: it stops at the declared length rather than waiting on
   # the close, which keeps a wrong length visible as a hang rather than hidden.
   defp request(rest, %{port: port}, opts \\ []) do
-    "/#{Signature.sign(rest, @key, @salt)}#{rest}"
+    signed(rest)
     |> RawHttp.get(port, opts)
     |> RawHttp.read_one()
   end

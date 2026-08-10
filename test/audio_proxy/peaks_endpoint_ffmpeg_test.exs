@@ -23,14 +23,12 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
   import AudioProxy.CoalesceHelper
   import AudioProxy.ProbeCoalesceHelper
   import AudioProxy.ConfigHelper
+  import AudioProxy.SignedRequest
 
-  alias AudioProxy.{RawHttp, Signature}
+  alias AudioProxy.RawHttp
 
   @moduletag :ffmpeg
   @moduletag timeout: 120_000
-
-  @key Base.decode16!("00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF")
-  @salt Base.decode16!("FFEEDDCCBBAA99887766554433221100")
 
   @deadline 60_000
 
@@ -85,17 +83,14 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
     store = Path.join(tmp_dir, "store")
     File.mkdir_p!(store)
 
-    put_config(%{
-      key: @key,
-      salt: @salt,
-      allow_insecure: false,
-      local_root: root,
-      max_src_bytes: 2_000_000_000,
-      max_variant_bytes: 2_000_000_000,
-      render_timeout: 60,
-      variant_store: {:file, store},
-      serve_mode: :proxy
-    })
+    put_config(
+      base_config(
+        local_root: root,
+        render_timeout: 60,
+        variant_store: {:file, store},
+        serve_mode: :proxy
+      )
+    )
 
     reset_coordinators()
     reset_probes()
@@ -326,7 +321,7 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
   end
 
   defp render(rest, port) do
-    "/#{Signature.sign(rest, @key, @salt)}#{rest}"
+    signed(rest)
     |> RawHttp.get(port)
     |> RawHttp.read(@deadline)
   end

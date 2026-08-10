@@ -19,15 +19,12 @@ defmodule AudioProxy.VariantCacheTest do
   import AudioProxy.CoalesceHelper
   import AudioProxy.ProbeCoalesceHelper
   import AudioProxy.ConfigHelper
+  import AudioProxy.SignedRequest
   import Plug.Conn
-  import Plug.Test
 
-  alias AudioProxy.{CacheKey, PresigningStore, Signature, VariantStore}
+  alias AudioProxy.{CacheKey, PresigningStore, SignedRequest, VariantStore}
 
   @moduletag tmp_dir: "variant_cache"
-
-  @key Base.decode16!("00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF")
-  @salt Base.decode16!("FFEEDDCCBBAA99887766554433221100")
 
   @fake_opts AudioProxy.FakeFfmpeg.Router.init([])
 
@@ -52,16 +49,9 @@ defmodule AudioProxy.VariantCacheTest do
     File.mkdir_p!(store)
     File.write!(Path.join(tmp_dir, "piece.wav"), "RIFF-fake-wav-bytes")
 
-    put_config(%{
-      key: @key,
-      salt: @salt,
-      allow_insecure: false,
-      local_root: tmp_dir,
-      max_src_bytes: 2_000_000_000,
-      max_variant_bytes: 2_000_000_000,
-      variant_store: {:file, store},
-      serve_mode: :proxy
-    })
+    put_config(
+      base_config(local_root: tmp_dir, variant_store: {:file, store}, serve_mode: :proxy)
+    )
 
     reset_coordinators()
     reset_probes()
@@ -72,11 +62,8 @@ defmodule AudioProxy.VariantCacheTest do
 
   ## Helpers
 
-  defp signed(rest), do: "/#{Signature.sign(rest, @key, @salt)}#{rest}"
-
   defp request(path, headers \\ []) do
-    headers
-    |> Enum.reduce(conn(:get, path), fn {k, v}, c -> put_req_header(c, k, v) end)
+    SignedRequest.conn(:get, path, headers)
     |> AudioProxy.FakeFfmpeg.Router.call(@fake_opts)
   end
 

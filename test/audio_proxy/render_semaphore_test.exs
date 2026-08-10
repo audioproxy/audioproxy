@@ -22,16 +22,14 @@ defmodule AudioProxy.RenderSemaphoreTest do
   import AudioProxy.CoalesceHelper
   import AudioProxy.ProbeCoalesceHelper
   import AudioProxy.ConfigHelper
+  import AudioProxy.SignedRequest, except: [conn: 3]
   import Plug.Conn
   import Plug.Test
 
-  alias AudioProxy.{RenderCoordinator, RenderHarness, Semaphore, Signature, VariantStore}
+  alias AudioProxy.{RenderCoordinator, RenderHarness, Semaphore, VariantStore}
   alias AudioProxy.Ffmpeg.RenderSupervisor
 
   @moduletag tmp_dir: "render_semaphore"
-
-  @key Base.decode16!("00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF")
-  @salt Base.decode16!("FFEEDDCCBBAA99887766554433221100")
 
   @fake_opts AudioProxy.FakeFfmpeg.Router.init([])
 
@@ -51,14 +49,7 @@ defmodule AudioProxy.RenderSemaphoreTest do
     File.write!(Path.join(tmp_dir, "hang.wav"), "RIFF-fake-wav-bytes")
     File.write!(Path.join(tmp_dir, "other.wav"), "RIFF-fake-wav-bytes")
 
-    put_config(%{
-      key: @key,
-      salt: @salt,
-      allow_insecure: false,
-      local_root: tmp_dir,
-      max_src_bytes: 2_000_000_000,
-      max_variant_bytes: 2_000_000_000
-    })
+    put_config(base_config(local_root: tmp_dir))
 
     reset_coordinators()
     reset_probes()
@@ -468,7 +459,7 @@ defmodule AudioProxy.RenderSemaphoreTest do
   defp joined(acc), do: acc.chunks |> Enum.reverse() |> IO.iodata_to_binary()
 
   defp render(rest) do
-    signed = "/#{Signature.sign(rest, @key, @salt)}#{rest}"
+    signed = signed(rest)
 
     conn(:get, signed) |> AudioProxy.FakeFfmpeg.Router.call(@fake_opts)
   end
