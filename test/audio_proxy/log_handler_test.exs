@@ -27,15 +27,11 @@ defmodule AudioProxy.LogHandlerTest do
   import AudioProxy.CoalesceHelper
   import AudioProxy.ProbeCoalesceHelper
   import AudioProxy.ConfigHelper
+  import AudioProxy.SignedRequest, except: [conn: 3]
   import ExUnit.CaptureLog
   import Plug.Test
 
-  alias AudioProxy.Signature
-
   @moduletag tmp_dir: "log_handler"
-
-  @key Base.decode16!("00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF")
-  @salt Base.decode16!("FFEEDDCCBBAA99887766554433221100")
 
   @opts AudioProxy.Router.init([])
   @fake_opts AudioProxy.FakeFfmpeg.Router.init([])
@@ -49,14 +45,7 @@ defmodule AudioProxy.LogHandlerTest do
     File.write!(Path.join(tmp_dir, "notaudio.txt"), "definitely not audio")
     File.write!(Path.join(tmp_dir, "presigned.wav"), "RIFF")
 
-    put_config(%{
-      key: @key,
-      salt: @salt,
-      allow_insecure: false,
-      local_root: tmp_dir,
-      max_src_bytes: 2_000_000_000,
-      max_variant_bytes: 2_000_000_000
-    })
+    put_config(base_config(local_root: tmp_dir))
 
     # `cache=` is only meaningful against a known-empty registry.
     reset_coordinators()
@@ -369,8 +358,6 @@ defmodule AudioProxy.LogHandlerTest do
   defp get(path), do: conn(:get, path) |> AudioProxy.Router.call(@opts)
 
   defp render(path), do: conn(:get, path) |> AudioProxy.FakeFfmpeg.Router.call(@fake_opts)
-
-  defp signed(rest), do: "/#{Signature.sign(rest, @key, @salt)}#{rest}"
 
   # The two server-side statuses the plug chain cannot be talked into from a
   # URL: no source is missing enough to time out, and no request produces a

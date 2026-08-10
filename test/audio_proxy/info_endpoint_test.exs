@@ -15,16 +15,13 @@ defmodule AudioProxy.InfoEndpointTest do
   use ExUnit.Case, async: false
 
   import AudioProxy.ConfigHelper
+  import AudioProxy.SignedRequest, except: [conn: 3]
   import AudioProxy.ProbeCoalesceHelper
-  import Plug.Conn
   import Plug.Test
 
-  alias AudioProxy.Signature
+  alias AudioProxy.SignedRequest
 
   @moduletag tmp_dir: "info_endpoint"
-
-  @key Base.decode16!("00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF")
-  @salt Base.decode16!("FFEEDDCCBBAA99887766554433221100")
 
   @opts AudioProxy.Router.init([])
   @fake_opts AudioProxy.FakeFfmpeg.Router.init([])
@@ -41,24 +38,19 @@ defmodule AudioProxy.InfoEndpointTest do
     File.write!(Path.join(tmp_dir, "video.mp4"), "fake-bytes")
     File.write!(Path.join(tmp_dir, "cover.mp3"), "fake-bytes")
 
-    put_config(%{
-      key: @key,
-      salt: @salt,
-      allow_insecure: false,
-      local_root: tmp_dir,
-      max_src_bytes: 2_000_000_000,
-      max_variant_bytes: 2_000_000_000,
-      # Short enough that the timeout test is not the slowest in the suite,
-      # long enough that a loaded machine does not trip it spuriously.
-      probe_timeout: 1
-    })
+    put_config(
+      base_config(
+        local_root: tmp_dir,
+        # Short enough that the timeout test is not the slowest in the suite,
+        # long enough that a loaded machine does not trip it spuriously.
+        probe_timeout: 1
+      )
+    )
 
     reset_probes()
 
     :ok
   end
-
-  defp signed(rest), do: "/#{Signature.sign(rest, @key, @salt)}#{rest}"
 
   # The production router, for everything that halts before the action.
   defp get(path), do: conn(:get, path) |> AudioProxy.Router.call(@opts)
@@ -67,16 +59,8 @@ defmodule AudioProxy.InfoEndpointTest do
   defp info(path, headers \\ []), do: request(:get, path, headers)
 
   defp request(method, path, headers) do
-    headers
-    |> Enum.reduce(conn(method, path), fn {k, v}, c -> put_req_header(c, k, v) end)
+    SignedRequest.conn(method, path, headers)
     |> AudioProxy.FakeFfmpeg.Router.call(@fake_opts)
-  end
-
-  defp header(conn, name) do
-    case get_resp_header(conn, name) do
-      [value | _rest] -> value
-      [] -> nil
-    end
   end
 
   describe "the §4 object" do

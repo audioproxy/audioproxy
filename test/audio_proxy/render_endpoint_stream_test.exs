@@ -24,15 +24,13 @@ defmodule AudioProxy.RenderEndpointStreamTest do
   use ExUnit.Case, async: false
 
   import AudioProxy.ConfigHelper
+  import AudioProxy.SignedRequest
   import AudioProxy.ProbeCoalesceHelper
 
-  alias AudioProxy.{RawHttp, Signature}
+  alias AudioProxy.RawHttp
 
   @moduletag :integration
   @moduletag tmp_dir: "render_stream"
-
-  @key Base.decode16!("00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF")
-  @salt Base.decode16!("FFEEDDCCBBAA99887766554433221100")
 
   @payload "fake-audio-payload"
 
@@ -45,16 +43,13 @@ defmodule AudioProxy.RenderEndpointStreamTest do
       File.write!(Path.join(tmp_dir, name), "RIFF")
     end
 
-    put_config(%{
-      key: @key,
-      salt: @salt,
-      allow_insecure: false,
-      local_root: tmp_dir,
-      max_src_bytes: 2_000_000_000,
-      max_variant_bytes: 2_000_000_000,
-      # One second, so the pre-stream timeout is a test and not a coffee break.
-      render_timeout: 1
-    })
+    put_config(
+      base_config(
+        local_root: tmp_dir,
+        # One second, so the pre-stream timeout is a test and not a coffee break.
+        render_timeout: 1
+      )
+    )
 
     reset_probes()
 
@@ -199,8 +194,6 @@ defmodule AudioProxy.RenderEndpointStreamTest do
       assert RawHttp.complete?(second.body)
     end
   end
-
-  defp signed(rest), do: "/#{Signature.sign(rest, @key, @salt)}#{rest}"
 
   defp request(rest, port) do
     RawHttp.get(signed(rest), port)

@@ -20,13 +20,11 @@ defmodule AudioProxy.Plugs.VerifySignatureIntegrationTest do
   use ExUnit.Case, async: false
 
   import AudioProxy.ConfigHelper
+  import AudioProxy.SignedRequest
 
   alias AudioProxy.Signature
 
   @moduletag :integration
-
-  @key Base.decode16!("00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF")
-  @salt Base.decode16!("FFEEDDCCBBAA99887766554433221100")
 
   defmodule TestPlug do
     @moduledoc false
@@ -56,7 +54,7 @@ defmodule AudioProxy.Plugs.VerifySignatureIntegrationTest do
   end
 
   setup do
-    put_config(%{key: @key, salt: @salt, allow_insecure: false})
+    put_config(%{key: key(), salt: salt(), allow_insecure: false})
 
     bandit =
       start_supervised!({Bandit, plug: TestPlug, scheme: :http, ip: {127, 0, 0, 1}, port: 0})
@@ -67,7 +65,7 @@ defmodule AudioProxy.Plugs.VerifySignatureIntegrationTest do
 
   test "a signed URL with percent-escapes verifies and echoes the raw signed bytes", %{port: port} do
     rest = "/f:mp3/plain/s3://bucket/a%20track%2Ffinal.wav"
-    sig = Signature.sign(rest, @key, @salt)
+    sig = Signature.sign(rest, key(), salt())
 
     assert {200, body} = get("/#{sig}#{rest}", port)
 
@@ -84,7 +82,7 @@ defmodule AudioProxy.Plugs.VerifySignatureIntegrationTest do
   test "a plain signed URL verifies", %{port: port} do
     rest = "/f:opus/br:96/plain/s3://masters/2026/piece-final.wav"
 
-    assert {200, body} = get("/#{Signature.sign(rest, @key, @salt)}#{rest}", port)
+    assert {200, body} = get("/#{Signature.sign(rest, key(), salt())}#{rest}", port)
     assert String.starts_with?(body, rest)
   end
 
@@ -94,7 +92,7 @@ defmodule AudioProxy.Plugs.VerifySignatureIntegrationTest do
 
   test "a tampered escape sequence is rejected", %{port: port} do
     rest = "/f:mp3/plain/s3://bucket/a%20track.wav"
-    sig = Signature.sign(rest, @key, @salt)
+    sig = Signature.sign(rest, key(), salt())
 
     assert {401, _body} = get("/#{sig}/f:mp3/plain/s3://bucket/a%21track.wav", port)
   end

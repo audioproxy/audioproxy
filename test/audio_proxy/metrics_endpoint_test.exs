@@ -21,6 +21,7 @@ defmodule AudioProxy.MetricsEndpointTest do
 
   import AudioProxy.CoalesceHelper
   import AudioProxy.ConfigHelper
+  import AudioProxy.SignedRequest, except: [conn: 3]
   import ExUnit.CaptureLog
   import Plug.Conn, only: [get_resp_header: 2]
   import Plug.Test
@@ -28,9 +29,6 @@ defmodule AudioProxy.MetricsEndpointTest do
   alias AudioProxy.{Metrics, RawHttp, Signature}
 
   @moduletag tmp_dir: "metrics_endpoint"
-
-  @key Base.decode16!("00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF")
-  @salt Base.decode16!("FFEEDDCCBBAA99887766554433221100")
 
   @metrics_opts AudioProxy.Metrics.Router.init([])
   @public_opts AudioProxy.Router.init([])
@@ -160,14 +158,7 @@ defmodule AudioProxy.MetricsEndpointTest do
     setup %{tmp_dir: tmp_dir} do
       File.write!(Path.join(tmp_dir, "piece.wav"), "RIFF-fake-wav-bytes")
 
-      put_config(%{
-        key: @key,
-        salt: @salt,
-        allow_insecure: false,
-        local_root: tmp_dir,
-        max_src_bytes: 2_000_000_000,
-        max_variant_bytes: 2_000_000_000
-      })
+      put_config(base_config(local_root: tmp_dir))
 
       # `outcome="miss"` is only meaningful against a known-empty registry: a
       # coordinator left lingering by another test file asking for the same
@@ -188,7 +179,7 @@ defmodule AudioProxy.MetricsEndpointTest do
       Metrics.reset()
 
       rest = "/f:mp3/cb:metrics-e2e/plain/local://piece.wav"
-      path = "/#{Signature.sign(rest, @key, @salt)}#{rest}"
+      path = "/#{Signature.sign(rest, key(), salt())}#{rest}"
 
       capture_log(fn ->
         socket = RawHttp.get(path, public)

@@ -21,6 +21,7 @@ defmodule AudioProxy.ProbeEndpointTest do
 
   import AudioProxy.CoalesceHelper
   import AudioProxy.ConfigHelper
+  import AudioProxy.SignedRequest, except: [conn: 3]
   import AudioProxy.ProbeCoalesceHelper
   import Plug.Conn
   import Plug.Test
@@ -31,14 +32,10 @@ defmodule AudioProxy.ProbeEndpointTest do
     ProbeLimiter,
     RenderCoordinator,
     Semaphore,
-    Signature,
     VariantStore
   }
 
   @moduletag tmp_dir: "probe_endpoint"
-
-  @key Base.decode16!("00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF")
-  @salt Base.decode16!("FFEEDDCCBBAA99887766554433221100")
 
   @opts AudioProxy.CountingProbe.Router.init([])
 
@@ -56,16 +53,7 @@ defmodule AudioProxy.ProbeEndpointTest do
     # the store takes, so a test that ends while one is running hands it to
     # whatever configuration the next test installs — which is a warning about
     # nothing, in a suite where an unexplained warning is the expensive kind.
-    put_config(%{
-      key: @key,
-      salt: @salt,
-      allow_insecure: false,
-      local_root: tmp_dir,
-      max_src_bytes: 2_000_000_000,
-      max_variant_bytes: 2_000_000_000,
-      max_probe_concurrency: 8,
-      variant_store: nil
-    })
+    put_config(base_config(local_root: tmp_dir, max_probe_concurrency: 8, variant_store: nil))
 
     reset_coordinators()
     reset_probes()
@@ -233,8 +221,6 @@ defmodule AudioProxy.ProbeEndpointTest do
   defp get(rest) do
     rest |> signed() |> then(&conn(:get, &1)) |> AudioProxy.CountingProbe.Router.call(@opts)
   end
-
-  defp signed(rest), do: "/#{Signature.sign(rest, @key, @salt)}#{rest}"
 
   defp burst(count, request) do
     1..count
