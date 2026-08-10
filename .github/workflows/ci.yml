@@ -441,14 +441,21 @@ jobs:
       # A release names a version in two places. If they disagree, the image
       # would carry a version label nobody can trace back — fail before pushing,
       # not after.
+      #
+      # The extraction is `bin/project-version` rather than an expression
+      # inline here, and that is the whole lesson of v0.4.0's first two tags.
+      # This step runs *only* on tags, so an expression that quietly stops
+      # matching `mix.exs` cannot fail until a release: when `mix.exs` moved
+      # its number into a `@version` attribute, the grep for `version: "…"`
+      # returned nothing and the tag was compared against an empty string.
+      # `bin/check-hex-package` calls the same script on every pull request, so
+      # the extraction is now exercised long before a tag depends on it.
       - name: Assert mix.exs version matches the tag
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           set -euo pipefail
           tag_version="${GITHUB_REF_NAME#v}"
-          # Same reason as above: no `| head -1` under pipefail. `awk NR==1`
-          # consumes its whole input, so nothing upstream ever sees EPIPE.
-          mix_version=$(grep -oE 'version:[[:space:]]*"[^"]+"' mix.exs | awk 'NR==1' | grep -oE '"[^"]+"' | tr -d '"')
+          mix_version=$(bin/project-version)
           echo "tag: $tag_version, mix.exs: $mix_version"
           if [ "$tag_version" != "$mix_version" ]; then
             echo "::error::tag $GITHUB_REF_NAME does not match mix.exs version $mix_version"

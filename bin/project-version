@@ -1,0 +1,47 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Prints the version in `mix.exs`, and nothing else.
+#
+#   bin/project-version        # => 0.4.0
+#
+# One home for one question, because it is asked from two places that must
+# agree: the release job asserts the version matches the git tag before it
+# publishes anything, and `bin/check-hex-package` names the tarball it
+# inspects. Read separately, they drifted — and drifted invisibly.
+#
+# The drift that produced this script: `mix.exs` moved the number into a
+# `@version` module attribute and left `version: @version` behind it. The
+# release job was grepping for `version:` followed by a quote, so it extracted
+# the empty string, and the release failed on a version mismatch between
+# `v0.4.0` and nothing at all. Nothing published, but the failure landed on a
+# tag — because that assertion runs *only* on tags, so no pull request could
+# have caught it. Sharing the extraction with the guard that runs on every
+# pull request is the point of this file; matching both spellings is the
+# smaller half.
+#
+# An empty result is an error rather than an empty line. The original failure
+# was hard to read precisely because a missing version looked like a mismatch.
+
+MIX_EXS = File.expand_path("../mix.exs", __dir__)
+
+source = File.read(MIX_EXS)
+
+# Both spellings: `@version "1.2.3"` and a literal `version: "1.2.3"`. Anchored
+# on a leading digit so a `version:` requirement in a dependency — `{:plug,
+# "~> 1.16"}` has none, but `override:`/`git:` blocks can carry one — cannot be
+# picked up ahead of the project's own.
+patterns = [
+  /@version\s+"(\d[^"]*)"/,
+  /\bversion:\s*"(\d[^"]*)"/
+]
+
+version = patterns.filter_map { |pattern| source[pattern, 1] }.first
+
+if version.nil? || version.empty?
+  warn "bin/project-version: no version found in #{MIX_EXS}"
+  warn "  looked for: @version \"…\" and version: \"…\""
+  exit 1
+end
+
+puts version

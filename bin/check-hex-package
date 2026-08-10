@@ -99,10 +99,17 @@ def check(description)
   ok
 end
 
+# Shelling out to `bin/project-version` rather than parsing `mix.exs` again
+# here, and that indirection is the point: the release job asserts the tag
+# against the same script, and *that* assertion runs only on tags. Sharing the
+# extraction means this guard — which runs on every pull request — is what
+# proves the release-time one still works. Two copies of the parse is how
+# v0.4.0 came to compare its tag against an empty string.
 def version
-  File.read(File.join(REPO_ROOT, "mix.exs"))[/version:\s*"([^"]+)"/, 1] ||
-    File.read(File.join(REPO_ROOT, "mix.exs"))[/@version\s+"([^"]+)"/, 1] ||
-    raise("no version in mix.exs")
+  out, ok = sh(File.join(REPO_ROOT, "bin", "project-version"))
+  raise "bin/project-version failed: #{@last_stderr}" unless ok
+
+  out.strip
 end
 
 # The hex tarball is a tar of a tar: an outer one carrying VERSION, CHECKSUM,
