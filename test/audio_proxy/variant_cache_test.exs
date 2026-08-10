@@ -19,7 +19,7 @@ defmodule AudioProxy.VariantCacheTest do
   import AudioProxy.CoalesceHelper
   import AudioProxy.ProbeCoalesceHelper
   import AudioProxy.ConfigHelper
-  import AudioProxy.SignedRequest, except: [conn: 3]
+  import AudioProxy.SignedRequest
   import Plug.Conn
 
   alias AudioProxy.{CacheKey, PresigningStore, SignedRequest, VariantStore}

@@ -32,8 +32,8 @@ defmodule AudioProxy.SignedRequest do
   The config floor an endpoint test needs, with `overrides` merged over it.
 
   Pin every config value the chain reads: a boot-time `AP_MAX_SRC_BYTES` in the
-  environment must not be able to flip a test's 501s to 413s. Seventeen files
-  depend on that and only this one says it, which is why the floor lives here
+  environment must not be able to flip a test's 501s to 413s. Every caller
+  depends on that and none of them says it, which is why the floor lives here
   rather than being copied into each `setup`.
 
   `local_root` is required and has no default. Every caller has a per-test tmp
