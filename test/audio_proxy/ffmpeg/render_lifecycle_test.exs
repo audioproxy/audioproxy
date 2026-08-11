@@ -257,6 +257,67 @@ defmodule AudioProxy.Ffmpeg.RenderLifecycleTest do
     end
   end
 
+  describe "scratch isolation" do
+    test "scratch dir is per-instance, not per-node" do
+      dir = Render.scratch_dir()
+
+      refute dir == Path.join(System.tmp_dir!(), "audio_proxy_render-#{node()}")
+      assert String.ends_with?(dir, "-#{System.pid()}")
+    end
+
+    test "sweep_scratch removes only orphaned sibling directories" do
+      tmp = System.tmp_dir!()
+      prefix = "audio_proxy_render-#{node()}"
+
+      # A live sibling must not be the current VM's own directory, or the
+      # `reject(&(&1 == own))` filter would hide a broken liveness predicate.
+      # Spawn a real subprocess and use its OS pid.
+      live_pid_file = Path.join(tmp, "live_pid_#{System.unique_integer([:positive])}.txt")
+
+      System.cmd("sh", [
+        "-c",
+        "sleep 60 > /dev/null 2>&1 & echo $! > #{live_pid_file}"
+      ])
+
+      live_pid = live_pid_file |> File.read!() |> String.trim() |> String.to_integer()
+      assert AudioProxy.OsProcess.alive?(live_pid), "live subprocess was not alive"
+
+      live_dir = Path.join(tmp, "#{prefix}-#{live_pid}")
+      File.mkdir_p!(live_dir)
+      File.write!(Path.join(live_dir, "live.log"), "live")
+
+      {dead_pid_str, 0} =
+        System.cmd("sh", ["-c", "echo $$; exit 0"], stderr_to_stdout: true)
+
+      dead_pid = dead_pid_str |> String.trim() |> String.to_integer()
+      refute AudioProxy.OsProcess.alive?(dead_pid), "dead fixture pid was reused before the test"
+
+      dead_dir = Path.join(tmp, "#{prefix}-#{dead_pid}")
+      File.mkdir_p!(dead_dir)
+      File.write!(Path.join(dead_dir, "dead.log"), "dead")
+
+      unknown_dir =
+        Path.join(tmp, "audio_proxy_render-unknown-#{System.unique_integer([:positive])}-fixture")
+
+      File.mkdir_p!(unknown_dir)
+      File.write!(Path.join(unknown_dir, "unknown.log"), "unknown")
+
+      on_exit(fn ->
+        AudioProxy.OsProcess.signal(live_pid, "KILL")
+        File.rm(live_pid_file)
+        File.rm_rf(live_dir)
+        File.rm_rf(dead_dir)
+        File.rm_rf(unknown_dir)
+      end)
+
+      RenderSupervisor.sweep_scratch()
+
+      assert File.exists?(live_dir), "live instance's scratch was swept"
+      refute File.exists?(dead_dir), "dead instance's scratch was not swept"
+      assert File.exists?(unknown_dir), "unowned scratch was swept"
+    end
+  end
+
   ## Helpers
 
   defp failure(fake_cmd, stderr, exit_status) do

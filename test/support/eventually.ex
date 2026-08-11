@@ -100,12 +100,13 @@ defmodule AudioProxy.Eventually do
 
   An OS pid, not a BEAM pid — `Process.alive?/1` is the one for those. Used to
   prove the proxy leaves no orphaned ffmpeg behind.
+
+  Delegates to `AudioProxy.OsProcess.alive?/1`: a process that exists but is
+  not signalable, or a missing `kill` executable, is treated as alive, because
+  the safe default is to keep waiting rather than declare the process gone.
   """
   @spec alive?(integer()) :: boolean()
-  def alive?(os_pid) do
-    {_output, status} = System.cmd("kill", ["-0", to_string(os_pid)], stderr_to_stdout: true)
-    status == 0
-  end
+  def alive?(os_pid), do: AudioProxy.OsProcess.alive?(os_pid)
 
   defp poll(condition, expiry) do
     cond do
