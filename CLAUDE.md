@@ -89,6 +89,10 @@ cd <worktree> && OPENCODE_CONFIG="$SCRATCH/oc-config.json" \
 
 If the agent harness runs a non-login shell, `opencode` may not be on its `PATH`; prepend the directory it actually lives in rather than assuming the inherited environment is the interactive one.
 
+**The config block above is version-specific, and on opencode 1.17.11 it is what breaks the run.** There, *any* `permission` key in `OPENCODE_CONFIG` hangs at `message=init` with a 0-byte output file — the full block, and a deny-only `{"edit": "deny", "write": "deny", "patch": "deny"}` subset alike, with no `evaluated permission` line ever logged. 1.17.11 allows `bash`/`read`/`grep`/`glob`/`external_directory` by default (the session log shows only `question`/`plan_enter`/`plan_exit` denied), so the working invocation there is **no `OPENCODE_CONFIG` at all**. Check `opencode --version` before reaching for the block, and diagnose with the ladder below rather than by assuming which failure you have: on `extract-test-fixtures` the tool-using smoke test hung, the tool-less one returned `OK` in seconds, and the *same* tool-using prompt with no config file succeeded and logged `action.action=allow`. That third step is what localises it to the config rather than to the permission model.
+
+The cost is real and worth stating: without the override there is no no-write guarantee, only the after-the-fact one. Commit first, keep "do not edit any files" in the brief, and let `git status --short` on the committed tree be the proof.
+
 - **Model:** `opencode-go/kimi-k2.7-code`. First-party ids are flat; OpenRouter's need the vendor path (`openrouter/moonshotai/kimi-k2.7-code`, never `openrouter/kimi-k2.7-code`, which fails slowly and silently). Prefer a first-party route where one exists — an aggregator that degrades presents as an unexplained hang, and swapping the route is a one-flag way to rule that out. Fallbacks: `openrouter/deepseek-v4-pro`, `openai/gpt-5.6-pro`.
 - **`--print-logs` on every run.** It puts structured logs on stderr and leaves the answer on stdout, which is the only way to tell a working run from a hung one — both are a 0-byte output file otherwise. Poll `review.err` and watch `message=loop step=N` advance. It is a diagnostic, not a fix: a run that seems to start working when you add it was working already.
 - **Override the tool permissions for the run.** If opencode's user config denies `bash`/`glob`/`grep`/`read` — a reasonable thing to do when MCP equivalents are preferred — `opencode run` hangs forever at `message=init` with a 0-byte output file, because a review needs to read the code and has no way to. Override per-run via `OPENCODE_CONFIG` as above; **never edit the user's own config.** Denying `edit`/`write`/`patch` in that same override is also the only no-write guarantee opencode has, since no flag provides one.
@@ -102,7 +106,7 @@ If the agent harness runs a non-login shell, `opencode` may not be on its `PATH`
 
 **A clean exit with an empty output file is a distinct failure — do not confuse it with the hang above.** A reasoning model can spend its entire final turn thinking and never emit a text part: exit 0, a full log ending in `exiting loop`, several completed steps, and nothing to print. Observed at 131,000 characters of reasoning, much of it degenerating into repetition, with no answer at the end. The two failures share the 0-byte symptom and nothing else — tell them apart by exit status and log tail, never by the size of the output file. Two consequences:
 
-- **The brief must demand the findings as the final message** — "think briefly, then write; if you are running long, write what you have." Keep carrying it: three consecutive runs once returned nothing, and the first run carrying that instruction returned a review that found a real bug. **It is not the reliable prevention this file used to claim, though.** On `bound-probe-concurrency` the failure recurred with the instruction present and prominent — 19 loop steps, clean exit, 71 bytes of stdout holding only "I'll read the branch, run the tests, and write the review", and the whole review stranded in 105,000 characters of reasoning. So treat the instruction as improving the odds and the recovery below as the thing you actually rely on. An answer arriving all at once at the end is still what success looks like, not a symptom.
+- **The brief must demand the findings as the final message** — "think briefly, then write; if you are running long, write what you have." Keep carrying it: three consecutive runs once returned nothing, and the first run carrying that instruction returned a review that found a real bug. **It is not the reliable prevention this file used to claim, though.** On `bound-probe-concurrency` the failure recurred with the instruction present and prominent — 19 loop steps, clean exit, 71 bytes of stdout holding only "I'll read the branch, run the tests, and write the review", and the whole review stranded in 105,000 characters of reasoning. So treat the instruction as improving the odds and the recovery below as the thing you actually rely on. An answer arriving all at once at the end is still what success looks like, not a symptom. It recurred again on `extract-test-fixtures` — 7 steps, 6 tool calls, clean exit, **0 bytes**, 21,646 characters of reasoning holding a complete audit. Two recurrences now, so plan the recovery into the schedule rather than treating it as the exception.
 - **Recover rather than re-run.** Recent opencode keeps sessions in a SQLite database under its data directory (`~/.local/share/opencode/opencode.db`); copy it, `-wal` and `-shm` included, rather than reading the live one. The schema is JSON-in-a-column, not typed columns, so the queries are:
 
   ```bash
@@ -163,6 +167,7 @@ itself:
 |---|---|---|
 | `AudioProxy.SignedRequest` | Signing key material, the config floor, the URL grammar, conn builders. | An endpoint test starts from `base_config/1`. |
 | `AudioProxy.Eventually` | Waiting for a condition that nothing announces. | A poll loop is imported, never written. |
+| `AudioProxy.Fixtures` | Generated audio fixtures, and the fixture root they live in. | A fixture path is never a fixed name under `System.tmp_dir!()`. |
 
 Promoting another duplicated helper adds a row here and a subsection below. The
 section is meant to grow a row at a time; nothing above needs rewriting to make
@@ -214,6 +219,33 @@ Two rules, for the two things seventeen local copies disagreed about:
   module's 5 s default passes `@deadline` explicitly, where the test is read.
   Budget a wait whose condition is a *request* in conditions rather than in
   milliseconds: the deadline is checked between evaluations, never during one.
+
+`AudioProxy.Fixtures` owns generated audio, for the five `:ffmpeg`-tagged files
+that need real bytes:
+
+| Function | Holds |
+|---|---|
+| `root!/1` | A labelled fixture root, unique per run, `rm_rf` on exit. The only way to get one. |
+| `encode!/3` | The `lavfi` generation argv: source expression in, output options in, path out. |
+| `tone/2`, `sine/2` | The two sine generators. `tone/2` is `lavfi`'s bare `sine`; `sine/2` takes an amplitude. |
+| `silence/2`, `video/1`, `tagged_mp3/2` | The named fixtures more than one file wants. |
+
+Two rules, and the first of them is a bug fix rather than a tidy-up:
+
+- **A generated fixture path is never a fixed name under `System.tmp_dir!()`.**
+  Worktree isolation covers the directory and the port; it does not cover the
+  system temp dir, which every parallel checkout shares. Two files named fixed
+  paths there, and two concurrent `mix test --only ffmpeg` runs duly deleted
+  each other's fixtures mid-render — a failure in a test with nothing wrong
+  with it. `root!/1` appends `unique_integer/1` with no opt-out, because the
+  opt-out is what broke.
+- **A file written in order to be probed is an output, and goes in the test's
+  own `:tmp_dir`.** Never beside the module's fixtures: an output two runs
+  collide on is the one under assertion.
+
+What each file generates stays in that file's `setup_all` — the fixture *list*
+is the file's subject, and a value the test is about (duration, amplitude, rate,
+codec) is named at the call site. Only the argv is shared.
 
 ## Open questions (decide as they come up)
 

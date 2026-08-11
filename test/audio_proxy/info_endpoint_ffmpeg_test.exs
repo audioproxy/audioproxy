@@ -21,6 +21,7 @@ defmodule AudioProxy.InfoEndpointFfmpegTest do
   import AudioProxy.SignedRequest, except: [header: 2]
   import AudioProxy.ProbeCoalesceHelper
 
+  alias AudioProxy.Fixtures
   alias AudioProxy.RawHttp
 
   @moduletag :ffmpeg
@@ -31,14 +32,7 @@ defmodule AudioProxy.InfoEndpointFfmpegTest do
   # One fixture per container the contract has a rule about, generated once:
   # what differs between them is exactly what the mapping has to absorb.
   setup_all do
-    root =
-      Path.join(
-        System.tmp_dir!(),
-        "audio_proxy_info_fixtures-#{System.unique_integer([:positive])}"
-      )
-
-    File.mkdir_p!(root)
-    on_exit(fn -> File.rm_rf(root) end)
+    root = Fixtures.root!("info")
 
     encode(root, "piece.wav", ~w(-ar 48000 -ac 2 -c:a pcm_s16le))
 
@@ -181,13 +175,13 @@ defmodule AudioProxy.InfoEndpointFfmpegTest do
     end
   end
 
+  # Each fixture states its own codec, rate and depth: those are the mapping's
+  # subject, so they stay here rather than behind a named helper.
   defp encode(root, name, args) do
-    {_output, 0} =
-      System.cmd(
-        "ffmpeg",
-        ~w(-y -loglevel error -f lavfi -i sine=frequency=440:duration=#{@duration}) ++
-          args ++ [Path.join(root, name)],
-        stderr_to_stdout: true
-      )
+    Fixtures.encode!(
+      Path.join(root, name),
+      "sine=frequency=440:duration=#{@duration}",
+      args
+    )
   end
 end

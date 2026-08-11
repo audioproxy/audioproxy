@@ -21,23 +21,28 @@ defmodule AudioProxy.Ffmpeg.RenderFfmpegTest do
 
   alias AudioProxy.Ffmpeg.Command
   alias AudioProxy.Ffmpeg.Render
+  alias AudioProxy.Fixtures
   alias AudioProxy.Options
   alias AudioProxy.RenderHarness
 
   @moduletag :ffmpeg
 
+  # Rendered bytes are written back out to be probed; they go here, one
+  # directory per test, never beside the fixtures.
+  @moduletag tmp_dir: "render_ffmpeg"
+
   @duration 20
   @sample_rate 44_100
 
   setup_all do
-    dir = Path.join(System.tmp_dir!(), "audio_proxy_render_fixtures")
-    File.mkdir_p!(dir)
+    root = Fixtures.root!("render")
 
-    {:ok, source: sine_wav(dir), noise: noise_wav(dir), dir: dir}
+    {:ok, source: sine_wav(root), noise: noise_wav(root)}
   end
 
   describe "a real render" do
-    test "produces a decodable mp3 of the requested length", %{source: source, dir: dir} do
+    test "produces a decodable mp3 of the requested length",
+         %{source: source, tmp_dir: tmp_dir} do
       {:ok, options} = Options.parse("f:mp3/br:96/t:0:5")
 
       bytes = render!(options, source)
@@ -45,17 +50,18 @@ defmodule AudioProxy.Ffmpeg.RenderFfmpegTest do
       # Not a size check: an encoder that emitted five seconds of silence, or a
       # truncated file, would pass one of those. ffprobe reading it back is the
       # only assertion that means "this is an mp3 a player would accept".
-      output = Path.join(dir, "out.mp3")
+      output = Path.join(tmp_dir, "out.mp3")
       File.write!(output, bytes)
 
       assert probe(output, "codec_name") == "mp3"
       assert_in_delta parse_float(probe(output, "duration")), 5.0, 0.3
     end
 
-    test "the trim is applied by ffmpeg, not merely requested", %{source: source, dir: dir} do
+    test "the trim is applied by ffmpeg, not merely requested",
+         %{source: source, tmp_dir: tmp_dir} do
       {:ok, options} = Options.parse("f:wav/t:2:3")
 
-      output = Path.join(dir, "trimmed.wav")
+      output = Path.join(tmp_dir, "trimmed.wav")
       File.write!(output, render!(options, source))
 
       # The fixture is 20 s; a render that ignored `-t` would come back as 20.
@@ -85,8 +91,8 @@ defmodule AudioProxy.Ffmpeg.RenderFfmpegTest do
       assert stderr != ""
     end
 
-    test "a non-audio input classifies as :undecodable", %{dir: dir} do
-      text = Path.join(dir, "not-audio.wav")
+    test "a non-audio input classifies as :undecodable", %{tmp_dir: tmp_dir} do
+      text = Path.join(tmp_dir, "not-audio.wav")
       File.write!(text, String.duplicate("this is not audio, whatever the extension says\n", 64))
 
       {:ok, options} = Options.parse("f:mp3")
@@ -158,42 +164,18 @@ defmodule AudioProxy.Ffmpeg.RenderFfmpegTest do
     end
   end
 
-  defp sine_wav(dir) do
-    generate(
-      dir,
-      "sine.wav",
-      "sine=frequency=440:duration=#{@duration}:sample_rate=#{@sample_rate}"
-    )
+  defp sine_wav(root) do
+    Fixtures.tone(Path.join(root, "sine.wav"), duration: @duration, rate: @sample_rate)
   end
 
   # Noise rather than a tone where the point is that bytes differ: a sine wave
   # compresses so well that a truncated encode can look plausible.
-  defp noise_wav(dir) do
-    generate(dir, "noise.wav", "anoisesrc=duration=#{@duration}:sample_rate=#{@sample_rate}")
-  end
-
-  defp generate(dir, name, lavfi) do
-    path = Path.join(dir, name)
-
-    unless File.exists?(path) do
-      {_output, 0} =
-        System.cmd("ffmpeg", [
-          "-nostdin",
-          "-hide_banner",
-          "-loglevel",
-          "error",
-          "-y",
-          "-f",
-          "lavfi",
-          "-i",
-          lavfi,
-          "-ac",
-          "2",
-          path
-        ])
-    end
-
-    path
+  defp noise_wav(root) do
+    Fixtures.encode!(
+      Path.join(root, "noise.wav"),
+      "anoisesrc=duration=#{@duration}:sample_rate=#{@sample_rate}",
+      ~w(-ac 2)
+    )
   end
 
   defp probe(path, field) do

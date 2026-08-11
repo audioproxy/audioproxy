@@ -15,6 +15,7 @@ defmodule AudioProxy.Ffmpeg.CommandFfmpegTest do
   use ExUnit.Case, async: true
 
   alias AudioProxy.Ffmpeg.Command
+  alias AudioProxy.Fixtures
   alias AudioProxy.Options
 
   @moduletag :ffmpeg
@@ -23,31 +24,16 @@ defmodule AudioProxy.Ffmpeg.CommandFfmpegTest do
   @sample_rate 44_100
 
   setup_all do
-    source = Path.join(System.tmp_dir!(), "audio_proxy_command_test_tone.wav")
+    root = Fixtures.root!("command")
 
-    unless File.exists?(source) do
-      {_output, 0} =
-        System.cmd("ffmpeg", [
-          "-nostdin",
-          "-hide_banner",
-          "-loglevel",
-          "error",
-          "-y",
-          "-f",
-          "lavfi",
-          "-i",
-          "sine=frequency=440:duration=#{@duration}:sample_rate=#{@sample_rate}",
-          "-ac",
-          "2",
-          "-c:a",
-          "pcm_s16le",
-          source
-        ])
-    end
+    source =
+      Fixtures.tone(Path.join(root, "tone.wav"),
+        duration: @duration,
+        rate: @sample_rate,
+        extra: ~w(-c:a pcm_s16le)
+      )
 
-    on_exit(fn -> File.rm(source) end)
-
-    {:ok, source: source}
+    {:ok, root: root, source: source}
   end
 
   defp render(options, source) do
@@ -211,10 +197,11 @@ defmodule AudioProxy.Ffmpeg.CommandFfmpegTest do
       end
     end
 
-    test "a hostile filename is data, not syntax", %{source: source} do
-      hostile = Path.join(System.tmp_dir!(), "a b;$(id)'\".wav")
+    test "a hostile filename is data, not syntax", %{source: source, root: root} do
+      # In the fixture root, not the system temp dir: a fixed name there is
+      # shared with every other checkout running this suite.
+      hostile = Path.join(root, "a b;$(id)'\".wav")
       File.cp!(source, hostile)
-      on_exit(fn -> File.rm(hostile) end)
 
       assert_renders("f:mp3/br:96/t:0:2", hostile)
     end
