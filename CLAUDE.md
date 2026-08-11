@@ -163,6 +163,7 @@ itself:
 |---|---|---|
 | `AudioProxy.SignedRequest` | Signing key material, the config floor, the URL grammar, conn builders. | An endpoint test starts from `base_config/1`. |
 | `AudioProxy.Eventually` | Waiting for a condition that nothing announces. | A poll loop is imported, never written. |
+| `AudioProxy.Fixtures` | Generated audio fixtures, and the fixture root they live in. | A fixture path is never a fixed name under `System.tmp_dir!()`. |
 
 Promoting another duplicated helper adds a row here and a subsection below. The
 section is meant to grow a row at a time; nothing above needs rewriting to make
@@ -214,6 +215,33 @@ Two rules, for the two things seventeen local copies disagreed about:
   module's 5 s default passes `@deadline` explicitly, where the test is read.
   Budget a wait whose condition is a *request* in conditions rather than in
   milliseconds: the deadline is checked between evaluations, never during one.
+
+`AudioProxy.Fixtures` owns generated audio, for the five `:ffmpeg`-tagged files
+that need real bytes:
+
+| Function | Holds |
+|---|---|
+| `root!/1` | A labelled fixture root, unique per run, `rm_rf` on exit. The only way to get one. |
+| `encode!/3` | The `lavfi` generation argv: source expression in, output options in, path out. |
+| `tone/2`, `sine/2` | The two sine generators. `tone/2` is `lavfi`'s bare `sine`; `sine/2` takes an amplitude. |
+| `silence/2`, `video/1`, `tagged_mp3/2` | The named fixtures more than one file wants. |
+
+Two rules, and the first of them is a bug fix rather than a tidy-up:
+
+- **A generated fixture path is never a fixed name under `System.tmp_dir!()`.**
+  Worktree isolation covers the directory and the port; it does not cover the
+  system temp dir, which every parallel checkout shares. Two files named fixed
+  paths there, and two concurrent `mix test --only ffmpeg` runs duly deleted
+  each other's fixtures mid-render — a failure in a test with nothing wrong
+  with it. `root!/1` appends `unique_integer/1` with no opt-out, because the
+  opt-out is what broke.
+- **A file written in order to be probed is an output, and goes in the test's
+  own `:tmp_dir`.** Never beside the module's fixtures: an output two runs
+  collide on is the one under assertion.
+
+What each file generates stays in that file's `setup_all` — the fixture *list*
+is the file's subject, and a value the test is about (duration, amplitude, rate,
+codec) is named at the call site. Only the argv is shared.
 
 ## Open questions (decide as they come up)
 

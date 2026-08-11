@@ -26,6 +26,7 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
   import AudioProxy.SignedRequest
   import AudioProxy.Eventually
 
+  alias AudioProxy.Fixtures
   alias AudioProxy.RawHttp
 
   @moduletag :ffmpeg
@@ -37,10 +38,9 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
   @full_scale 32_767
 
   # The fixtures' own amplitude, stated here rather than inherited from an
-  # ffmpeg default — `lavfi`'s bare `sine` source is not full scale, and a test
-  # asserting it was would be asserting a version of ffmpeg. `aevalsrc` takes
-  # the amplitude as an argument, so the number below is the fixture's by
-  # construction and the peaks have something exact to be compared against.
+  # ffmpeg default, so the peaks have something exact to be compared against.
+  # `AudioProxy.Fixtures.sine/2` is the generator that takes it as an argument,
+  # and its moduledoc carries the measurement behind that choice.
   @amplitude 0.9
   @expected_peak round(@amplitude * @full_scale)
 
@@ -52,30 +52,20 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
   @silence_ceiling @full_scale * 0.01
 
   setup_all do
-    root =
-      Path.join(
-        System.tmp_dir!(),
-        "audio_proxy_peaks_fixtures-#{System.unique_integer([:positive])}"
-      )
-
-    File.mkdir_p!(root)
-    on_exit(fn -> File.rm_rf(root) end)
+    root = Fixtures.root!("peaks")
 
     # A 1 kHz sine at @amplitude, 4 s. Loud everywhere.
-    generate(Path.join(root, "sine.wav"), sine(4))
+    sine(root, "sine.wav")
 
     # 4 s of digital silence.
-    generate(Path.join(root, "silence.wav"), "anullsrc=r=44100:cl=stereo:d=4")
+    Fixtures.silence(Path.join(root, "silence.wav"), duration: 4)
 
     # Loud, except for the silent window t=0.5..2.5 — which comfortably
     # contains the second `t:1:1` selects, so a trim that is ignored shows up
     # as a loud waveform where a flat line belongs. The margin either side is
     # deliberate: a timeline filter mutes from the first *frame* past its
     # boundary, and ~20 ms of slop there is not what this test is about.
-    generate(Path.join(root, "gap.wav"), sine(4), [
-      "-af",
-      "volume=enable='between(t,0.5,2.5)':volume=0"
-    ])
+    sine(root, "gap.wav", ["-af", "volume=enable='between(t,0.5,2.5)':volume=0"])
 
     {:ok, root: root}
   end
@@ -273,24 +263,11 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
     # halves are asserted below so the convergence stays pinned.
     test "a source with no audio stream is refused the same way on both paths",
          %{port: port, root: root} do
-      cover = Path.join(root, "cover.png")
-
-      {_output, 0} =
-        System.cmd(
-          "ffmpeg",
-          [
-            "-y",
-            "-loglevel",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "color=c=red:s=16x16:d=1",
-            "-frames:v",
-            "1",
-            cover
-          ],
-          stderr_to_stdout: true
+      cover =
+        Fixtures.encode!(
+          Path.join(root, "cover.png"),
+          "color=c=red:s=16x16:d=1",
+          ~w(-frames:v 1)
         )
 
       peaks = render("/f:peaks/plain/local://cover.png", port)
@@ -331,17 +308,14 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
     |> RawHttp.read(@deadline)
   end
 
-  defp sine(seconds) do
-    "aevalsrc=#{@amplitude}*sin(2*PI*1000*t):d=#{seconds}:s=44100:c=stereo"
-  end
-
-  defp generate(path, source, extra \\ []) do
-    {_output, 0} =
-      System.cmd(
-        "ffmpeg",
-        ["-y", "-loglevel", "error", "-f", "lavfi", "-i", source] ++
-          extra ++ ["-ac", "2", "-ar", "44100", path],
-        stderr_to_stdout: true
-      )
+  # `@amplitude` is passed, never defaulted: `AudioProxy.Fixtures.sine/2` takes
+  # it as an argument precisely so these assertions are about the contract
+  # rather than about an ffmpeg default. See that module's moduledoc.
+  defp sine(root, name, extra \\ []) do
+    Fixtures.sine(Path.join(root, name),
+      amplitude: @amplitude,
+      duration: 4,
+      extra: extra
+    )
   end
 end

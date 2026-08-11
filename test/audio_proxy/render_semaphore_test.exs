@@ -366,13 +366,10 @@ defmodule AudioProxy.RenderSemaphoreTest do
     |> Base.encode16(case: :lower)
   end
 
-  defp store_root do
-    root = Path.join(System.tmp_dir!(), "slot-store-#{System.unique_integer([:positive])}")
-    File.mkdir_p!(root)
-    on_exit(fn -> File.rm_rf(root) end)
-
-    root
-  end
+  # Not a generated fixture, but the same per-run root under the same shared
+  # system temp dir, built the same three ways — so it comes from the same
+  # helper rather than staying the last hand-rolled copy of it.
+  defp store_root, do: AudioProxy.Fixtures.root!("slot_store")
 
   defp stored(key) do
     case VariantStore.get_stream(key, nil) do
