@@ -55,7 +55,9 @@ defmodule AudioProxy.Fixtures do
   @rate 44_100
 
   @doc """
-  A fixture directory unique to this run, removed when the run ends.
+  A fixture directory unique to this run, removed when the caller's `on_exit`
+  context ends — after the module for a `setup_all`, after the test for a call
+  from a test body.
 
   The label names the suite that made it, so a directory left behind by a
   crashed run says where it came from.
