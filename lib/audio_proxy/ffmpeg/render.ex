@@ -465,31 +465,9 @@ defmodule AudioProxy.Ffmpeg.Render do
   # police into one that looks clean: every teardown would report success and
   # every subprocess would survive. Assuming the worst instead makes the
   # escalation run, fail, and say so.
-  defp alive?(os_pid) do
-    case signal(os_pid, "0") do
-      {_output, 0} -> true
-      :unavailable -> true
-      {_output, _nonzero} -> false
-    end
-  end
+  defp alive?(os_pid), do: AudioProxy.OsProcess.alive?(os_pid)
 
-  defp signal(os_pid, signal) do
-    # Resolved per call rather than at compile time: the build image and the
-    # runtime image are not the same filesystem, and baking in a path from the
-    # former is how this breaks only in production.
-    case System.find_executable("kill") do
-      nil ->
-        Logger.error("no `kill` on PATH; cannot signal render subprocesses")
-        :unavailable
-
-      kill ->
-        System.cmd(kill, ["-#{signal}", Integer.to_string(os_pid)], stderr_to_stdout: true)
-    end
-  rescue
-    error ->
-      Logger.error("failed to signal render subprocess #{os_pid}: #{Exception.message(error)}")
-      :unavailable
-  end
+  defp signal(os_pid, signal), do: AudioProxy.OsProcess.signal(os_pid, signal)
 
   ## Failure classification
 
@@ -546,12 +524,13 @@ defmodule AudioProxy.Ffmpeg.Render do
   @doc false
   # Public only so the supervisor can sweep it at boot.
   #
-  # Namespaced per node, because the sweep deletes everything it finds. Two
-  # instances sharing a `/tmp` — a dev server and a `mix test` run on one
-  # laptop is the everyday case — would otherwise delete each other's live
-  # stderr files at boot, and the symptom would be a render that failed with no
-  # diagnostics and an unhelpful `:render_failed`.
-  def scratch_dir, do: Path.join(System.tmp_dir!(), "audio_proxy_render-#{node()}")
+  # The identity is node() plus System.pid(), because a non-distributed VM is
+  # always `nonode@nohost`, which is a constant, not an identity. Two `mix test`
+  # runs or release instances on one host therefore get distinct scratch
+  # directories; a named node that somehow shares a pid namespace is still
+  # separated by the node part.
+  def scratch_dir,
+    do: Path.join(System.tmp_dir!(), "audio_proxy_render-#{node()}-#{System.pid()}")
 
   defp stderr_path do
     File.mkdir_p!(scratch_dir())

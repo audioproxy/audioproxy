@@ -16,6 +16,8 @@ defmodule AudioProxy.Ffmpeg.RenderSupervisor do
 
   use DynamicSupervisor
 
+  require Logger
+
   alias AudioProxy.Ffmpeg.Render
 
   @spec start_link(term()) :: Supervisor.on_start()
@@ -30,15 +32,55 @@ defmodule AudioProxy.Ffmpeg.RenderSupervisor do
     DynamicSupervisor.init(strategy: :one_for_one)
   end
 
-  # Each render deletes its own stderr file, so anything still here belongs to
-  # a render that died with the VM — a `kill -9`, an OOM, a crashed container.
-  # Boot is the one moment at which "nothing is running, so everything here is
-  # stale" is true, which makes it the one safe moment to sweep.
-  defp sweep_scratch do
+  # Each render in this VM deletes its own stderr file, so this VM's directory
+  # is empty at boot by construction. Siblings belong to other instances that
+  # may have died with the VM — a `kill -9`, an OOM, a crashed container — and
+  # are reclaimed only when their owning OS pid is no longer alive. A directory
+  # whose owner cannot be established is left alone: leaking kilobytes until a
+  # later boot is harmless; deleting a live instance's file is the bug being
+  # fixed.
+  @doc false
+  def sweep_scratch do
     scratch = Render.scratch_dir()
+    tmp = System.tmp_dir!()
+    own = Path.basename(scratch)
 
-    with {:ok, entries} <- File.ls(scratch) do
-      Enum.each(entries, &File.rm(Path.join(scratch, &1)))
+    with {:ok, entries} <- File.ls(tmp) do
+      entries
+      |> Enum.filter(&String.starts_with?(&1, "audio_proxy_render-"))
+      |> Enum.reject(&(&1 == own))
+      |> Enum.each(&sweep_sibling(Path.join(tmp, &1), &1))
+    end
+  end
+
+  defp sweep_sibling(path, name) do
+    case owner_pid(name) do
+      nil ->
+        :ok
+
+      os_pid ->
+        if AudioProxy.OsProcess.alive?(os_pid) do
+          :ok
+        else
+          reclaim(path)
+        end
+    end
+  end
+
+  defp owner_pid(name) do
+    case Regex.run(~r/^audio_proxy_render-.*-(\d+)$/, name) do
+      [_, pid_str] -> String.to_integer(pid_str)
+      nil -> nil
+    end
+  end
+
+  defp reclaim(path) do
+    case File.rm_rf(path) do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason, file} ->
+        Logger.warning("could not reclaim scratch #{file}: #{inspect(reason)}")
     end
   end
 

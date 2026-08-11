@@ -14,3 +14,11 @@
 # anywhere else). They fail rather than skip when it is absent: a green run
 # against nothing is a lie about coverage.
 ExUnit.start(exclude: [:ffmpeg, :integration, :minio])
+
+# Clean up this test run's scratch directory after the suite finishes. The
+# production path intentionally leaves an empty directory (a live instance must
+# not delete its own scratch while another render may be starting); tests are
+# the place where we can safely reclaim it once every render has terminated.
+ExUnit.after_suite(fn _ ->
+  File.rm_rf(AudioProxy.Ffmpeg.Render.scratch_dir())
+end)
