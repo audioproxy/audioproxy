@@ -29,6 +29,7 @@ defmodule AudioProxy.ConfigTest do
                log_level: :info,
                metrics_bind: {127, 0, 0, 1},
                metrics_port: 9568,
+               allow_origin: nil,
                s3: %{
                  region: nil,
                  access_key_id: nil,

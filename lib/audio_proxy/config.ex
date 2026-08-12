@@ -35,6 +35,7 @@ defmodule AudioProxy.Config do
   | `AP_METRICS_BIND` | IP address literal | `127.0.0.1` |
   | `AP_METRICS_PORT` | positive integer | `9568` |
   | `AP_S3_ENDPOINT` | `http(s)://host[:port]` | unset (`nil`) — AWS proper |
+  | `AP_ALLOW_ORIGIN` | `*` or `scheme://host[:port]` | unset (`nil`) — no CORS headers |
 
   The listener port is read from `AP_PORT`, falling back to `PORT` (which the
   worktree workflow sets to the branch's hashed port), then to `4000`.
@@ -154,6 +155,7 @@ defmodule AudioProxy.Config do
           log_level: :debug | :info | :warning | :error,
           metrics_bind: :inet.ip_address(),
           metrics_port: pos_integer(),
+          allow_origin: String.t() | nil,
           s3: s3()
         }
 
@@ -257,6 +259,7 @@ defmodule AudioProxy.Config do
       log_level: enum(env, "AP_LOG_LEVEL", @log_levels, @default_log_level),
       metrics_bind: ip(env, "AP_METRICS_BIND", @default_metrics_bind),
       metrics_port: integer(env, "AP_METRICS_PORT", @default_metrics_port, :positive),
+      allow_origin: origin(env, "AP_ALLOW_ORIGIN"),
       s3: s3(env)
     })
   end
@@ -521,6 +524,36 @@ defmodule AudioProxy.Config do
                 "#{var} must be an origin URL with no path, query or fragment (http://minio:9000), got: #{inspect(value)}"
       end
     end
+  end
+
+  # An origin, in the sense `Access-Control-Allow-Origin` means it: scheme,
+  # host, optional port, and nothing else. A trailing slash is the common
+  # miss — `https://app.example.com/` is a URL a browser will never match its
+  # `Origin` header against, so it is refused here rather than silently
+  # producing a header that never allows anything. `*` is the other accepted
+  # value, verbatim.
+  #
+  # Refused at boot for the reason every value here is: a CORS header that
+  # cannot match is indistinguishable at the client from no CORS at all, and
+  # the browser reports it as an opaque failure in a page the operator is not
+  # looking at.
+  defp origin(env, var) do
+    case fetch(env, var) do
+      nil -> nil
+      "*" -> "*"
+      value -> origin!(var, value, URI.new(value))
+    end
+  end
+
+  defp origin!(_var, value, {:ok, %URI{scheme: scheme, host: host, path: path} = uri})
+       when scheme in ["http", "https"] and is_binary(host) and host != "" and path in [nil, ""] and
+              uri.query == nil and uri.fragment == nil and uri.userinfo == nil,
+       do: value
+
+  defp origin!(var, value, _parsed) do
+    raise Error,
+          "#{var} must be * or an origin with no path, query or fragment " <>
+            "(https://app.example.com), got: #{inspect(value)}"
   end
 
   # Existence and writability are both proved at boot, and writability by the
