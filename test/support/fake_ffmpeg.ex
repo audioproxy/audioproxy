@@ -141,8 +141,12 @@ defmodule AudioProxy.FakeFfmpeg.Router do
   @pipeline Pipeline.init([])
 
   # Mirrors `AudioProxy.Router`'s own pre-dispatch work, so the log a test
-  # captures here is the log production emits.
+  # captures here is the log production emits — and, since
+  # `AudioProxy.Plugs.Cors` is part of that work, so are the CORS headers on a
+  # response that took a render to produce. Both plugs are no-ops until
+  # configured.
   plug Plug.RequestId
+  plug AudioProxy.Plugs.Cors
   plug :match
   plug :dispatch
 

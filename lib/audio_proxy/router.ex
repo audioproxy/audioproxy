@@ -30,6 +30,13 @@ defmodule AudioProxy.Router do
   it re-assigns `:info` once it has. `Plug.RequestId` runs ahead of
   matching, so every line a request produces — its own and its render's —
   carries the same id, and the client gets it back in `x-request-id`.
+
+  `AudioProxy.Plugs.Cors` runs ahead of matching too, and for a related
+  reason: it registers a before-send callback that every route below shares,
+  including the 404 and the 401 that never reach a route at all. It is also
+  where `OPTIONS` stops being a 404 — but only when `AP_ALLOW_ORIGIN` is set,
+  which is why the `match _` clause below still owns the method for every
+  deployment that has not enabled CORS.
   """
 
   use Plug.Router
@@ -40,6 +47,7 @@ defmodule AudioProxy.Router do
   @render_pipeline RenderPipeline.init([])
 
   plug Plug.RequestId
+  plug AudioProxy.Plugs.Cors
   plug :match
   plug :dispatch
 

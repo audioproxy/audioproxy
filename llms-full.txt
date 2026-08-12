@@ -16,7 +16,9 @@ GET /metrics                           Prometheus scrape — on a separate, bind
 
 `/metrics` is deliberately not on the main listener: it is bound to `AP_METRICS_BIND:AP_METRICS_PORT` (default `127.0.0.1:9568`), and a request for `/metrics` on the main port answers `404`.
 
-Only `GET` and `HEAD` are served. Any other method is a `404` everywhere — a `405` would confirm a route's shape without telling a client anything useful.
+Only `GET` and `HEAD` are served. Any other method is a `404` everywhere — a `405` would confirm a route's shape without telling a client anything useful. The single exception is `OPTIONS` when `AP_ALLOW_ORIGIN` is set, which answers the CORS preflight with `204`, `Access-Control-Allow-Methods: GET, HEAD`, an echo of `Access-Control-Request-Headers` and `Access-Control-Max-Age: 86400`.
+
+CORS is off by default: no `Access-Control-*` header is sent anywhere, which is all an `<audio src>` needs. Set `AP_ALLOW_ORIGIN` and every response — success and error alike — carries `Access-Control-Allow-Origin`, `Access-Control-Expose-Headers: x-audio-proxy, retry-after, accept-ranges, etag`, and, for a named origin rather than `*`, `Vary: Origin`. A page that `fetch()`es peaks or `/info` cross-origin needs this, as does one that wants to read `Retry-After` off a `429` — that header is not CORS-safelisted, so without the expose list the page sees the `429` but not how long to wait.
 
 ## Signing a URL
 
@@ -278,6 +280,7 @@ All configuration is `AP_`-prefixed environment variables, read and validated on
 | `AP_LOG_LEVEL` | `info` | Lowest level written to stdout |
 | `AP_METRICS_BIND` | `127.0.0.1` | Interface the `/metrics` listener binds. An address literal; a hostname is refused |
 | `AP_METRICS_PORT` | `9568` | Port for the `/metrics` listener |
+| `AP_ALLOW_ORIGIN` | unset | `*` or one origin (`https://app.example.com`). Unset sends no CORS header anywhere. An origin and nothing else, spelled as a browser spells it — a path, query, fragment, trailing slash, uppercase scheme or host, trailing dot, or explicit default port is refused at boot, with the canonical spelling in the error |
 | `AP_S3_ENDPOINT` | unset | An S3-compatible store instead of AWS. Origin only |
 | `AP_S3_ADDRESSING` | `virtual`, or `path` with an endpoint | Whether a request names its bucket in the host or the path |
 | `AP_S3_CA_BUNDLE` | unset | PEM bundle replacing the system trust store, for a store behind a private CA |

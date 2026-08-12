@@ -35,6 +35,7 @@ defmodule AudioProxy.Config do
   | `AP_METRICS_BIND` | IP address literal | `127.0.0.1` |
   | `AP_METRICS_PORT` | positive integer | `9568` |
   | `AP_S3_ENDPOINT` | `http(s)://host[:port]` | unset (`nil`) — AWS proper |
+  | `AP_ALLOW_ORIGIN` | `*` or `scheme://host[:port]` | unset (`nil`) — no CORS headers |
 
   The listener port is read from `AP_PORT`, falling back to `PORT` (which the
   worktree workflow sets to the branch's hashed port), then to `4000`.
@@ -154,6 +155,7 @@ defmodule AudioProxy.Config do
           log_level: :debug | :info | :warning | :error,
           metrics_bind: :inet.ip_address(),
           metrics_port: pos_integer(),
+          allow_origin: String.t() | nil,
           s3: s3()
         }
 
@@ -257,6 +259,7 @@ defmodule AudioProxy.Config do
       log_level: enum(env, "AP_LOG_LEVEL", @log_levels, @default_log_level),
       metrics_bind: ip(env, "AP_METRICS_BIND", @default_metrics_bind),
       metrics_port: integer(env, "AP_METRICS_PORT", @default_metrics_port, :positive),
+      allow_origin: origin(env, "AP_ALLOW_ORIGIN"),
       s3: s3(env)
     })
   end
@@ -521,6 +524,72 @@ defmodule AudioProxy.Config do
                 "#{var} must be an origin URL with no path, query or fragment (http://minio:9000), got: #{inspect(value)}"
       end
     end
+  end
+
+  # An origin, in the sense `Access-Control-Allow-Origin` means it: scheme,
+  # host, optional port, and nothing else. `*` is the other accepted value,
+  # verbatim.
+  #
+  # The header is emitted exactly as configured and the browser compares it to
+  # its own `Origin` **byte for byte**, so the value has to be spelled the way
+  # a browser spells it. That makes a whole family of near-misses worth
+  # refusing rather than accepting: a trailing slash, an uppercase scheme or
+  # host, a trailing dot on the host, an explicitly written default port. Each
+  # is a URL that means the right origin to a person and matches nothing at
+  # all in a browser.
+  #
+  # Refused at boot for the reason every value here is, and more sharply: a
+  # CORS header that cannot match is indistinguishable at the client from no
+  # CORS at all, so the misconfiguration surfaces as an opaque fetch failure
+  # in a page the operator is not watching, with nothing anywhere naming the
+  # variable. The error carries the canonical spelling, since knowing the
+  # value is wrong is only half of what an operator needs.
+  defp origin(env, var) do
+    case fetch(env, var) do
+      nil -> nil
+      "*" -> "*"
+      value -> origin!(var, value, URI.new(value))
+    end
+  end
+
+  defp origin!(var, value, {:ok, %URI{scheme: scheme, host: host, path: path} = uri})
+       when scheme in ["http", "https"] and is_binary(host) and host != "" and path in [nil, ""] and
+              uri.query == nil and uri.fragment == nil and uri.userinfo == nil do
+    case canonical_origin(uri) do
+      ^value -> value
+      canonical -> raise Error, origin_message(var, value, canonical)
+    end
+  end
+
+  defp origin!(var, value, _parsed), do: raise(Error, origin_message(var, value, nil))
+
+  # `URI` downcases the scheme but not the host, so both are done here. What
+  # is left after case is the trailing dot (a legal FQDN root that no browser
+  # sends), the default port (which a browser omits), and the brackets IPv6
+  # needs and `URI` strips.
+  defp canonical_origin(%URI{scheme: scheme, host: host, port: port}) do
+    host = host |> String.downcase() |> String.trim_trailing(".") |> bracket_ipv6()
+
+    case {scheme, port} do
+      {"https", 443} -> "https://#{host}"
+      {"http", 80} -> "http://#{host}"
+      {scheme, port} -> "#{scheme}://#{host}:#{port}"
+    end
+  end
+
+  defp bracket_ipv6(host) do
+    if String.contains?(host, ":"), do: "[#{host}]", else: host
+  end
+
+  defp origin_message(var, value, nil) do
+    "#{var} must be * or an origin — scheme, host and optional port, with no " <>
+      "path, query, fragment or credentials (https://app.example.com), got: #{inspect(value)}"
+  end
+
+  defp origin_message(var, value, canonical) do
+    "#{var} must be * or an origin in its canonical form, since a browser compares it " <>
+      "byte for byte against the Origin it sends — got: #{inspect(value)}, " <>
+      "did you mean #{inspect(canonical)}?"
   end
 
   # Existence and writability are both proved at boot, and writability by the

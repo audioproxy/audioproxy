@@ -541,6 +541,7 @@ Note that the variables below are the full configuration surface for the design,
 | `AP_LOG_LEVEL` | `debug` \| `info` \| `warning` \| `error` | `info` | Lowest level written to stdout. See [Logs](#logs) |
 | `AP_METRICS_BIND` | IP address literal | `127.0.0.1` | Interface the `/metrics` listener binds. The endpoint is unsigned, so this *is* its access control — widen it deliberately. A hostname is refused. See [Metrics](#metrics) |
 | `AP_METRICS_PORT` | positive integer | `9568` | Port for the `/metrics` listener. Must differ from the listener port (`AP_PORT`, or `PORT`) — two listeners cannot share one, and the clash is refused at boot rather than left to an `:eaddrinuse` naming neither |
+| `AP_ALLOW_ORIGIN` | `*` or an origin | unset | Send CORS headers, so a page on another origin can `fetch()` from the proxy. Unset, no CORS header is sent anywhere. See [Fetching from a browser](#fetching-from-a-browser) |
 | `AP_S3_ENDPOINT` | origin URL | unset | Talk to an S3-compatible store instead of AWS. See [S3 credentials](#s3-credentials) and [docs/s3-providers.md](docs/s3-providers.md) |
 | `AP_S3_ADDRESSING` | `virtual` \| `path` | `virtual` with no `AP_S3_ENDPOINT`, `path` with one | Whether a request names its bucket in the host (`bucket.host/key`) or in the path (`host/bucket/key`). Tigris requires `virtual`; see [docs/s3-providers.md](docs/s3-providers.md) |
 | `AP_S3_CA_BUNDLE` | path to a PEM file | unset | Verify the store's certificate against this bundle instead of the system trust store, for a store behind a private CA. Must be readable at boot |
@@ -550,6 +551,31 @@ Booleans accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`, case-insensiti
 The listener port is read from `AP_PORT`, then `PORT`, then `4000`.
 
 **Sizing the container.** `AP_MAX_CONCURRENCY` and `AP_MAX_VARIANT_BYTES` are the two variables that decide how much memory a container needs, and the answer is a lookup rather than a guess: a render's output is held in memory until the render ends, so a full-length transcode costs its own size while a source of any length costs nothing. [docs/capacity.md](docs/capacity.md) opens with a matrix — find your output length and format in a row and your memory limit in a column, and read the largest safe `AP_MAX_CONCURRENCY` — plus the reverse table, for a concurrency you have already fixed. The formula, the measured per-format costs and the worked examples follow it as the derivation, including why full-length lossless output is refused by design. Read it before serving anything longer than a preview.
+
+### Fetching from a browser
+
+An `<audio src="…">` pointed at the proxy plays from any page, with nothing configured. Anything that *reads* the bytes instead of playing them needs CORS: `fetch()`ing `f:peaks` to draw a waveform, reading `/info`, or reading `Retry-After` off a `429` to back off politely. Without it the browser refuses the response and the page sees an opaque failure.
+
+Name the origin your page is served from:
+
+```bash
+AP_ALLOW_ORIGIN=https://app.example.com …
+```
+
+An origin and nothing else — scheme, host, optional port — **spelled the way a browser spells it**, since the browser compares your value to its own `Origin` byte for byte. Anything that means the right origin to a person but matches nothing in a browser is refused at boot, with the canonical spelling in the error:
+
+| Refused | Write instead |
+|---|---|
+| `https://app.example.com/` | `https://app.example.com` |
+| `HTTPS://App.Example.com` | `https://app.example.com` |
+| `https://app.example.com.` | `https://app.example.com` |
+| `https://app.example.com:443` | `https://app.example.com` |
+
+A non-default port stays, of course: `http://localhost:5173` is exactly what a dev server sends. `AP_ALLOW_ORIGIN=*` allows every origin, which suits a public catalogue and nothing that a signed URL is meant to keep scoped.
+
+Setting it also makes `OPTIONS` answer the browser's preflight; unset, `OPTIONS` is a `404` like every other non-GET method. Either way the URL signature is still what authorizes a request: CORS decides which page may *read* a response, never which requests are valid.
+
+One origin, not a list. If you need several, put a CDN or reverse proxy in front — or open an issue, since the single value is a starting point rather than a limit of the design.
 
 ### S3 credentials
 
