@@ -562,7 +562,16 @@ Name the origin your page is served from:
 AP_ALLOW_ORIGIN=https://app.example.com …
 ```
 
-An origin and nothing else — scheme, host, optional port. A trailing slash is the common mistake and is refused at boot, because a browser never sends one and the header would then allow nobody. `AP_ALLOW_ORIGIN=*` allows every origin, which suits a public catalogue and nothing that a signed URL is meant to keep scoped.
+An origin and nothing else — scheme, host, optional port — **spelled the way a browser spells it**, since the browser compares your value to its own `Origin` byte for byte. Anything that means the right origin to a person but matches nothing in a browser is refused at boot, with the canonical spelling in the error:
+
+| Refused | Write instead |
+|---|---|
+| `https://app.example.com/` | `https://app.example.com` |
+| `HTTPS://App.Example.com` | `https://app.example.com` |
+| `https://app.example.com.` | `https://app.example.com` |
+| `https://app.example.com:443` | `https://app.example.com` |
+
+A non-default port stays, of course: `http://localhost:5173` is exactly what a dev server sends. `AP_ALLOW_ORIGIN=*` allows every origin, which suits a public catalogue and nothing that a signed URL is meant to keep scoped.
 
 Setting it also makes `OPTIONS` answer the browser's preflight; unset, `OPTIONS` is a `404` like every other non-GET method. Either way the URL signature is still what authorizes a request: CORS decides which page may *read* a response, never which requests are valid.
 

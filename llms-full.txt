@@ -280,7 +280,7 @@ All configuration is `AP_`-prefixed environment variables, read and validated on
 | `AP_LOG_LEVEL` | `info` | Lowest level written to stdout |
 | `AP_METRICS_BIND` | `127.0.0.1` | Interface the `/metrics` listener binds. An address literal; a hostname is refused |
 | `AP_METRICS_PORT` | `9568` | Port for the `/metrics` listener |
-| `AP_ALLOW_ORIGIN` | unset | `*` or one origin (`https://app.example.com`). Unset sends no CORS header anywhere. An origin and nothing else — a trailing slash, path, query or fragment is refused at boot |
+| `AP_ALLOW_ORIGIN` | unset | `*` or one origin (`https://app.example.com`). Unset sends no CORS header anywhere. An origin and nothing else, spelled as a browser spells it — a path, query, fragment, trailing slash, uppercase scheme or host, trailing dot, or explicit default port is refused at boot, with the canonical spelling in the error |
 | `AP_S3_ENDPOINT` | unset | An S3-compatible store instead of AWS. Origin only |
 | `AP_S3_ADDRESSING` | `virtual`, or `path` with an endpoint | Whether a request names its bucket in the host or the path |
 | `AP_S3_CA_BUNDLE` | unset | PEM bundle replacing the system trust store, for a store behind a private CA |
