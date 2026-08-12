@@ -23,6 +23,7 @@ defmodule AudioProxy.Plugs.VerifySignatureIntegrationTest do
   import AudioProxy.SignedRequest
 
   alias AudioProxy.Signature
+  alias AudioProxy.TestServer
 
   @moduletag :integration
 
@@ -56,10 +57,8 @@ defmodule AudioProxy.Plugs.VerifySignatureIntegrationTest do
   setup do
     put_config(%{key: key(), salt: salt(), allow_insecure: false})
 
-    bandit =
-      start_supervised!({Bandit, plug: TestPlug, scheme: :http, ip: {127, 0, 0, 1}, port: 0})
+    %{port: port} = TestServer.start!(TestPlug)
 
-    {:ok, {{127, 0, 0, 1}, port}} = ThousandIsland.listener_info(bandit)
     {:ok, port: port}
   end
 

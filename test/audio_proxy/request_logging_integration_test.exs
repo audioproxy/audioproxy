@@ -20,6 +20,7 @@ defmodule AudioProxy.RequestLoggingIntegrationTest do
   import ExUnit.CaptureLog
 
   alias AudioProxy.RawHttp
+  alias AudioProxy.TestServer
 
   @moduletag :integration
   @moduletag tmp_dir: "request_logging_integration"
@@ -31,12 +32,8 @@ defmodule AudioProxy.RequestLoggingIntegrationTest do
 
     put_config(base_config(local_root: tmp_dir))
 
-    bandit =
-      start_supervised!(
-        {Bandit, plug: AudioProxy.FakeFfmpeg.Router, scheme: :http, ip: {127, 0, 0, 1}, port: 0}
-      )
+    %{port: port} = TestServer.start!(AudioProxy.FakeFfmpeg.Router)
 
-    {:ok, {{127, 0, 0, 1}, port}} = ThousandIsland.listener_info(bandit)
     {:ok, port: port}
   end
 

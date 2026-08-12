@@ -29,6 +29,7 @@ defmodule AudioProxy.RenderEndpointStreamTest do
   import AudioProxy.Eventually
 
   alias AudioProxy.RawHttp
+  alias AudioProxy.TestServer
 
   @moduletag :integration
   @moduletag tmp_dir: "render_stream"
@@ -54,12 +55,11 @@ defmodule AudioProxy.RenderEndpointStreamTest do
 
     reset_probes()
 
-    bandit =
-      start_supervised!(
-        {Bandit, plug: AudioProxy.FakeFfmpeg.Router, scheme: :http, ip: {127, 0, 0, 1}, port: 0}
-      )
+    # The supervisor pid stays in the context under `bandit`: the one test that
+    # wants it asks Thousand Island for *this listener's* connections, and the
+    # name is what says which listener that is.
+    %{port: port, server: bandit} = TestServer.start!(AudioProxy.FakeFfmpeg.Router)
 
-    {:ok, {{127, 0, 0, 1}, port}} = ThousandIsland.listener_info(bandit)
     {:ok, port: port, bandit: bandit}
   end
 

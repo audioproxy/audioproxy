@@ -60,7 +60,7 @@ defmodule AudioProxy.Source.S3BackendTest do
   import AudioProxy.SignedRequest, except: [conn: 3]
   import Plug.Test
 
-  alias AudioProxy.{ErrorJSON, S3}
+  alias AudioProxy.{ErrorJSON, S3, TestServer}
   alias AudioProxy.Source.S3, as: SourceS3
 
   @moduletag :minio
@@ -223,16 +223,7 @@ defmodule AudioProxy.Source.S3BackendTest do
       # An injected 5xx: everything MinIO would have answered, answered 503
       # instead. `ex_aws` reports it as `{:http, 503, _}`, which is the shape
       # the seam must not fold into the blind 404.
-      store =
-        start_supervised!(
-          {Bandit,
-           plug: AudioProxy.Source.S3BackendTest.Unavailable,
-           scheme: :http,
-           ip: {127, 0, 0, 1},
-           port: 0}
-        )
-
-      {:ok, {{127, 0, 0, 1}, port}} = ThousandIsland.listener_info(store)
+      %{port: port} = TestServer.start!(AudioProxy.Source.S3BackendTest.Unavailable)
 
       put_config(%{
         s3: %{
