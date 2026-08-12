@@ -168,6 +168,7 @@ itself:
 | `AudioProxy.SignedRequest` | Signing key material, the config floor, the URL grammar, conn builders. | An endpoint test starts from `base_config/1`. |
 | `AudioProxy.Eventually` | Waiting for a condition that nothing announces. | A poll loop is imported, never written. |
 | `AudioProxy.Fixtures` | Generated audio fixtures, and the fixture root they live in. | A fixture path is never a fixed name under `System.tmp_dir!()`. |
+| `AudioProxy.TestServer` | Booting a real listener, and reading back the port it got. | A test that binds a socket boots it through this helper. |
 
 Promoting another duplicated helper adds a row here and a subsection below. The
 section is meant to grow a row at a time; nothing above needs rewriting to make
@@ -246,6 +247,34 @@ Two rules, and the first of them is a bug fix rather than a tidy-up:
 What each file generates stays in that file's `setup_all` — the fixture *list*
 is the file's subject, and a value the test is about (duration, amplitude, rate,
 codec) is named at the call site. Only the argv is shared.
+
+`AudioProxy.TestServer` owns listener boot, for the nine files that need a real
+socket rather than a `Plug.Test` conn:
+
+| Function | Holds |
+|---|---|
+| `start!/2` | Bandit under `start_supervised!` on an ephemeral loopback port, returning `%{port: port, server: pid}`. Extra Bandit options merge over the defaults; `:id` defaults to `{TestServer, plug}`, so a file booting two listeners on different plugs does not collide. Same plug twice still needs its own `:id`. |
+
+Two rules, and both are about what the helper deliberately does *not* take
+over:
+
+- **The plug is named at the call site, never defaulted.** Three files boot the
+  production `AudioProxy.Router`, four boot `AudioProxy.FakeFfmpeg.Router`, and
+  the rest boot a plug written for the one test that mounts it — and that
+  argument is the whole subject of each of those files.
+  `TestServer.start!(FakeFfmpeg.Router)` has to say as much as the five lines it
+  replaced.
+- **`put_config/1` stays in the test, before the boot.** The plug chain reads
+  config per request, but `AP_LOCAL_ROOT` has to be right before the first
+  request arrives, and every file's config differs. Folding it in would couple
+  two things that vary independently.
+
+The one line here a dependency upgrade can break is
+`ThousandIsland.listener_info/1`, reached through Bandit's supervisor pid. It
+now breaks in one place: a `MatchError` from this module means Bandit or
+Thousand Island changed how a bound port is reported, not that the calling test
+is wrong. The `{127, 0, 0, 1}` on both sides of that match is an assertion that
+the listener came up loopback-only, not leftover pattern.
 
 ## Open questions (decide as they come up)
 

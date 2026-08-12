@@ -23,6 +23,7 @@ defmodule AudioProxy.InfoEndpointFfmpegTest do
 
   alias AudioProxy.Fixtures
   alias AudioProxy.RawHttp
+  alias AudioProxy.TestServer
 
   @moduletag :ffmpeg
   @moduletag timeout: 120_000
@@ -63,12 +64,8 @@ defmodule AudioProxy.InfoEndpointFfmpegTest do
 
     reset_probes()
 
-    bandit =
-      start_supervised!(
-        {Bandit, plug: AudioProxy.Router, scheme: :http, ip: {127, 0, 0, 1}, port: 0}
-      )
+    %{port: port} = TestServer.start!(AudioProxy.Router)
 
-    {:ok, {{127, 0, 0, 1}, port}} = ThousandIsland.listener_info(bandit)
     {:ok, port: port}
   end
 

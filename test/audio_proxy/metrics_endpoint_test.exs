@@ -26,7 +26,7 @@ defmodule AudioProxy.MetricsEndpointTest do
   import Plug.Conn, only: [get_resp_header: 2]
   import Plug.Test
 
-  alias AudioProxy.{Metrics, RawHttp}
+  alias AudioProxy.{Metrics, RawHttp, TestServer}
 
   @moduletag tmp_dir: "metrics_endpoint"
 
@@ -165,14 +165,16 @@ defmodule AudioProxy.MetricsEndpointTest do
       # fixture would make this request a `coalesced` one.
       reset_coordinators()
 
-      {public, public_port} = listen(AudioProxy.FakeFfmpeg.Router)
-      {metrics, metrics_port} = listen(Metrics.Router)
+      # Two listeners in one test, which is why `TestServer` derives the child
+      # spec id from the plug rather than letting both be `Bandit`.
+      public = TestServer.start!(AudioProxy.FakeFfmpeg.Router)
+      metrics = TestServer.start!(Metrics.Router)
 
       {:ok,
-       public: public_port,
-       metrics: metrics_port,
-       public_listener: public,
-       metrics_listener: metrics}
+       public: public.port,
+       metrics: metrics.port,
+       public_listener: public.server,
+       metrics_listener: metrics.server}
     end
 
     test "a real request cycle moves the counters", %{public: public, metrics: metrics} do
@@ -219,19 +221,6 @@ defmodule AudioProxy.MetricsEndpointTest do
 
       assert port == context.metrics
     end
-  end
-
-  ## Listeners
-
-  defp listen(plug) do
-    bandit =
-      start_supervised!(
-        {Bandit, plug: plug, scheme: :http, ip: {127, 0, 0, 1}, port: 0},
-        id: plug
-      )
-
-    {:ok, {{127, 0, 0, 1}, port}} = ThousandIsland.listener_info(bandit)
-    {bandit, port}
   end
 
   # Bandit's stop event is emitted after the response is written, so the
