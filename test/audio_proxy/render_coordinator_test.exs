@@ -29,7 +29,7 @@ defmodule AudioProxy.RenderCoordinatorTest do
   @deadline 5_000
 
   setup do
-    put_config(%{max_src_bytes: 2_000_000_000, max_variant_bytes: 2_000_000_000})
+    put_config(byte_limits())
     reset_coordinators()
     reset_probes()
     :ok
@@ -334,7 +334,7 @@ defmodule AudioProxy.RenderCoordinatorTest do
       # The point of the split. A source ceiling far below the output is now
       # simply irrelevant here — it is spent in `Plugs.RenderAction`, against
       # the source, before this coordinator exists.
-      put_config(%{max_src_bytes: 10, max_variant_bytes: 2_000_000_000})
+      put_config(byte_limits(max_src_bytes: 10))
 
       assert subscribe_and_collect(unique_key(), @paced).outcome == :ok
     end
@@ -364,7 +364,7 @@ defmodule AudioProxy.RenderCoordinatorTest do
 
       # And the key went with the render, so the next request renders afresh
       # rather than joining a corpse.
-      put_config(%{max_variant_bytes: 2_000_000_000})
+      put_config(byte_limits())
       assert %{status: :miss, outcome: :ok} = subscribe_and_collect(key, ["emit", "10"])
     end
   end

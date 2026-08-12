@@ -27,4 +27,38 @@ defmodule AudioProxy.ConfigHelperTest do
 
     assert Config.get(:serve_mode) == :proxy
   end
+
+  describe "byte_limits/1" do
+    test "pins both limits and requires nothing" do
+      # The floor a file takes when it signs nothing: an AP_MAX_SRC_BYTES in the
+      # environment must not be able to reach the assertion through either key.
+      assert byte_limits() == %{
+               max_src_bytes: 2_000_000_000,
+               max_variant_bytes: 2_000_000_000
+             }
+    end
+
+    test "an override wins over the floor, and unrelated keys come along" do
+      # The merge direction is the ergonomic argument: a file states the floor
+      # and its subject in one expression, and the subject takes effect.
+      limits = byte_limits(max_src_bytes: 10, variant_store: {:file, "/tmp/x"})
+
+      assert limits.max_src_bytes == 10
+      assert limits.max_variant_bytes == 2_000_000_000
+      assert limits.variant_store == {:file, "/tmp/x"}
+    end
+
+    test "takes a map as readily as a keyword list" do
+      assert byte_limits(%{max_src_bytes: 10}).max_src_bytes == 10
+    end
+
+    test "is the floor AudioProxy.SignedRequest.base_config/1 is built on" do
+      # The direction of the dependency, asserted rather than assumed: the
+      # signing floor adds key material to this one, so the limits have a
+      # single definition and cannot drift.
+      config = AudioProxy.SignedRequest.base_config(local_root: "/tmp/x")
+
+      assert Map.take(config, [:max_src_bytes, :max_variant_bytes]) == byte_limits()
+    end
+  end
 end
