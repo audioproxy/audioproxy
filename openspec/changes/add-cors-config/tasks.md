@@ -20,4 +20,4 @@
 
 - [x] 4.1 README configuration table row; API doc §2 non-GET rule gains the preflight carve-out sentence, §6 the variable
 - [x] 4.2 `llms-full.txt` config table
-- [ ] 4.3 Docs site sources/rendering guides note the variable for browser consumers (drift notifier will flag)
+- [x] 4.3 Docs site sources/rendering guides note the variable for browser consumers (drift notifier will flag)
