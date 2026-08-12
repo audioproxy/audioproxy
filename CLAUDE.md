@@ -20,6 +20,8 @@ This is a precondition, not a preference. "It's only a config file", "it's just 
 
 The other writes permitted on `main`: resolving a merge, and the commit `/opsx:archive` produces for an already-merged change.
 
+**Stage those two by path, never with `git add -A`.** Both are commits whose contents another tool wrote, so there is nothing in them you are checking line by line — which is exactly when a stray working-directory file rides along unnoticed. Twice it was `.playwright-mcp/`, the console logs and page snapshots the browser-automation server drops in the repo root: swept into `8d2e4bb` and again into `342ca89`, from the same step, by the same `-A`. `git add openspec/` (or the specific paths a merge resolved) costs one extra word and cannot do that. The `.gitignore` now covers that particular directory; the habit is what covers the next one.
+
 Workflow mechanics (devcontainer, ports, hooks) are under *Dev workflow* below.
 
 ## Stack — decided, don't relitigate
