@@ -1,3 +1,29 @@
+defmodule NegotiatingPlug do
+  @moduledoc """
+  The CORS plug over a response that sets a `Vary` of its own.
+
+  Mounted the way `AudioProxy.Router` mounts it — CORS above, the responding
+  plug below — because the ordering is the whole subject: a callback
+  registered below this one runs *before* it. `?vary=` names the value, so one
+  plug covers both the append and the already-present case.
+  """
+
+  use Plug.Builder
+
+  plug AudioProxy.Plugs.Cors
+  plug :respond
+
+  def respond(conn, _opts) do
+    vary =
+      conn
+      |> fetch_query_params()
+      |> Map.fetch!(:query_params)
+      |> Map.get("vary", "Accept-Encoding")
+
+    conn |> put_resp_header("vary", vary) |> send_resp(200, "")
+  end
+end
+
 defmodule AudioProxy.CorsTest do
   @moduledoc """
   What a browser on another origin can see, and what it can see today.
@@ -95,6 +121,16 @@ defmodule AudioProxy.CorsTest do
     pid
   end
 
+  # A preflight whose `Access-Control-Request-Headers` is `asked`.
+  defp preflight_asking(asked) do
+    SignedRequest.conn(:options, signed(@rest), [
+      {"origin", @origin},
+      {"access-control-request-method", "GET"},
+      {"access-control-request-headers", asked}
+    ])
+    |> AudioProxy.Router.call(@opts)
+  end
+
   # Puts a variant in the store under the key `@rest` resolves to, so the next
   # request for it is a HIT with no render behind it.
   defp store_variant! do
@@ -190,6 +226,32 @@ defmodule AudioProxy.CorsTest do
       assert get_resp_header(conn, "access-control-allow-origin") == [@origin]
     end
 
+    test "so does `/info`, the other endpoint a page fetches rather than plays" do
+      conn = render("/info/plain/local://piece.wav")
+
+      assert conn.status == 200
+      assert get_resp_header(conn, "access-control-allow-origin") == [@origin]
+      assert get_resp_header(conn, "access-control-expose-headers") == [@expose]
+    end
+
+    test "`Vary: Origin` is appended to what the response already varies on" do
+      # Mounted the way the router mounts it, over a plug that negotiates on
+      # something of its own. Not replaced: every plug below the CORS one
+      # registers its before-send callback later and callbacks run
+      # newest-first, so this one runs last — an assignment here would be the
+      # one that silently won.
+      conn = Plug.Test.conn(:get, "/") |> NegotiatingPlug.call(NegotiatingPlug.init([]))
+
+      assert get_resp_header(conn, "vary") == ["Accept-Encoding, Origin"]
+    end
+
+    test "and is not duplicated when the response already varies on it" do
+      conn =
+        Plug.Test.conn(:get, "/?vary=Origin") |> NegotiatingPlug.call(NegotiatingPlug.init([]))
+
+      assert get_resp_header(conn, "vary") == ["Origin"]
+    end
+
     test "`*` allows everyone and varies on nothing" do
       put_config(%{allow_origin: "*"})
 
@@ -266,6 +328,35 @@ defmodule AudioProxy.CorsTest do
       assert get_resp_header(conn, "access-control-allow-headers") == []
     end
 
+    # The echo is the one part of the response a client writes, so what comes
+    # back is the header names that are actually header names. Anything else
+    # was not sent by a browser, and reflecting it would put a malformed
+    # header on the wire — or, for a control character, raise from inside the
+    # before-send callback and turn a preflight into a 500.
+    test "echoes only the well-formed header names, and drops the rest" do
+      conn = preflight_asking("x-request-id, not a name, \"quoted\", cache-control")
+
+      assert conn.status == 204
+
+      assert get_resp_header(conn, "access-control-allow-headers") == [
+               "x-request-id, cache-control"
+             ]
+    end
+
+    test "omits the echo entirely when nothing in the list is a header name" do
+      conn = preflight_asking("\"quoted\"")
+
+      assert conn.status == 204
+      assert get_resp_header(conn, "access-control-allow-headers") == []
+    end
+
+    test "a control character is dropped rather than raised on" do
+      conn = preflight_asking("x-fine\r\nx-injected: 1")
+
+      assert conn.status == 204
+      assert get_resp_header(conn, "access-control-allow-headers") == []
+    end
+
     test "answers an unsigned path too — it carries no credentials to check" do
       assert request(:options, "/anything").status == 204
     end
@@ -277,15 +368,13 @@ defmodule AudioProxy.CorsTest do
   end
 
   describe "boot" do
-    test "refuses a value that is neither `*` nor an origin, naming the variable" do
+    test "refuses a value that is not an origin at all, naming the variable" do
       for value <- [
-            # The common miss: a browser's `Origin` header never carries a
-            # trailing slash, so this would allow nobody.
-            "https://app.example.com/",
             "app.example.com",
             "https://",
             "https://app.example.com/path",
             "https://app.example.com?a=1",
+            "https://user:pw@app.example.com",
             "*.example.com"
           ] do
         assert_raise Config.Error, ~r/AP_ALLOW_ORIGIN/, fn ->
@@ -294,8 +383,36 @@ defmodule AudioProxy.CorsTest do
       end
     end
 
-    test "accepts `*`, a port and either scheme" do
-      for value <- ["*", "https://app.example.com", "http://localhost:5173"] do
+    # The dangerous family: each of these means the right origin to a person
+    # and matches nothing in a browser, which compares the header to its own
+    # `Origin` byte for byte. Accepted, they would boot a proxy that sends a
+    # CORS header allowing nobody — a failure visible only as an opaque fetch
+    # error in someone else's page.
+    test "refuses a near-miss spelling, and says what to write instead" do
+      for {value, canonical} <- [
+            {"https://app.example.com/", "https://app.example.com"},
+            {"HTTPS://APP.Example.com", "https://app.example.com"},
+            {"https://app.example.com.", "https://app.example.com"},
+            {"https://app.example.com:443", "https://app.example.com"},
+            {"http://app.example.com:80", "http://app.example.com"},
+            {"https://app.example.com:0443", "https://app.example.com"},
+            {"https://app.example.com:", "https://app.example.com"}
+          ] do
+        message =
+          assert_raise Config.Error, fn -> Config.build!(%{"AP_ALLOW_ORIGIN" => value}) end
+
+        assert message.message =~ "AP_ALLOW_ORIGIN"
+        assert message.message =~ canonical
+      end
+    end
+
+    test "accepts `*`, a non-default port, either scheme, and an IPv6 literal" do
+      for value <- [
+            "*",
+            "https://app.example.com",
+            "http://localhost:5173",
+            "http://[::1]:5173"
+          ] do
         assert Config.build!(%{"AP_ALLOW_ORIGIN" => value}).allow_origin == value
       end
     end

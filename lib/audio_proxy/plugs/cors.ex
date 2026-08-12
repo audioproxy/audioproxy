@@ -70,7 +70,23 @@ defmodule AudioProxy.Plugs.Cors do
   # opposite: the response *is* origin-specific to a cache that cannot see the
   # configuration behind it.
   defp vary_on_origin(conn, "*"), do: conn
-  defp vary_on_origin(conn, _origin), do: put_resp_header(conn, "vary", "Origin")
+
+  # Appended rather than assigned. Nothing sets `Vary` today, but before-send
+  # callbacks run newest-first, and every plug below this one registers later
+  # — so this callback runs after all of theirs, and an assignment here would
+  # be the one that silently won. A response that had negotiated on
+  # `Accept-Encoding` would lose the header saying so.
+  defp vary_on_origin(conn, _origin) do
+    update_resp_header(conn, "vary", "Origin", fn existing ->
+      if origin_in_vary?(existing), do: existing, else: existing <> ", Origin"
+    end)
+  end
+
+  defp origin_in_vary?(vary) do
+    vary
+    |> String.split(",")
+    |> Enum.any?(&(&1 |> String.trim() |> String.downcase() == "origin"))
+  end
 
   # The one scoped exception to API doc §2's "methods other than GET answer
   # 404, everywhere". It halts before `:match`, so the preflight never reaches
@@ -90,10 +106,25 @@ defmodule AudioProxy.Plugs.Cors do
   # Echoed rather than enumerated: the request headers a client sends are its
   # business, the URL carries the credentials, and a fixed list would have to
   # be edited every time a caller added a `Cache-Control` or a trace header.
+  #
+  # Echoed *filtered*, though. What comes back is a comma-separated list of
+  # header names, and a name is an RFC 9110 token; anything else in the
+  # request is not something a browser sent, and reflecting it would put a
+  # malformed header on the wire — or, for the control characters `Plug`
+  # refuses outright, raise from inside a before-send callback. Dropping the
+  # junk answers the preflight for whatever was legitimate and stays quiet
+  # about the rest.
   defp echo_requested_headers(conn) do
-    case get_req_header(conn, "access-control-request-headers") do
-      [requested | _rest] -> put_resp_header(conn, "access-control-allow-headers", requested)
-      [] -> conn
+    with [requested | _rest] <- get_req_header(conn, "access-control-request-headers"),
+         [_ | _] = tokens <-
+           requested |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.filter(&token?/1) do
+      put_resp_header(conn, "access-control-allow-headers", Enum.join(tokens, ", "))
+    else
+      _nothing_to_echo -> conn
     end
   end
+
+  # RFC 9110 §5.6.2's `tchar` set, trimmed of the surrounding whitespace the
+  # list grammar allows.
+  defp token?(candidate), do: Regex.match?(~r/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/, candidate)
 end
