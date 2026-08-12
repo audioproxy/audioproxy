@@ -221,6 +221,7 @@ covers everything that sends a message when it happens — and for the rest:
 |---|---|
 | `wait_until/2` | Polls, flunks on expiry, naming the deadline it exceeded. For a precondition. |
 | `eventually?/2` | Polls, returns a boolean. For a wait that *is* the assertion, including `refute`. |
+| `wait_for/2` | Polls a condition returning `{:ok, value}` or `{:retry, observed}`, returns the value, flunks naming the last `observed`. For a wait whose result is the value, where re-reading after a boolean wait would reopen the race. |
 | `gone_within?/2`, `alive?/1` | The OS-process pair, via `kill -0`. `gone_within?/2` is `eventually?/2` over `not alive?/1`. |
 
 Two rules, for the two things seventeen local copies disagreed about:
@@ -229,7 +230,11 @@ Two rules, for the two things seventeen local copies disagreed about:
   produced seventeen loops, under four names, at five different intervals with
   three different failure messages, none of them chosen. The interval lives in
   the module and nowhere else; a caller that genuinely needs its own gets an
-  option added there rather than a private `defp`.
+  option added there rather than a private `defp`. The three waits are the
+  three things a caller can want back — a verdict, a boolean, a value — so the
+  rule has no exceptions to plead: `grep -rn "defp await\|defp wait_\|defp
+  eventually" test` returns nothing, and a fourth shape would be an argument
+  for a fourth function here rather than for a local loop.
 - **The deadline stays at the call site.** It is the one part that legitimately
   varies — 2 s to 10 s, for real reasons — so a file whose budget is not the
   module's 5 s default passes `@deadline` explicitly, where the test is read.
