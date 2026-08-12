@@ -23,4 +23,37 @@ defmodule AudioProxy.ConfigHelper do
 
     previous |> Map.merge(overrides) |> AudioProxy.Config.put_all()
   end
+
+  @doc """
+  The byte-limit floor, with `overrides` merged over it.
+
+  Both limits are pinned far above anything this suite renders, because a
+  boot-time `AP_MAX_SRC_BYTES` in a developer's shell must not be able to turn
+  an assertion about coordinator behaviour into a size-limit failure. That
+  sentence is the whole reason this function exists; the numbers themselves say
+  nothing.
+
+  It requires nothing, and it is the floor's lower layer:
+  `AudioProxy.SignedRequest.base_config/1` builds on it, adding the key material
+  and the mandatory `local_root` a signing test needs. A file that only wants
+  the limits — one that signs nothing and resolves no local source — takes this
+  instead:
+
+      put_config(byte_limits())
+      put_config(byte_limits(variant_store: {:file, tmp_dir}))
+
+  As in `base_config/1`, a value the test is *about* goes in `overrides`, where
+  a reader sees it, and wins over the floor.
+
+  The floor is a fixed literal, deliberately not derived from
+  `AudioProxy.Config.build!/1`: deriving it would make every test's baseline
+  move when a production default moves.
+  """
+  @spec byte_limits(keyword() | map()) :: map()
+  def byte_limits(overrides \\ %{}) do
+    Map.merge(
+      %{max_src_bytes: 2_000_000_000, max_variant_bytes: 2_000_000_000},
+      Map.new(overrides)
+    )
+  end
 end

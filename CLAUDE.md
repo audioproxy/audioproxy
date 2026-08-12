@@ -165,6 +165,7 @@ itself:
 
 | Module | Owns | The rule |
 |---|---|---|
+| `AudioProxy.ConfigHelper` | Installing config for a test, and the byte-limit floor. | The limits are taken from `byte_limits/1`, never written as literals. |
 | `AudioProxy.SignedRequest` | Signing key material, the config floor, the URL grammar, conn builders. | An endpoint test starts from `base_config/1`. |
 | `AudioProxy.Eventually` | Waiting for a condition that nothing announces. | A poll loop is imported, never written. |
 | `AudioProxy.Fixtures` | Generated audio fixtures, and the fixture root they live in. | A fixture path is never a fixed name under `System.tmp_dir!()`. |
@@ -173,6 +174,20 @@ itself:
 Promoting another duplicated helper adds a row here and a subsection below. The
 section is meant to grow a row at a time; nothing above needs rewriting to make
 room.
+
+`AudioProxy.ConfigHelper` owns config installation and the floor's lower layer:
+
+| Function | Holds |
+|---|---|
+| `put_config/1` | Merges overrides into the stored config and restores them on exit. Global state, hence `async: false`. |
+| `byte_limits/1` | The two byte limits, with the caller's overrides merged over them. Requires nothing. Carries the reason the floor exists. |
+
+**Which floor a file reaches for is decided by whether it signs.** A test that
+signs a URL or resolves a `local://` source takes `SignedRequest.base_config/1`;
+a test that only needs the environment kept away from its size limits takes
+`byte_limits/1` and neither imports a signing helper nor invents a `local_root`
+it has no use for. `base_config/1` is built on `byte_limits/1`, so the numbers
+have one definition and the dependency runs one way: config is the lower layer.
 
 `AudioProxy.SignedRequest` owns the signing preamble every endpoint test shares:
 

@@ -13,8 +13,15 @@ defmodule AudioProxy.SignedRequest do
   A test still calls `AudioProxy.ConfigHelper.put_config/1` itself. This module
   builds the map; it does not install it. That keeps the `async: false`
   requirement that `put_config/1` carries visible in every file that has it.
+
+  The dependency on `AudioProxy.ConfigHelper` runs one way and is meant to:
+  config is the lower layer, `base_config/1` is the signing layer stacked on
+  top of `ConfigHelper.byte_limits/1`, and the byte limits therefore have one
+  definition rather than two that a test could only report as drifted after the
+  fact. Nothing in `ConfigHelper` knows this module exists.
   """
 
+  alias AudioProxy.ConfigHelper
   alias AudioProxy.Signature
 
   @key Base.decode16!("00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF")
@@ -38,11 +45,10 @@ defmodule AudioProxy.SignedRequest do
 
   `local_root` is required and has no default. Every caller has a per-test tmp
   dir, and a helper that guessed one would make "which root does this file's
-  sources resolve against" invisible in the file that cares about it.
-
-  The floor is a fixed literal, deliberately not derived from
-  `AudioProxy.Config.build!/1`: deriving it would make every test's baseline
-  move when a production default moves.
+  sources resolve against" invisible in the file that cares about it. A file
+  that signs nothing and resolves nothing wants
+  `AudioProxy.ConfigHelper.byte_limits/1`, which this builds on, rather than a
+  relaxation of that rule.
 
   Values a test is *about* belong in `overrides`, where a reader sees them:
 
@@ -59,16 +65,9 @@ defmodule AudioProxy.SignedRequest do
               "pass the test's tmp dir explicitly"
     end
 
-    Map.merge(
-      %{
-        key: @key,
-        salt: @salt,
-        allow_insecure: false,
-        max_src_bytes: 2_000_000_000,
-        max_variant_bytes: 2_000_000_000
-      },
-      overrides
-    )
+    ConfigHelper.byte_limits()
+    |> Map.merge(%{key: @key, salt: @salt, allow_insecure: false})
+    |> Map.merge(overrides)
   end
 
   @doc """

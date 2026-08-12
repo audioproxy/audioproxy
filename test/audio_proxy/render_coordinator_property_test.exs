@@ -34,7 +34,7 @@ defmodule AudioProxy.RenderCoordinatorPropertyTest do
   @deadline 5_000
 
   setup do
-    put_config(%{max_src_bytes: 2_000_000_000, max_variant_bytes: 2_000_000_000})
+    put_config(byte_limits())
     reset_coordinators()
     reset_probes()
     :ok
