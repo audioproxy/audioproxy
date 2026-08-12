@@ -33,6 +33,12 @@ audio_proxy-*.tar
 # Second-opinion review working log (session artifact).
 /second-opinion.md
 
+# Browser-automation scratch: the console logs and page snapshots the Playwright
+# MCP server drops in the working directory. Artifacts of having looked at a
+# page, never an input to anything — and a `git add -A` swept two batches of
+# them into archive commits before this line existed.
+/.playwright-mcp/
+
 # macOS Finder metadata
 .DS_Store
 
