@@ -221,7 +221,7 @@ covers everything that sends a message when it happens — and for the rest:
 |---|---|
 | `wait_until/2` | Polls, flunks on expiry, naming the deadline it exceeded. For a precondition. |
 | `eventually?/2` | Polls, returns a boolean. For a wait that *is* the assertion, including `refute`. |
-| `wait_for/2` | Polls a condition returning `{:ok, value}` or `{:retry, observed}`, returns the value, flunks naming the last `observed`. For a wait whose result is the value, where re-reading after a boolean wait would reopen the race. |
+| `wait_for/2` | Polls a condition returning `{:ok, value}` or `{:retry, observed}`, returns the value, flunks on expiry naming the deadline it exceeded and the last `observed`. For a wait whose result is the value, where re-reading after a boolean wait would reopen the race. |
 | `gone_within?/2`, `alive?/1` | The OS-process pair, via `kill -0`. `gone_within?/2` is `eventually?/2` over `not alive?/1`. |
 
 Two rules, for the two things seventeen local copies disagreed about:

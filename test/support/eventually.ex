@@ -184,7 +184,21 @@ defmodule AudioProxy.Eventually do
 
   # The last observation printed raw when it is text — `await_scrape`'s whole
   # diagnostic was a multi-line scrape body, and `inspect/1` would escape the
-  # newlines out of it.
-  defp describe(observed) when is_binary(observed), do: observed
-  defp describe(observed), do: inspect(observed, pretty: true, limit: :infinity)
+  # newlines out of it. Unbounded on that branch deliberately: the body *is*
+  # the diagnostic, and a truncated exposition is the one that omits the line
+  # you were looking for.
+  #
+  # `String.valid?/1` rather than `is_binary/1` alone, because a message
+  # carrying invalid UTF-8 does not merely print badly: `:io.put_chars` raises
+  # from inside `ExUnit.CLIFormatter`, which takes down the formatter and the
+  # runner with it. A wait that expires would then kill the whole suite rather
+  # than fail one test.
+  defp describe(observed) when is_binary(observed) do
+    if String.valid?(observed), do: observed, else: inspect(observed)
+  end
+
+  # Everything else at `inspect/2`'s default limit — a pid or a tuple prints
+  # whole, and a term large enough to be truncated is one no reader wanted in
+  # full.
+  defp describe(observed), do: inspect(observed, pretty: true)
 end
