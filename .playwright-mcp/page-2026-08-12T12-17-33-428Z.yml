@@ -1,0 +1,13 @@
+- generic [ref=e2]:
+  - generic [ref=e3]: audioproxy
+  - generic [ref=e9]: Audio variants, addressed by URL.
+  - generic [ref=e10]:
+    - generic [ref=e11]:
+      - generic [ref=e12]: /
+      - generic [ref=e13]: f:opus
+      - generic [ref=e14]: /
+      - generic [ref=e15]: br:96
+      - generic [ref=e16]: /
+      - generic [ref=e17]: t:0:30
+      - generic [ref=e18]: /plain/s3://…
+    - generic [ref=e19]: docs.audioproxy.dev

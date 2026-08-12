@@ -35,3 +35,6 @@ audio_proxy-*.tar
 
 # macOS Finder metadata
 .DS_Store
+
+# Local Netlify folder
+.netlify
