@@ -253,15 +253,17 @@ socket rather than a `Plug.Test` conn:
 
 | Function | Holds |
 |---|---|
-| `start!/2` | Bandit under `start_supervised!` on an ephemeral loopback port, returning `%{port: port, server: pid}`. Extra Bandit options merge over the defaults; `:id` defaults to one derived from the plug, so a file booting two listeners does not collide. |
+| `start!/2` | Bandit under `start_supervised!` on an ephemeral loopback port, returning `%{port: port, server: pid}`. Extra Bandit options merge over the defaults; `:id` defaults to `{TestServer, plug}`, so a file booting two listeners on different plugs does not collide. Same plug twice still needs its own `:id`. |
 
 Two rules, and both are about what the helper deliberately does *not* take
 over:
 
-- **The plug is named at the call site, never defaulted.** Five files boot the
-  production `AudioProxy.Router` and four boot a stand-in, and that argument is
-  the whole subject of each of those files. `TestServer.start!(FakeFfmpeg.Router)`
-  has to say as much as the five lines it replaced.
+- **The plug is named at the call site, never defaulted.** Three files boot the
+  production `AudioProxy.Router`, four boot `AudioProxy.FakeFfmpeg.Router`, and
+  the rest boot a plug written for the one test that mounts it — and that
+  argument is the whole subject of each of those files.
+  `TestServer.start!(FakeFfmpeg.Router)` has to say as much as the five lines it
+  replaced.
 - **`put_config/1` stays in the test, before the boot.** The plug chain reads
   config per request, but `AP_LOCAL_ROOT` has to be right before the first
   request arrives, and every file's config differs. Folding it in would couple

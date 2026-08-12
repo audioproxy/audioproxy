@@ -48,15 +48,17 @@ defmodule AudioProxy.TestServer do
   @doc """
   Starts `plug` under the test supervisor on an ephemeral loopback port.
 
-  Returns `%{port: port, server: pid}` — six callers match `%{port: port}` and
-  ignore the rest; the ones asserting on connections or on the bound address
-  want the supervisor pid.
+  Returns `%{port: port, server: pid}` — seven callers match `%{port: port}`
+  and ignore the rest; the ones asserting on connections or on the bound
+  address want the supervisor pid.
 
   `bandit_options` are merged over the defaults (`scheme: :http`,
   `ip: {127, 0, 0, 1}`, `port: 0`), so a test needing its own `http_options`
   extends rather than forks this. The one non-Bandit key it understands is
-  `:id`, the child spec id, which defaults to one derived from the plug so that
-  a file booting two listeners does not collide on `Bandit`.
+  `:id`, the child spec id. It defaults to `{__MODULE__, plug}` — keyed on the
+  plug, so a file booting two listeners on *different* plugs does not collide
+  on the child id `Bandit`, which is what every caller here needs. Two
+  listeners on the same plug still collide, and pass their own `:id`.
   """
   @spec start!(module(), keyword()) :: t()
   def start!(plug, bandit_options \\ []) do
