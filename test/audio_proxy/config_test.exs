@@ -785,21 +785,6 @@ defmodule AudioProxy.ConfigTest do
     # the variable name as a literal, so the call sites are what is scanned —
     # not the whole file, which would also match the moduledoc's own table and
     # every error message that names a variable.
-    test "the scan still finds the reads it is meant to guard" do
-      # Without this, a refactor that moved the reads out of the shape above
-      # would leave the scan matching nothing and the two tests below passing
-      # vacuously — the same silent narrowing they exist to catch.
-      found = read_variables()
-
-      assert length(found) >= 20,
-             """
-             The scan of lib/audio_proxy/config.ex found only #{length(found)} \
-             variable reads: #{inspect(Enum.sort(found))}
-             Either the reads no longer go through a `(env, "AP_…")` call, or \
-             the pattern in this test needs updating.
-             """
-    end
-
     test "every variable read is published" do
       missing = read_variables() -- Config.variables()
 
@@ -817,10 +802,38 @@ defmodule AudioProxy.ConfigTest do
 
       assert stale == [],
              """
-             variables/0 publishes variables AudioProxy.Config does not read: \
+             variables/0 publishes variables the scan did not find a read for: \
              #{inspect(Enum.sort(stale))}
-             Remove them from @variables, and from the configuration tables in \
-             README.md and llms-full.txt.
+
+             Two different things cause this, and the fixes are opposites.
+
+             If the variable is genuinely gone, remove it from @variables and \
+             from the configuration tables in README.md and llms-full.txt.
+
+             If it is still read but the call moved out of the `(env, "AP_…")` \
+             shape this scan looks for — onto a module attribute, or a helper \
+             whose first argument is named something else — then trimming \
+             @variables would drop a live variable out of both documents, which \
+             is the failure these guards exist to prevent. Restore the shape, or \
+             widen the scan.
+             """
+    end
+
+    test "every variable written as a string literal is published" do
+      # The anti-erosion check, and the reason the test above can afford to
+      # offer two fixes rather than one. Moving a read onto a module attribute
+      # (`integer(env, @queue_size_var, …)`) hides it from the precise scan but
+      # not from this one: the literal is still in the file. So the "just trim
+      # the list" reading of the failure above lands here instead, and says no.
+      unpublished = mentioned_variables() -- Config.variables()
+
+      assert unpublished == [],
+             """
+             lib/audio_proxy/config.ex names variables variables/0 does not \
+             publish: #{inspect(Enum.sort(unpublished))}
+             If these are read, publish them and document them. If one is only \
+             an example inside a string, reword it — this scan reads code, and \
+             a published variable nothing reads fails the test above.
              """
     end
 
@@ -840,14 +853,34 @@ defmodule AudioProxy.ConfigTest do
     end
   end
 
+  # The variables the module *reads*: a parser helper taking `env` and the name
+  # as a literal. Precise enough to define the surface.
+  defp read_variables, do: scan(~r/\(\s*env,\s*"(AP_[A-Z0-9_]+)"/)
+
+  # Every variable name the module writes as a string literal, whatever it does
+  # with it — a module attribute, an error message, a call shape this scan does
+  # not know. Deliberately looser than the one above, and anchored on the
+  # opening quote because that is what an erosion looks like: the read moves,
+  # the literal stays.
+  defp mentioned_variables, do: scan(~r/"(AP_[A-Z0-9_]+)/)
+
   # Read when the test runs rather than at compile time, for the reason
   # `AudioProxy.LlmsDocsTest` gives: `mix test --only ffmpeg` still compiles
   # every test file, and a compile-time read makes the source a build input of
   # any image carrying the suite.
-  defp read_variables do
+  #
+  # Comment lines are dropped first. A comment documenting a parser helper with
+  # an example call — `# integer(env, "AP_FOO", 5, :positive)` — is a natural
+  # thing to write, and reading it as a variable would send the next author
+  # through both failure messages above and into publishing a variable that
+  # does not exist, then documenting it in two files.
+  defp scan(pattern) do
     "lib/audio_proxy/config.ex"
     |> File.read!()
-    |> then(&Regex.scan(~r/\(\s*env,\s*"(AP_[A-Z0-9_]+)"/, &1, capture: :all_but_first))
+    |> String.split("\n")
+    |> Enum.reject(&String.starts_with?(String.trim_leading(&1), "#"))
+    |> Enum.join("\n")
+    |> then(&Regex.scan(pattern, &1, capture: :all_but_first))
     |> List.flatten()
     |> Enum.uniq()
   end
