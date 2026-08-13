@@ -215,9 +215,11 @@ Three rules that are easy to get wrong:
 - **A mistyped override is refused, not merged.** `probe_timout: 1` used to
   install a key nothing reads and leave `probe_timeout` at whatever the
   environment gave it — the same class of failure the floor exists to prevent,
-  one layer in. Both `base_config/1` and `put_config/1` now raise, naming the
-  key and the nearest match. The set comes from
-  `AudioProxy.Config.build!(%{})`, including the `:s3` group one level down, so
+  one layer in. Both `base_config/1` and `put_config/1` now raise, naming every
+  unknown key — with the nearest match where jaro finds one, and with
+  `s3: %{…}` where the key is real but written a level too high. The set comes
+  from `AudioProxy.Config.build!(%{})`, including the `:s3` group — in map or
+  keyword form, since a keyword `:s3` is how the typo got through once — so
   a new config setting is overridable the moment `lib/` defines it and no
   support-layer edit is owed. A rejection is a finding: the key names something
   nothing reads.

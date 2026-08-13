@@ -123,6 +123,44 @@ defmodule AudioProxy.ConfigHelperTest do
       assert message =~ ":endpoint"
     end
 
+    test "a typo inside a keyword-list :s3 is caught the same way" do
+      # base_config/1 takes keyword() | map() and converts only the top level,
+      # so a caller writing the whole override in keyword syntax — which the
+      # spec invites — used to slip a nested typo past both guards and land a
+      # keyword list where Config keeps a map.
+      error =
+        assert_raise ArgumentError, fn ->
+          AudioProxy.SignedRequest.base_config(local_root: "/tmp/x", s3: [endpiont: "http://x"])
+        end
+
+      assert error.message =~ ":endpiont"
+    end
+
+    test "an :s3 key written at the top level is told where it belongs" do
+      # Spelled correctly, so jaro sees nothing wrong with it. The mistake is
+      # the nesting, and that is what the message has to name.
+      error = assert_raise ArgumentError, fn -> put_config(%{endpoint: "http://x"}) end
+
+      assert error.message =~ ":endpoint"
+      assert error.message =~ "s3:"
+    end
+
+    test "every unknown key is reported, not just the first" do
+      error = assert_raise ArgumentError, fn -> put_config(%{probe_timout: 1, wibble: 2}) end
+
+      assert error.message =~ ":probe_timout"
+      assert error.message =~ ":wibble"
+    end
+
+    test "a non-atom key is named rather than crashing the suggestion" do
+      # Atom.to_string/1 on a string key raised from inside the helper, which
+      # replaced the guard's message with an unrelated one.
+      error = assert_raise ArgumentError, fn -> put_config(%{"probe_timout" => 1}) end
+
+      assert error.message =~ "probe_timout"
+      assert error.message =~ "put_config/1"
+    end
+
     test "a real :s3 key is not" do
       put_config(%{s3: %{Config.get(:s3) | addressing: :path}})
 
@@ -142,8 +180,10 @@ defmodule AudioProxy.ConfigHelperTest do
     end
 
     test "every key AudioProxy.Config defines is accepted" do
-      # Derived, not restated: this fails the day someone hard-codes a list, and
-      # a new setting needs no edit to the support layer to be overridable.
+      # Derived, not restated. Precisely: a hard-coded list that has fallen
+      # behind `Config` fails here — which is the day the drift starts to
+      # matter, not the day the list is written. A new setting is overridable
+      # with no edit to the support layer, and this is what says so.
       reference = Config.build!(%{})
 
       assert :ok = validate_keys!(reference, "test")
