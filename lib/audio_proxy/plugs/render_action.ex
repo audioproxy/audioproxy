@@ -162,6 +162,7 @@ defmodule AudioProxy.Plugs.RenderAction do
     CacheKey,
     Config,
     ErrorJSON,
+    Expiry,
     Ffprobe,
     ProbeCoordinator,
     RenderCoordinator,
@@ -623,9 +624,13 @@ defmodule AudioProxy.Plugs.RenderAction do
   # the stored one *is* this constant, saved at render time — so this is a
   # latent divergence rather than a live one, and worth knowing about before
   # anything makes the stored policy vary per variant.
+  #
+  # Clamped like every other successful response: a 304 refreshes the freshness
+  # lifetime a cache is holding the body under, so an unclamped one would undo
+  # the clamp on the 200 that stored it.
   defp not_modified(conn) do
     conn
-    |> put_resp_header("cache-control", @cache_control)
+    |> put_resp_header("cache-control", cache_control(conn.assigns.options))
     |> put_resp_header("etag", etag(conn))
     |> send_resp(304, "")
     |> halt()
@@ -649,10 +654,17 @@ defmodule AudioProxy.Plugs.RenderAction do
     # `nil` charset: a `charset` parameter on `audio/mpeg` is meaningless, and
     # `put_resp_content_type/2` would add one.
     |> put_resp_content_type(Command.content_type(options), nil)
-    |> put_resp_header("cache-control", @cache_control)
+    |> put_resp_header("cache-control", cache_control(options))
     |> put_resp_header("etag", etag(conn))
     |> download_header(options)
   end
+
+  # The variant's policy, clamped to what this *request* may keep. A year of
+  # `immutable` is right for the bytes and wrong for a URL expiring in a
+  # minute: without the clamp an edge goes on serving the body long after the
+  # proxy started answering 410 for the URL that fetched it, and enforcement at
+  # the proxy becomes theater. No `exp`, no change — see `AudioProxy.Expiry`.
+  defp cache_control(options), do: Expiry.clamp_cache_control(@cache_control, options)
 
   defp etag(conn), do: ~s("#{conn.assigns.cache_key}")
 

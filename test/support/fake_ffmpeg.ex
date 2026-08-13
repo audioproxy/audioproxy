@@ -64,12 +64,19 @@ defmodule AudioProxy.FakeFfmpeg do
 end
 
 defmodule AudioProxy.FakeFfmpeg.Pipeline do
-  @moduledoc "`AudioProxy.Plugs.RenderPipeline` with the stand-in encoder."
+  @moduledoc """
+  `AudioProxy.Plugs.RenderPipeline` with the stand-in encoder.
+
+  The chain ahead of the action is copied from there, so a plug added to the
+  production pipeline has to be added here too — otherwise every test mounting
+  this one asserts against a chain the deployment does not run.
+  """
 
   use Plug.Builder
 
   plug AudioProxy.Plugs.VerifySignature
   plug AudioProxy.Plugs.ParseOptions
+  plug AudioProxy.Plugs.CheckExpiry
   plug AudioProxy.Plugs.ResolveSource
   # Resolved at compile time, which is the same filesystem the tests run on.
   plug AudioProxy.Plugs.Action,
@@ -97,6 +104,7 @@ defmodule AudioProxy.CountingProbe.Pipeline do
 
   plug AudioProxy.Plugs.VerifySignature
   plug AudioProxy.Plugs.ParseOptions
+  plug AudioProxy.Plugs.CheckExpiry
   plug AudioProxy.Plugs.ResolveSource
 
   plug AudioProxy.Plugs.Action,

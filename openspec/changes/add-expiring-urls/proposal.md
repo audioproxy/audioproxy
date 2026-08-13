@@ -20,6 +20,7 @@ The design cost worth a proposal is not the clock check — it is that a naive `
 - **`/info` expiry.** The info path has no options segment (`/{sig}/info/{source}`), so `exp` cannot ride it without a grammar change; info URLs are operator-to-operator, not shared with end users. If demand appears, extending the grammar is its own small change — named here as `add-info-request-options`, proposed only on demand.
 - **Revocation of a specific URL before its time.** That is key rotation; a multiple-accepted-keys scheme (imgproxy-style staged rotation) is a separate future change.
 - Any PRO behavior. This change only creates the request-option class; `pro-render-priority` adds its member in the PRO tree.
+- **Removing the hand-copied plug chains.** This change adds `CheckExpiry` to the production pipeline and to the two test mountings that copy it, and asserts the production one directly — the adversarial review found that without that assertion, deleting the plug from the deployed pipeline left the whole suite green. The instance is closed here; the class is `extract-signed-chain`, proposed and on the board.
 
 ## Capabilities
 

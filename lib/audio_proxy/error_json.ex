@@ -18,6 +18,7 @@ defmodule AudioProxy.ErrorJSON do
       :source_too_large              413     source_too_large
       :undecodable_source            415     undecodable_source
       :video_source                  415     video_source
+      :expired                       410     expired
       {:range_not_satisfiable, size} 416     range_not_satisfiable  Content-Range
       %OptionError{}                 422     invalid_options
       {:queue_full, retry_after}     429     queue_full          Retry-After
@@ -83,6 +84,14 @@ defmodule AudioProxy.ErrorJSON do
                                    signature never becomes good, invalid
                                    options never become valid; only a deploy
                                    changes that, and 60 s bounds the window
+      410             a year,      the one verdict that is permanent by
+                      immutable    construction: an expired URL cannot become
+                                   valid again, because the timestamp it is
+                                   judged against is inside the signature. No
+                                   deploy changes it either, so unlike 401 and
+                                   422 there is nothing for a short TTL to
+                                   bound — and an edge answering it outright
+                                   is exactly the enforcement wanted
       416             no-store     the only response here whose body depends
                                    on a request *header*; a shared cache
                                    without `Vary: Range` would hand it to a
@@ -191,6 +200,7 @@ defmodule AudioProxy.ErrorJSON do
     :source_too_large,
     :undecodable_source,
     :video_source,
+    :expired,
     {:range_not_satisfiable, 0},
     %OptionError{segment: "f:xyz", reason: :invalid_value},
     {:queue_full, 1},
@@ -266,6 +276,13 @@ defmodule AudioProxy.ErrorJSON do
      })}
   end
 
+  # 410 rather than 401: the signature is *valid*, and saying otherwise would
+  # send a client looking for a key problem it does not have. Gone is also the
+  # honest tense — this URL worked, and will not again.
+  def render(:expired) do
+    {410, [], encode(%{error: "expired", message: "URL has expired"})}
+  end
+
   def render({:queue_full, retry_after})
       when is_integer(retry_after) and retry_after >= 0 do
     body = encode(%{error: "queue_full", message: "Render queue is full"})
@@ -321,6 +338,7 @@ defmodule AudioProxy.ErrorJSON do
   def class(:source_too_large), do: :source_too_large
   def class(:undecodable_source), do: :undecodable_source
   def class(:video_source), do: :video_source
+  def class(:expired), do: :expired
   def class(:render_failed), do: :render_failed
   def class(:render_timeout), do: :render_timeout
   def class(:probe_failed), do: :probe_failed
@@ -355,6 +373,7 @@ defmodule AudioProxy.ErrorJSON do
   @spec cache_control(pos_integer()) :: String.t()
   def cache_control(status) when status in [404, 413, 415], do: "max-age=10"
   def cache_control(status) when status in [401, 422], do: "max-age=60"
+  def cache_control(410), do: "public, max-age=31536000, immutable"
   def cache_control(status) when status in [416, 429] or status >= 500, do: "no-store"
 
   defp encode(map), do: JSON.encode!(map)

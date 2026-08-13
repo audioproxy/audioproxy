@@ -77,6 +77,16 @@ No write endpoints in v1: variant write-back to S3 is a side effect of a GET ren
 
 ## 3. Processing options
 
+Every option key belongs to one of two classes, and the class decides what the value is allowed to reach.
+
+**Variant options** — §3.1 through §3.4 — describe the rendered bytes. They normalize into the canonical options string, which *is* the cache key, and they become ffmpeg arguments.
+
+**Request options** — §3.5 — describe the request. They are parsed and validated in the options segment and covered by the signature like any other path bytes, but they are excluded from the canonical options string, the cache key and the ffmpeg arguments. Two URLs differing only in a request option are one variant: identical cache key, identical arguments, and concurrent requests for them coalesce into a single render.
+
+That exclusion is what makes the class worth having. A per-recipient value inside the cache key would mint one render per recipient for byte-identical output, so the round-trip guarantee is stated per class: a variant option round-trips to an identical cache key, a request option round-trips to the signed path alone.
+
+The rules that are not about the cache key hold for both classes. Unknown keys, repeated keys, empty segments and valueless segments are `422` whichever class a key belongs to.
+
 ### 3.1 Output format & encoding
 
 | Option | Values | Notes |
@@ -125,6 +135,28 @@ Peaks are a *format*, so they participate in the cache key, the write-back and t
 |---|---|---|
 | `dl` | filename (URL-escaped) | Sets `Content-Disposition: attachment` |
 | `cb` | opaque string | Cache-buster, participates in cache key |
+
+### 3.5 Request options
+
+| Option | Values | Notes |
+|---|---|---|
+| `exp` | integer, Unix seconds | The URL is refused with `410` from this second onwards. Bounded like every other integer option; a value in the past is valid grammar, not a `422` |
+
+A signed URL is otherwise an eternal bearer capability: the HMAC covers the path and nothing else, so a leaked URL works forever and the only revocation is rotating the key, which kills every URL ever issued. `exp` time-boxes one URL without touching any other.
+
+It needs no mechanism of its own to be tamper-proof: it sits in the path, so it is inside the signature, and altering or removing it is the same `401` as altering anything else.
+
+**Which is why a request option is a path segment and not a query parameter**, the obvious-looking alternative for a value that is deliberately not part of the cache key. §1's signature covers the path alone, so `?exp=…` would be unsigned, and an unsigned expiry is no expiry: anyone holding the URL deletes the parameter. Signing the query string instead would mean canonicalizing it first — parameter order, repeated keys, encoding variants — which is the normalization problem the options grammar already solves, rebuilt in a second syntax, and it would change the signing input for every existing generator. The cache-key exclusion needs none of that: it is a property of which keys the canonical string is built from, not of where in the URL they sit.
+
+Two things that argument does not claim. It does not extend to `/info`, which has no options segment and therefore cannot carry a request option at all — a signed query string genuinely would have covered both endpoints, and that is the cost of this decision rather than an oversight. And it says nothing about edge-cache efficiency: two URLs differing only in `exp` are distinct URLs whichever syntax carries them, so a CDN stores them separately either way. The single-render and single-variant guarantees are origin-side, held by the coalescing registry and the cache key.
+
+**No clock-skew leeway.** A generator that wants a margin adds it to its own timestamps; leeway here would be a margin every deployment pays whether it wanted one or not. The boundary is exclusive — a request arriving in the second `exp` names is still served.
+
+**A past timestamp parses.** `exp:1` is a well-formed URL whose answer is `410`, not a `422` about an invalid option. That distinction is what lets the `410` be a permanent, cacheable verdict rather than a parse error.
+
+**Expiry caps every lifetime the response hands out** (§5): the `Cache-Control` `max-age` of a successful response, and the presigned TTL of a HIT redirect, are each clamped to at most `exp − now`. Without both, an expiring URL would leave behind a cached body or a storage credential that outlives it, and the `410` would be theater.
+
+`/info` has no options segment (§2), so it cannot carry `exp`. Info URLs are operator-to-operator rather than shared with end users; extending the grammar is a separate change if demand appears.
 
 ---
 
@@ -198,7 +230,7 @@ Probes coalesce on the **source**, not the variant: concurrent requests reading 
 
 Checked before coalescing and before the source is stat'd — a stored variant is immutable bytes that owe nothing to a source which may since have been deleted. Header: `X-Audio-Proxy: HIT`, in both modes.
 
-**Redirect mode** (`AP_SERVE_MODE=redirect`, the default): `302` to a presigned URL for the variant object, valid for `AP_PRESIGN_TTL` seconds → S3/CDN serves `Accept-Ranges`, `206` and `Content-Length` natively and the proxy leaves the hot path. The redirect itself carries `Cache-Control: no-store`: its `Location` is a credential with an expiry, and a cached `302` hands out URLs that have already expired. The variant's own `Content-Type` and `Cache-Control` come from the store, which holds the ones the write-back saved — so a followed redirect delivers what a proxied HIT would have sent.
+**Redirect mode** (`AP_SERVE_MODE=redirect`, the default): `302` to a presigned URL for the variant object, valid for `AP_PRESIGN_TTL` seconds — or for `exp − now`, whichever is shorter (§3.5) — → S3/CDN serves `Accept-Ranges`, `206` and `Content-Length` natively and the proxy leaves the hot path. The redirect itself carries `Cache-Control: no-store`: its `Location` is a credential with an expiry, and a cached `302` hands out URLs that have already expired. The variant's own `Content-Type` and `Cache-Control` come from the store, which holds the ones the write-back saved — so a followed redirect delivers what a proxied HIT would have sent.
 
 **Proxy mode** (`AP_SERVE_MODE=proxy`): the proxy serves the object itself — `200` with `Content-Length` and `Accept-Ranges: bytes`, relayed as it is read, so a declared length and progressive delivery are both true and the whole object is never resident. A `Range` is answered with `206` and `Content-Range`. A syntactically valid range no byte can satisfy is a `416` with `Content-Range: bytes */{size}` and `Cache-Control: no-store` — its body depends on a request header, and nothing here sends `Vary: Range`. Multi-range specs, non-`bytes` units and malformed values are ignored and answered with the whole variant, which RFC 9110 §14.2 permits; there is no `multipart/byteranges` response.
 
@@ -218,11 +250,13 @@ Both begin delivering before the variant is complete or fully read. What a clien
 
 `Content-Type` per format · `Cache-Control: public, max-age=31536000, immutable, no-transform` (URL encodes the variant, so it *is* immutable; `no-transform` because the bytes are the product and must survive edge features that recompress or mangle bodies) · `ETag` = cache key, sent quoted, since RFC 9110 defines an entity-tag as a quoted-string and a bare token is not one.
 
+**Under `exp` (§3.5) the `max-age` is clamped** to at most `exp − now` on every successful response — the MISS, the HIT and the `304` alike — while the rest of the header is unchanged. The value *stored* with the variant is never clamped: those bytes are shared by every `exp`, so the cached policy stays the full year and a HIT clamps on the way out. A HIT redirect's presigned `Location` is clamped to the same bound, and by the sharper argument: following it needs no signature of this proxy's, so a credential outliving its URL has left the building entirely.
+
 ### Edge-cache discipline
 
 Every response, success or error, carries an explicit `Cache-Control` — no CDN negative-caching default ever decides retention:
 
-- Errors: `404`/`413`/`415` → `max-age=10` (verdicts about the current source bytes; a re-upload changes them), `401`/`422` → `max-age=60` (pure functions of the URL; only a deploy changes them), `416`/`429`/`5xx` → `no-store` (transient, or — for `416` — dependent on a request header no `Vary` declares). The `502` row inherits that rather than inventing it, and the inheritance is the point: a store outage is exactly the failure that must not be cached, since the retry it suppresses is the one that would have worked. `/health`, `/ready` and the unmatched-route `404` state theirs too (`no-store`, `no-store` and `max-age=10`).
+- Errors: `404`/`413`/`415` → `max-age=10` (verdicts about the current source bytes; a re-upload changes them), `401`/`422` → `max-age=60` (pure functions of the URL; only a deploy changes them), `410` → `public, max-age=31536000, immutable` (see §3.5 — the one verdict a deploy cannot change either), `416`/`429`/`5xx` → `no-store` (transient, or — for `416` — dependent on a request header no `Vary` declares). The `502` row inherits that rather than inventing it, and the inheritance is the point: a store outage is exactly the failure that must not be cached, since the retry it suppresses is the one that would have worked. `/health`, `/ready` and the unmatched-route `404` state theirs too (`no-store`, `no-store` and `max-age=10`).
 - **Conditional requests**: an `If-None-Match` matching the URL-derived `ETag` answers `304` with `ETag` and `Cache-Control`, no body, no render, no storage access. Placed after signature verification — never an existence oracle for unsigned probes.
 - **HEAD** on signed endpoints answers the status and headers a `GET` would, through the full check chain including the source stat, with an empty body and no render subprocess. Errors as `GET`, bodiless. No `X-Audio-Proxy`: that header reports a render's outcome, and none ran. It deliberately does **not** consult the variant cache, so it reports the render path's framing even where a `GET` would answer a HIT's, or a `302`; making HEAD the one request whose answer depends on cache state would invite clients to build on exactly what the framing contract above tells them not to.
 - **Range on a MISS is ignored**: the full `200` chunked stream, no `Accept-Ranges`, no `206`/`416` (RFC 9110 §14.2 permits ignoring `Range`). `206` semantics belong to cached variants — served by the proxy or by storage, per the serve mode.
@@ -235,6 +269,7 @@ Every response, success or error, carries an explicit `Cache-Control` — no CDN
 | `404` | Source not found / not readable |
 | `413` | Source exceeds `AP_MAX_SRC_BYTES` |
 | `415` | Source not decodable (`undecodable_source`), or contains video (`video_source` — see §3.1) |
+| `410` | The URL's `exp` has passed (`expired`, §3.5). Checked after signature verification and before source resolution, so an expired URL reaches no storage and spawns no subprocess |
 | `416` | `Range` unsatisfiable against a cached variant (proxy mode only) |
 | `422` | Invalid or conflicting options |
 | `429` | No slot in one of the two pools: either no render slot (the wait queue was full, or this request waited in it longer than `AP_RENDER_TIMEOUT` without reaching the front) or no probe slot (`AP_MAX_PROBE_CONCURRENCY` reached, §4.3 — that pool has no queue). `Retry-After` set either way, and which pool it was is deliberately not reported |
@@ -242,6 +277,8 @@ Every response, success or error, carries an explicit `Cache-Control` — no CDN
 | `500` | The storage backend a source names is misconfigured: no credentials, or a store that answers a redirect because the configured region or endpoint is not the object's. No client action can resolve either |
 | `502` | The storage backend could not be reached: a transport failure, or a `5xx` from the store itself |
 | `504` | A render started and then exceeded `AP_RENDER_TIMEOUT` |
+
+`410` is not a signature complaint, and saying `401` would send a client looking for a key problem it does not have: the signature verified, and the URL simply has a time on it. It is also the one error row whose verdict is permanent by construction — the timestamp is inside the signature, so no later request can make this URL valid — which is why it carries a year of `immutable` rather than the seconds-to-a-minute the other rows do. An edge answering it outright *is* the enforcement.
 
 The two `415`s are separate `error` values on one status because they are different verdicts: `undecodable_source` says the bytes could not be read, `video_source` says they were read and refused. A client told "not decodable" about a file every player opens would go looking for a corrupt upload.
 
