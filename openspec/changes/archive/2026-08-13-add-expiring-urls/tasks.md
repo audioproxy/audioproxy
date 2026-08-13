@@ -24,4 +24,5 @@
 
 - [x] 4.1 API doc §3 (option class distinction + `exp` row) and §5 (`expired` → 410); README options table and signing section
 - [x] 4.2 `llms-full.txt` options and error tables (both guarded; recompute nothing — the signing example is unchanged, `exp` is ordinary path bytes)
-- [ ] 4.3 Rails gem issue: `expires_in:`/`expires_at:` sugar (separate repo, filed when this merges); docs site guides follow via drift notifier
+- [x] 4.3 Rails gem issue: `expires_in:`/`expires_at:` sugar (separate repo, filed when this merges); docs site guides follow via drift notifier
+  - Overtook the task as written: rather than an issue, `audioproxy-rails` 0.2.0 shipped it (PR #11), pinned to `audioproxy >= 0.6.0` — the release cut for it, since `exp` was merged but untagged. Its own task 3.4, the server round-trip, is deferred there behind a container harness.
