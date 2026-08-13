@@ -146,6 +146,10 @@ A signed URL is otherwise an eternal bearer capability: the HMAC covers the path
 
 It needs no mechanism of its own to be tamper-proof: it sits in the path, so it is inside the signature, and altering or removing it is the same `401` as altering anything else.
 
+**Which is why a request option is a path segment and not a query parameter**, the obvious-looking alternative for a value that is deliberately not part of the cache key. §1's signature covers the path alone, so `?exp=…` would be unsigned, and an unsigned expiry is no expiry: anyone holding the URL deletes the parameter. Signing the query string instead would mean canonicalizing it first — parameter order, repeated keys, encoding variants — which is the normalization problem the options grammar already solves, rebuilt in a second syntax, and it would change the signing input for every existing generator. The cache-key exclusion needs none of that: it is a property of which keys the canonical string is built from, not of where in the URL they sit.
+
+Two things that argument does not claim. It does not extend to `/info`, which has no options segment and therefore cannot carry a request option at all — a signed query string genuinely would have covered both endpoints, and that is the cost of this decision rather than an oversight. And it says nothing about edge-cache efficiency: two URLs differing only in `exp` are distinct URLs whichever syntax carries them, so a CDN stores them separately either way. The single-render and single-variant guarantees are origin-side, held by the coalescing registry and the cache key.
+
 **No clock-skew leeway.** A generator that wants a margin adds it to its own timestamps; leeway here would be a margin every deployment pays whether it wanted one or not. The boundary is exclusive — a request arriving in the second `exp` names is still served.
 
 **A past timestamp parses.** `exp:1` is a well-formed URL whose answer is `410`, not a `422` about an invalid option. That distinction is what lets the `410` be a permanent, cacheable verdict rather than a parse error.
