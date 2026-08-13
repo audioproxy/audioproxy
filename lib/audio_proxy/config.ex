@@ -284,6 +284,63 @@ defmodule AudioProxy.Config do
     config
   end
 
+  # The `AP_` surface, as data, so a document claiming to list it can be checked
+  # against something rather than reviewed. Hand-maintained, one screen away
+  # from the `build!/1` lines that read each of these — the same trade
+  # `AudioProxy.ErrorJSON`'s `@representative_errors` makes, and with the same
+  # backstop: `AudioProxy.ConfigTest` scans this file for `(env, "AP_…")` reads
+  # and fails when the two disagree, so forgetting a row here is a red test on
+  # the line you were already editing rather than a document that quietly
+  # stopped covering a variable.
+  #
+  # `AWS_*` is deliberately absent: those names are the AWS ecosystem's, not
+  # this proxy's, and both documents describe them in prose beside the table.
+  @variables ~w(
+    AP_PORT
+    AP_KEY
+    AP_SALT
+    AP_ALLOW_INSECURE
+    AP_SOURCE_ALLOWLIST
+    AP_LOCAL_ROOT
+    AP_VARIANT_STORE
+    AP_MAX_CONCURRENCY
+    AP_MAX_PROBE_CONCURRENCY
+    AP_QUEUE_SIZE
+    AP_READY_QUEUE_THRESHOLD
+    AP_MAX_SRC_BYTES
+    AP_MAX_VARIANT_BYTES
+    AP_RENDER_TIMEOUT
+    AP_PROBE_TIMEOUT
+    AP_SERVE_MODE
+    AP_PRESIGN_TTL
+    AP_LOG_LEVEL
+    AP_METRICS_BIND
+    AP_METRICS_PORT
+    AP_ALLOW_ORIGIN
+    AP_S3_ENDPOINT
+    AP_S3_ADDRESSING
+    AP_S3_CA_BUNDLE
+  )
+
+  @doc """
+  The `AP_`-prefixed environment variables this module reads.
+
+  Published so the configuration tables in `README.md` and `llms-full.txt` can
+  be checked against the implementation instead of against a reviewer's memory
+  — a stale default in a file an agent reads *instead of* the code is a wrong
+  answer delivered confidently.
+
+  Names only, not defaults: several defaults are derived rather than literal
+  (`AP_MAX_PROBE_CONCURRENCY` is a multiple of `AP_MAX_CONCURRENCY`,
+  `AP_MAX_VARIANT_BYTES` inherits the effective `AP_MAX_SRC_BYTES`), and the
+  two documents render those differently on purpose, for different readers.
+
+  Excludes the `AWS_*` credentials variables, which are read here too but are
+  not this proxy's to define; see the moduledoc.
+  """
+  @spec variables() :: [String.t()]
+  def variables, do: @variables
+
   @doc "The serve modes `AP_SERVE_MODE` accepts."
   @spec serve_modes() :: [atom()]
   def serve_modes, do: @serve_modes

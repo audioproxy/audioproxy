@@ -772,4 +772,83 @@ defmodule AudioProxy.ConfigTest do
       assert_raise KeyError, fn -> Config.get(:nope) end
     end
   end
+
+  describe "the published variable list" do
+    # The guard against the guard. `variables/0` is what the documentation
+    # drift tests compare the configuration tables against, so a list that
+    # silently stopped covering a variable would narrow those checks to
+    # whatever it still names — and both documents would pass while missing a
+    # row. A hand-maintained list is fine; a hand-maintained list nothing
+    # checks is the failure this change exists to prevent, one layer in.
+    #
+    # Every read in the module goes through a parser helper taking `env` and
+    # the variable name as a literal, so the call sites are what is scanned —
+    # not the whole file, which would also match the moduledoc's own table and
+    # every error message that names a variable.
+    test "the scan still finds the reads it is meant to guard" do
+      # Without this, a refactor that moved the reads out of the shape above
+      # would leave the scan matching nothing and the two tests below passing
+      # vacuously — the same silent narrowing they exist to catch.
+      found = read_variables()
+
+      assert length(found) >= 20,
+             """
+             The scan of lib/audio_proxy/config.ex found only #{length(found)} \
+             variable reads: #{inspect(Enum.sort(found))}
+             Either the reads no longer go through a `(env, "AP_…")` call, or \
+             the pattern in this test needs updating.
+             """
+    end
+
+    test "every variable read is published" do
+      missing = read_variables() -- Config.variables()
+
+      assert missing == [],
+             """
+             AudioProxy.Config reads variables its variables/0 does not publish: \
+             #{inspect(Enum.sort(missing))}
+             Add them to @variables — until then the documentation guards do not \
+             cover them, and a table missing the row would still pass.
+             """
+    end
+
+    test "every published variable is read" do
+      stale = Config.variables() -- read_variables()
+
+      assert stale == [],
+             """
+             variables/0 publishes variables AudioProxy.Config does not read: \
+             #{inspect(Enum.sort(stale))}
+             Remove them from @variables, and from the configuration tables in \
+             README.md and llms-full.txt.
+             """
+    end
+
+    test "the list has no duplicates" do
+      # The comparisons above are list subtractions, which a duplicate survives;
+      # the documentation guards compare sets, where it collapses entirely.
+      assert Config.variables() -- Enum.uniq(Config.variables()) == []
+    end
+
+    test "every published variable is AP_-prefixed" do
+      # The AWS credentials variables are read here too and are deliberately
+      # not published: they are the AWS ecosystem's names, described in prose
+      # beside each table rather than listed in it.
+      for variable <- Config.variables() do
+        assert String.starts_with?(variable, "AP_")
+      end
+    end
+  end
+
+  # Read when the test runs rather than at compile time, for the reason
+  # `AudioProxy.LlmsDocsTest` gives: `mix test --only ffmpeg` still compiles
+  # every test file, and a compile-time read makes the source a build input of
+  # any image carrying the suite.
+  defp read_variables do
+    "lib/audio_proxy/config.ex"
+    |> File.read!()
+    |> then(&Regex.scan(~r/\(\s*env,\s*"(AP_[A-Z0-9_]+)"/, &1, capture: :all_but_first))
+    |> List.flatten()
+    |> Enum.uniq()
+  end
 end
