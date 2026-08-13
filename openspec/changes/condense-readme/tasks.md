@@ -35,10 +35,10 @@
 
 ## 5. Review and land
 
-- [ ] 5.1 Read the rewritten README end to end as a first-time visitor: can they render something, and can they find everything else?
-- [ ] 5.2 Confirm the line count is in the target range and no usage reference material remains
+- [x] 5.1 Read the rewritten README end to end as a first-time visitor: can they render something, and can they find everything else?
+- [x] 5.2 Confirm the line count is in the target range and no usage reference material remains
 - [ ] 5.3 Adversarial review per `CLAUDE.md`, reconciled against a self-review written first
-- [ ] 5.4 Commit as `docs:` scoped changes, one logical change each; open the PR
+- [x] 5.4 Commit as `docs:` scoped changes, one logical change each; open the PR
 
 ## 6. Paired work in `audioproxy-docs` (tracked there, running in parallel)
 
