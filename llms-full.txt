@@ -370,7 +370,7 @@ The source of truth for this contract is [docs/audio-proxy-api-v1.md](https://gi
   cell. Prose outside the markers is yours; prose inside the first cell is not.
 
   Variable *names* are checked, not defaults: several defaults are derived
-  rather than literal, and this file and the README word them differently for
-  different readers. A default that moves is on you.
+  rather than literal, and this file and the documentation site word them
+  differently for different readers. A default that moves is on you.
 -->
 

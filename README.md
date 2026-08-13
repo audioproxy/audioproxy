@@ -88,7 +88,7 @@ mix deps.get
 PORT=4000 mix run --no-halt
 ```
 
-That path needs `ffmpeg` and `ffprobe` on `PATH`. See [docs/development.md](docs/development.md) for a development container that already has them, and for the test suite.
+That path needs `ffmpeg` and `ffprobe` on `PATH`. See [docs/development.md](https://github.com/audioproxy/audioproxy/blob/main/docs/development.md) for a development container that already has them, and for the test suite.
 
 The proxy is also published to hex as an OTP application (`{:audio_proxy, "~> 0.6"}`), so it can run inside a BEAM node you already deploy. It is an application rather than a library: adding the dependency is the whole integration, and starting it reads the `AP_*` environment, binds two listeners, and expects ffmpeg on `PATH`. The [configuration reference](https://docs.audioproxy.dev/reference/api-v1/) covers what that commits you to.
 
@@ -119,7 +119,7 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 
 **Wanted, but not designed yet:** HLS and segmented streaming. A v2 goal rather than a rejected one, and the URL space is reserved. The unsolved part is gapless boundaries, since encoding each segment independently gives each one its own encoder priming.
 
-`0.x` means the URL contract can still change. It will settle at `1.0`, after which a change to what an existing URL means, or to how cache keys are derived, is a major version. The per-slice detail, including rationale and trade-offs, lives in [`openspec/changes/`](openspec/changes).
+`0.x` means the URL contract can still change. It will settle at `1.0`, after which a change to what an existing URL means, or to how cache keys are derived, is a major version. The per-slice detail, including rationale and trade-offs, lives in [`openspec/changes/`](https://github.com/audioproxy/audioproxy/tree/main/openspec/changes).
 
 ## Documentation
 
@@ -130,12 +130,12 @@ Start at **[docs.audioproxy.dev](https://docs.audioproxy.dev)**. It is the goal-
 | [docs.audioproxy.dev](https://docs.audioproxy.dev) | **Start here.** Quickstart, transforms, sources, rendering, S3 providers, scaling, capacity, Rails |
 | [docs/audio-proxy-api-v1.md](docs/audio-proxy-api-v1.md) | **The source of truth.** URL grammar, every processing option, cache-key rules, response headers, error codes |
 | [llms.txt](llms.txt), [llms-full.txt](llms-full.txt) | The same contract as markdown, in one file, checked against the code. See [For AI agents](#for-ai-agents) |
-| [docs/development.md](docs/development.md) | Toolchain, per-slice worktrees and devcontainers, the test suite and its tags, CI, how a release is cut |
+| [docs/development.md](https://github.com/audioproxy/audioproxy/blob/main/docs/development.md) | Toolchain, per-slice worktrees and devcontainers, the test suite and its tags, CI, how a release is cut |
 | [docs/ffmpeg-arguments.md](docs/ffmpeg-arguments.md) | How options become ffmpeg arguments: filter order, per-format flags, known gaps |
 | [docs/operations.md](docs/operations.md) | Reading a running proxy: the request log and its levels, every exported metric, scrape config, the four signals to alert on |
-| [docs/](docs/) | The authored-from upstream for the site's guide pages: sources, rendering, scaling, capacity, s3-providers |
+| [docs/](https://github.com/audioproxy/audioproxy/tree/main/docs) | The authored-from upstream for the site's guide pages: sources, rendering, scaling, capacity, s3-providers |
 | [VERSIONS.md](VERSIONS.md) | What the image is built from: Debian, Elixir/OTP and ffmpeg pins, why not Alpine, and how to bump one |
-| [examples/](examples) | A one-file browser player for trying variants, and why it has to be served rather than opened |
+| [examples/](https://github.com/audioproxy/audioproxy/tree/main/examples) | A one-file browser player for trying variants, and why it has to be served rather than opened |
 | `openspec/` | `specs/` holds the capabilities that are built; `changes/` holds what is planned |
 
 ## For AI agents
