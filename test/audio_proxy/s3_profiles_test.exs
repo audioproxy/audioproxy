@@ -44,16 +44,26 @@ defmodule AudioProxy.S3ProfilesTest do
     ca_bundle: nil
   }
 
+  # The fixtures here install their profiles directly rather than through an
+  # environment, so nothing in this file tests the `AP_VARIANT_S3_*` fallback —
+  # that is `AudioProxy.ConfigTest`'s, from `AudioProxy.Config.build!/1`. What
+  # is under test is the layer above it: which profile each operation reads.
   describe "with one profile" do
     setup do
       put_config(%{presign_ttl: 900, s3: @source})
       :ok
     end
 
-    test "the store profile is the source profile, override for override" do
-      # The upgrade guarantee at the client layer: nothing a store operation
-      # sends can differ from what it sent before the split, because the two
-      # keyword lists are equal.
+    test "reading either profile yields the same overrides" do
+      # Deliberately not the fallback assertion, which this cannot make: the
+      # fixture installs one profile through `put_config/1`, and *that* is what
+      # copies `:s3` into `:variant_s3` here. `AudioProxy.ConfigTest`'s "with
+      # none of them set, the two profiles are the same map" is the honest one,
+      # because it is built from `AudioProxy.Config.build!/1`.
+      #
+      # What this pins is the client layer: `config/1` reads the profile it was
+      # given and nothing else, so equal profiles produce equal overrides down
+      # to the keyword list `ex_aws` receives.
       assert S3.config(:store) == S3.config(:source)
     end
 

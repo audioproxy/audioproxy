@@ -554,7 +554,7 @@ Note that the variables below are the full configuration surface for the design,
 | `AP_VARIANT_S3_ACCESS_KEY_ID` | string | `AWS_ACCESS_KEY_ID` | Variant store only. All-or-nothing with the two below |
 | `AP_VARIANT_S3_SECRET_ACCESS_KEY` | string | `AWS_SECRET_ACCESS_KEY` | Variant store only |
 | `AP_VARIANT_S3_REGION` | string | `AWS_REGION` | Variant store only |
-| `AP_VARIANT_S3_SESSION_TOKEN` | string | unset — never inherited | Variant store only. A session token belongs to the identity that minted it, so it is the one variable in this group with no fallback |
+| `AP_VARIANT_S3_SESSION_TOKEN` | string | `AWS_SESSION_TOKEN` while the whole identity is inherited; unset once the store has one of its own | Variant store only. The token follows the identity rather than the variable: set any of the three credentials above and this is read from here alone, since a token belongs to the principal that minted it |
 <!-- config-table:end -->
 
 Booleans accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`, case-insensitively. An empty value counts as unset.
@@ -641,7 +641,7 @@ AP_VARIANT_S3_ACCESS_KEY_ID=… AP_VARIANT_S3_SECRET_ACCESS_KEY=… …
 Three rules, and they are the whole feature:
 
 - **Unset means inherit.** Each variable that is not set falls back to its shared counterpart, so a deployment that sets none of them behaves exactly as it did before this group existed.
-- **The credentials are all-or-nothing.** Set any of `AP_VARIANT_S3_ACCESS_KEY_ID`, `AP_VARIANT_S3_SECRET_ACCESS_KEY` or `AP_VARIANT_S3_REGION` and you must set all three; boot aborts naming the ones missing. Half of one identity and half of another signs nothing. `AP_VARIANT_S3_SESSION_TOKEN` is optional but never inherited, for the same reason.
+- **The credentials are all-or-nothing.** Set any of `AP_VARIANT_S3_ACCESS_KEY_ID`, `AP_VARIANT_S3_SECRET_ACCESS_KEY`, `AP_VARIANT_S3_REGION` or `AP_VARIANT_S3_SESSION_TOKEN` and you must set the first three; boot aborts naming the ones missing. Half of one identity and half of another signs nothing. The token stays optional, but once the store has an identity of its own it comes from `AP_VARIANT_S3_SESSION_TOKEN` and nowhere else — a token belongs to the principal that minted it. Set none of the four and the store inherits the source identity whole, token included, which is what makes an un-overridden deployment behave exactly as it did before.
 - **Addressing derives per side.** With `AP_VARIANT_S3_ENDPOINT` set, the store's addressing default is derived from *that* endpoint by the rule above — so a MinIO cache behind AWS sources gets path-style with nothing configured.
 
 There is no way to say "sources have an endpoint, the store is AWS proper" by leaving `AP_VARIANT_S3_ENDPOINT` unset, since unset means inherit. Write AWS's endpoint out instead, as the example above does: `https://s3.<region>.amazonaws.com` with `AP_VARIANT_S3_ADDRESSING=virtual` is the request AWS's own default produces.

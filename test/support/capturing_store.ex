@@ -179,6 +179,12 @@ defmodule AudioProxy.CapturingStore do
     end
   end
 
+  # A variant write-back outlives the response that triggered it — that is the
+  # tee's whole design — so a PUT can arrive after the test that provoked it has
+  # exited and taken the table with it. Dropped rather than recorded: raising
+  # here would surface inside the Bandit handler as an error in a test that has
+  # already passed, which is exactly the kind of noise that gets diagnosed as a
+  # real bug six months later.
   defp capture(conn) do
     request = %{
       method: conn.method,
@@ -188,6 +194,11 @@ defmodule AudioProxy.CapturingStore do
     }
 
     :ets.insert(@table, {System.unique_integer([:monotonic]), request})
+  rescue
+    # `rescue` rather than a `whereis` check, which would still leave the
+    # window between looking and inserting — and the table is owned by a
+    # process that is on its way out, so that window is the whole risk.
+    ArgumentError -> :ok
   end
 
   defp header(conn, name) do

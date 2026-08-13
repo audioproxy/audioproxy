@@ -43,7 +43,7 @@ defmodule AudioProxy.Config do
   | `AP_VARIANT_S3_ACCESS_KEY_ID` | string | the source-side credential |
   | `AP_VARIANT_S3_SECRET_ACCESS_KEY` | string | the source-side credential |
   | `AP_VARIANT_S3_REGION` | string | the source-side credential |
-  | `AP_VARIANT_S3_SESSION_TOKEN` | string | the source-side credential |
+  | `AP_VARIANT_S3_SESSION_TOKEN` | string | the source-side token with the rest of an inherited identity; unset once the store has its own |
   | `AP_ALLOW_ORIGIN` | `*` or `scheme://host[:port]` | unset (`nil`) — no CORS headers |
 
   The listener port is read from `AP_PORT`, falling back to `PORT` (which the
@@ -85,11 +85,14 @@ defmodule AudioProxy.Config do
 
     * **Credentials are group-atomic.** Set any of the variant credential
       variables and the identity is the variant's own: `ACCESS_KEY_ID`,
-      `SECRET_ACCESS_KEY` and `REGION` must all be set (`SESSION_TOKEN` stays
-      optional, and is *not* inherited — a session token belongs to the
-      principal that minted it). A store half-borrowing the source's identity
-      is never a deployment intent, so the partial set aborts boot naming
-      exactly what is missing.
+      `SECRET_ACCESS_KEY` and `REGION` must all be set, and `SESSION_TOKEN`
+      is then optional and read only from `AP_VARIANT_S3_SESSION_TOKEN` — a
+      token belongs to the principal that minted it, so the source's is not
+      carried onto another identity. Set *none* of them and the whole source
+      identity is inherited, token included, which is what makes an
+      un-overridden deployment identical to the pre-split one. A store
+      half-borrowing the source's identity is never a deployment intent, so
+      the partial set aborts boot naming exactly what is missing.
 
     * **Addressing derives per side.** With `AP_VARIANT_S3_ENDPOINT` set and
       `AP_VARIANT_S3_ADDRESSING` unset, the style is derived from the
@@ -636,9 +639,14 @@ defmodule AudioProxy.Config do
   # an identity of its own or it has the source's, and the half-set case is a
   # boot failure naming what is missing.
   #
-  # The session token is inside the group but is never *inherited*: it is
-  # scoped to the principal that minted it, so carrying the source's token
-  # onto the variant's key produces credentials no store will accept.
+  # The session token follows the identity rather than the variable, and the
+  # two clauses below are where that is decided. Nothing set: the source
+  # identity is taken whole, token included — anything less would make an
+  # un-overridden deployment differ from the pre-split one, which is the
+  # guarantee this group is built around. Anything set: the token is read from
+  # `AP_VARIANT_S3_SESSION_TOKEN` alone, because it is scoped to the principal
+  # that minted it and carrying the source's onto the variant's key produces
+  # credentials no store will accept.
   defp variant_credentials!(source, nil, nil, nil, nil) do
     Map.take(source, [:region, :access_key_id, :secret_access_key, :session_token])
   end

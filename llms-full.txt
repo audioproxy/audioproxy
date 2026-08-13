@@ -292,12 +292,12 @@ All configuration is `AP_`-prefixed environment variables, read and validated on
 | `AP_VARIANT_S3_ACCESS_KEY_ID` | `AWS_ACCESS_KEY_ID` | Variant store only; all-or-nothing with the secret and region below |
 | `AP_VARIANT_S3_SECRET_ACCESS_KEY` | `AWS_SECRET_ACCESS_KEY` | Variant store only |
 | `AP_VARIANT_S3_REGION` | `AWS_REGION` | Variant store only |
-| `AP_VARIANT_S3_SESSION_TOKEN` | unset; never inherited | Variant store only |
+| `AP_VARIANT_S3_SESSION_TOKEN` | `AWS_SESSION_TOKEN` while the identity is inherited; unset once the store has its own | Variant store only |
 <!-- config-table:end -->
 
 S3 credentials are the standard `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_REGION` — or `AWS_DEFAULT_REGION`, which is read when `AWS_REGION` is unset — plus an optional `AWS_SESSION_TOKEN`. They are validated as a group at boot — all three or none. They come from the environment only: there is no IMDS or STS lookup, so an instance role does not work.
 
-The variables above configure both jobs the proxy does with S3 — reading sources and keeping variants. The `AP_VARIANT_S3_*` group overrides the variant store's side alone, for cross-provider caching (sources on one provider, variants on another) or split principals (a read-only source credential, a writing store one). Every variable in it falls back to its shared counterpart, so setting none of them is exactly the single-profile behaviour above. The credential triple is all-or-nothing: setting a strict subset aborts boot naming what is missing, and the session token is never inherited across identities. Store operations — the boot writability probe, HEAD lookups, write-back and the presigned URL a `302` carries — all run under the store's own configuration.
+The variables above configure both jobs the proxy does with S3 — reading sources and keeping variants. The `AP_VARIANT_S3_*` group overrides the variant store's side alone, for cross-provider caching (sources on one provider, variants on another) or split principals (a read-only source credential, a writing store one). Every variable in it falls back to its shared counterpart, so setting none of them is exactly the single-profile behaviour above. The credential triple is all-or-nothing: setting a strict subset aborts boot naming what is missing. The session token follows the identity rather than the variable — inherited with the rest when no variant credential is set, read from `AP_VARIANT_S3_SESSION_TOKEN` alone once one is. Store operations — the boot writability probe, HEAD lookups, write-back and the presigned URL a `302` carries — all run under the store's own configuration.
 
 ## Worked requests
 

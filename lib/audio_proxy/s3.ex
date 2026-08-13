@@ -5,15 +5,15 @@ defmodule AudioProxy.S3 do
   Not a general S3 client and not on the way to becoming one. An
   object-storage deployment needs exactly this much:
 
-    * `presign_get/3` — a URL ffmpeg can read a source from, and a URL a
+    * `presign_get/4` — a URL ffmpeg can read a source from, and a URL a
       client can be redirected to on a cache hit. Presigned because neither
       of them will send an `Authorization` header for us.
-    * `head/2` — does this object exist, how big is it, what is its ETag.
+    * `head/3` — does this object exist, how big is it, what is its ETag.
       The `/info` and cache-hit paths.
-    * `put_stream/4` — write a variant back, streaming, without knowing its
+    * `put_stream/5` — write a variant back, streaming, without knowing its
       length in advance (a render's output length is not known until it ends).
-    * `get_stream/3` — read a variant back for proxy-mode serving.
-    * `delete/2` — remove one object. Nothing on the request path deletes
+    * `get_stream/4` — read a variant back for proxy-mode serving.
+    * `delete/3` — remove one object. Nothing on the request path deletes
       anything; this exists for `AudioProxy.Config`'s boot-time writability
       probe, which proves a variant bucket accepts writes by performing one
       and then taking it back. A probe that only wrote would leave a small
@@ -37,7 +37,7 @@ defmodule AudioProxy.S3 do
   effect worth naming: **there is no IMDS lookup**, so an EC2 instance role
   does not work and credentials must be supplied. That is a documented
   limitation (README), not an oversight, and the place to change it is
-  `config/0` here.
+  `config/1` here.
 
   ## Addressing is configured, not inferred
 
@@ -49,7 +49,7 @@ defmodule AudioProxy.S3 do
 
   It is threaded into both places `ex_aws` reads it, which are not the same
   place: the request path takes it from the config map, `presigned_url/5`
-  from its own options. See `sign_get/3`.
+  from its own options. See `sign_get/4`.
 
   ## Two profiles, and `:source` is the default
 
@@ -787,7 +787,7 @@ defmodule AudioProxy.S3 do
       # read hackney 4.0's bodyless responses. See `AudioProxy.S3.HttpClient`.
       http_client: AudioProxy.S3.HttpClient,
       # Read by `ExAws.Operation.S3`'s `add_bucket_to_path/2` on the request
-      # path, and passed to `presigned_url/5` by `sign_get/3` — see there for
+      # path, and passed to `presigned_url/5` by `sign_get/4` — see there for
       # why the two must agree.
       virtual_host: s3.addressing == :virtual
     ] ++ security_token(s3.session_token) ++ endpoint(s3.endpoint)

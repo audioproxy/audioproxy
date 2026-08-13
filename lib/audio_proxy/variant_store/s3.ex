@@ -41,7 +41,7 @@ defmodule AudioProxy.VariantStore.S3 do
   ## A PUT is the commit point
 
   There is no staging, because there is nothing to stage: an object does not
-  exist until its upload completes, and `AudioProxy.S3.put_stream/4` aborts a
+  exist until its upload completes, and `AudioProxy.S3.put_stream/5` aborts a
   multipart upload on every failure path it can see. So the local backend's
   `tmp/` dance and its boot-time sweep have no analogue here, and
   atomic-or-absent is a property of the protocol rather than of this module.
@@ -130,7 +130,7 @@ defmodule AudioProxy.VariantStore.S3 do
   @impl true
   def get_stream(key, range) do
     # `head/1` first, and it is not redundant. Without it this callback answers
-    # from any object under the key — `AudioProxy.S3.get_stream/3` reads a size
+    # from any object under the key — `AudioProxy.S3.get_stream/4` reads a size
     # and streams — so a stray object that is not a variant would come back as
     # bytes here while `head/1` calls it a miss, which is the two callbacks
     # disagreeing about whether the same key is stored.
@@ -214,7 +214,7 @@ defmodule AudioProxy.VariantStore.S3 do
   # On the read paths that reach `miss/3` it is currently unreachable, and the
   # reason is worth knowing rather than rediscovering: **a HEAD response carries
   # no body**, so the `NoSuchBucket` code never arrives, and `translate/1` has
-  # nothing to match on. `head/1` is a HEAD, and `AudioProxy.S3.get_stream/3`
+  # nothing to match on. `head/1` is a HEAD, and `AudioProxy.S3.get_stream/4`
   # opens with one too — so a missing bucket reads as an ordinary miss on both,
   # and only a write surfaces it (as `{:http, 404, NoSuchBucket}` to the tee,
   # which reports it as a write failure). `AudioProxy.VariantStore.S3Test` pins
