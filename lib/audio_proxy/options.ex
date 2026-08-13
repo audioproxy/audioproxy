@@ -2,7 +2,7 @@ defmodule AudioProxy.Options do
   @moduledoc """
   The processing-options grammar (API doc §3): parse, validate, normalize.
 
-  Options are the API. A variant is fully described by its options segments,
+  Options are the API. A variant is fully described by its *variant* options,
   and the normalized options string is what the cache key hashes — so this
   module owns three obligations, in order:
 
@@ -25,6 +25,31 @@ defmodule AudioProxy.Options do
       iex> {:ok, opts} = AudioProxy.Options.parse("br:96/f:opus")
       iex> AudioProxy.Options.normalize(opts)
       "br:96/f:opus"
+
+  ## Two classes of option
+
+  Every key belongs to exactly one class, and the class decides what the value
+  is allowed to reach:
+
+    * **Variant options** (`variant_keys/0`) — everything that describes the
+      rendered bytes. They normalize into the canonical string, so they are the
+      cache key, and they become ffmpeg arguments.
+    * **Request options** (`request_keys/0`) — parsed and validated here, and
+      covered by the signature for free because they are path bytes, but
+      excluded from the canonical string, the cache key and the ffmpeg
+      arguments. `exp` is the first of them.
+
+  The exclusion is the whole point. `exp` carries a per-recipient timestamp,
+  and a timestamp inside the cache key would mint one render per listener for
+  bytes that are identical. So two URLs differing only in a request option
+  share a key and coalesce into one render, and the round-trip property holds
+  per class: a variant option round-trips to an identical cache key, a request
+  option round-trips to the signed path alone.
+
+      iex> {:ok, a} = AudioProxy.Options.parse("f:opus/exp:2000000000")
+      iex> {:ok, b} = AudioProxy.Options.parse("f:opus/exp:2000000001")
+      iex> AudioProxy.Options.normalize(a) == AudioProxy.Options.normalize(b)
+      true
 
   ## Known limits
 
@@ -96,6 +121,19 @@ defmodule AudioProxy.Options do
   @max_peak_count 100_000
   @max_gain 100.0
 
+  # `exp` under the same rule, and it is the bound that matters rather than the
+  # date: without one, `exp:` followed by four hundred digits parses into a
+  # bignum, because `String.to_integer/1` is arbitrary precision. The value is
+  # the last second of year 9999 — no real generator reaches it, and a URL that
+  # does is a mistyped one, answered as a 422 naming its segment.
+  @max_expires_at 253_402_300_799
+
+  # The two classes, as the lists everything else derives from: `normalize/1`
+  # walks the variant list, `parse_segment/3` checks membership in the union.
+  @variant_keys ~w(bd br cb ch dl f fade gain norm pk_fmt pts q sr t)
+  @request_keys ~w(exp)
+  @keys Enum.sort(@variant_keys ++ @request_keys)
+
   # Encoding options (§3.1) plus the loudness stages: peaks are computed from
   # the decoded source and ignore all of them (§3.3), so carrying them would
   # mean distinct cache keys for byte-identical peaks output. Rejected instead.
@@ -126,6 +164,10 @@ defmodule AudioProxy.Options do
   property (`sample_rate`, `channels`) or skips the stage entirely (`gain`,
   `norm`, `trim_start`). `trim_duration` is `nil` for an open-ended trim
   (`t:30` runs to the end of the source).
+
+  `expires_at` is the one field that describes the *request* rather than the
+  variant — see the "Two classes of option" section. It never reaches
+  `normalize/1`, and so never reaches the cache key or the ffmpeg arguments.
   """
   @type t :: %__MODULE__{
           format: format(),
@@ -143,7 +185,8 @@ defmodule AudioProxy.Options do
           peak_count: pos_integer() | nil,
           peak_format: peak_format() | nil,
           download: String.t() | nil,
-          cache_buster: String.t() | nil
+          cache_buster: String.t() | nil,
+          expires_at: pos_integer() | nil
         }
 
   defstruct format: @default_format,
@@ -161,7 +204,8 @@ defmodule AudioProxy.Options do
             peak_count: nil,
             peak_format: nil,
             download: nil,
-            cache_buster: nil
+            cache_buster: nil,
+            expires_at: nil
 
   @doc """
   Parses an options string (or its already-split segments) into `t:t/0`.
@@ -260,6 +304,10 @@ defmodule AudioProxy.Options do
   (`f`, and `ch`/`pts`/`pk_fmt` under `f:peaks`, and the `norm` targets when
   `norm` is present), and numbers are rendered minimally (`30`, not `30.0`).
 
+  Only `variant_keys/0` are walked, so a request option is absent from the
+  result by construction — that is what makes two URLs differing only in `exp`
+  one variant.
+
   The result always re-parses, and normalizing it again is byte-identical.
 
       iex> {:ok, opts} = AudioProxy.Options.parse("norm:ebu")
@@ -268,7 +316,7 @@ defmodule AudioProxy.Options do
   """
   @spec normalize(t()) :: String.t()
   def normalize(%__MODULE__{} = opts) do
-    keys()
+    variant_keys()
     |> Enum.map(&{&1, render_key(&1, opts)})
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Enum.sort_by(fn {key, _value} -> key end)
@@ -287,9 +335,33 @@ defmodule AudioProxy.Options do
     with {:ok, opts} <- parse(options), do: {:ok, normalize(opts)}
   end
 
-  @doc "The option keys recognized by `parse/1`, in canonical (sorted) order."
+  @doc """
+  Every option key `parse/1` recognizes, in canonical (sorted) order.
+
+  Both classes, so this is the documented surface — what
+  `AudioProxy.LlmsDocsTest` checks the published options table against. The
+  cache-key subset is `variant_keys/0`.
+  """
   @spec keys() :: [String.t()]
-  def keys, do: ~w(bd br cb ch dl f fade gain norm pk_fmt pts q sr t)
+  def keys, do: @keys
+
+  @doc """
+  The keys that describe the rendered bytes, in canonical (sorted) order.
+
+  `normalize/1` walks exactly this list, which is what keeps a request option
+  out of the cache key by construction rather than by remembering to skip it.
+  """
+  @spec variant_keys() :: [String.t()]
+  def variant_keys, do: @variant_keys
+
+  @doc """
+  The keys that describe the request rather than the variant.
+
+  Signed like any other path bytes, excluded from the canonical options string,
+  the cache key and the ffmpeg arguments. See "Two classes of option".
+  """
+  @spec request_keys() :: [String.t()]
+  def request_keys, do: @request_keys
 
   ## Parsing
 
@@ -430,6 +502,16 @@ defmodule AudioProxy.Options do
 
   # `dl` and `cb` are opaque — still percent-encoded here, and part of the
   # cache key verbatim — but control bytes are refused: see @control_char_re.
+  # The first request option (see "Two classes of option"). A timestamp in the
+  # past is *valid grammar* — it parses, and the expiry check downstream
+  # answers 410. Refusing it here would be the wrong error and would also make
+  # the 410 uncacheable in practice, since a URL's verdict would depend on when
+  # it was asked rather than on the URL.
+  defp parse_value("exp", value) do
+    with {:ok, seconds} <- bounded_integer(value, @max_expires_at),
+         do: {:ok, expires_at: seconds}
+  end
+
   defp parse_value("dl", value) do
     with {:ok, value} <- opaque(value), do: {:ok, download: value}
   end

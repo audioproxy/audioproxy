@@ -7,7 +7,8 @@ defmodule AudioProxy.OptionsPropertyTest do
 
   @source "s3://masters/2026/piece-final.wav"
 
-  import AudioProxy.OptionsGenerators, only: [option_segments: 0, decimal: 1]
+  import AudioProxy.OptionsGenerators,
+    only: [option_segments: 0, request_option_segments: 0, decimal: 1]
 
   property "generated option strings parse" do
     check all(segments <- option_segments()) do
@@ -80,6 +81,39 @@ defmodule AudioProxy.OptionsPropertyTest do
 
       assert {:error, %AudioProxy.OptionError{reason: :fade_exceeds_duration}} =
                Options.parse("#{trim}/fade:#{decimal(fade_in)}:#{decimal(fade_out + 1)}")
+    end
+  end
+
+  # The round-trip property, stated per class. A variant option round-trips to
+  # an identical cache key; a request option round-trips to the signed path
+  # alone, which from this module's side means it must leave no trace at all.
+  # Without this, `exp` would be a per-recipient timestamp inside the cache key
+  # — one render per listener for byte-identical audio.
+  property "a request option changes neither the normalized form nor the key" do
+    check all(
+            segments <- option_segments(),
+            one <- request_option_segments(),
+            other <- request_option_segments(),
+            shuffled <- shuffle(segments ++ one)
+          ) do
+      assert {:ok, bare} = Options.normalize_string(segments)
+
+      assert Options.normalize_string(segments ++ one) == {:ok, bare}
+      assert Options.normalize_string(segments ++ other) == {:ok, bare}
+      assert Options.normalize_string(shuffled) == {:ok, bare}
+
+      assert CacheKey.derive(segments ++ one, @source) ==
+               CacheKey.derive(segments ++ other, @source)
+
+      assert CacheKey.derive(segments ++ one, @source) == CacheKey.derive(segments, @source)
+    end
+  end
+
+  # It is still an option, so the rules that hold for every key hold for it.
+  property "a request option is duplicate-checked like any other" do
+    check all(segments <- option_segments(), one <- request_option_segments()) do
+      assert {:error, %AudioProxy.OptionError{reason: :duplicate_key}} =
+               Options.parse(segments ++ one ++ one)
     end
   end
 

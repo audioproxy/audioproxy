@@ -2,7 +2,7 @@ defmodule AudioProxy.Ffmpeg.CommandPropertyTest do
   use ExUnit.Case, async: true
   use ExUnitProperties
 
-  import AudioProxy.OptionsGenerators, only: [option_segments: 0]
+  import AudioProxy.OptionsGenerators, only: [option_segments: 0, request_option_segments: 0]
 
   alias AudioProxy.ArgvWalk
   alias AudioProxy.CacheKey
@@ -41,6 +41,22 @@ defmodule AudioProxy.Ffmpeg.CommandPropertyTest do
 
       assert CacheKey.derive(segments, @source) == CacheKey.derive(normalized, @source)
       assert build(segments) == build(normalized)
+    end
+  end
+
+  # The other half of the class split, and the half that matters here: a
+  # request option is signed, but it describes the request rather than the
+  # bytes, so it must not reach the encoder at all. Paired with the cache-key
+  # statement in `AudioProxy.OptionsPropertyTest`, this is what makes "two URLs
+  # differing only in `exp` are one render" true rather than merely intended.
+  property "a request option does not reach the argv" do
+    check all(
+            segments <- option_segments(),
+            one <- request_option_segments(),
+            other <- request_option_segments()
+          ) do
+      assert build(segments ++ one) == build(segments)
+      assert build(segments ++ one) == build(segments ++ other)
     end
   end
 

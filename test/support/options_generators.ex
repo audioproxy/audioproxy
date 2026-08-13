@@ -56,6 +56,19 @@ defmodule AudioProxy.OptionsGenerators do
     end
   end
 
+  @doc """
+  A request option's segments — the class that is signed but not cache-keyed.
+
+  Deliberately *not* folded into `option_segments/0`. That generator describes a
+  variant, and every property resting on it — normalization, the cache key, the
+  argv — is a statement about variants. What a request option needs asserted is
+  the opposite statement, so it is generated separately and added by the one
+  property that makes it.
+  """
+  def request_option_segments do
+    map(integer(1..253_402_300_799), &["exp:#{&1}"])
+  end
+
   # Peaks refuse every encoding and loudness option, so generate none of them.
   defp encoding("peaks"), do: constant([])
 
