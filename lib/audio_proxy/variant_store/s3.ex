@@ -24,10 +24,24 @@ defmodule AudioProxy.VariantStore.S3 do
   the bucket, which is what keeps `#{inspect(__MODULE__)}` and
   `AudioProxy.Config`'s boot probe out of each other's key space.
 
+  ## The store's own identity
+
+  Every request here — HEAD, multipart write-back, ranged read, presign — runs
+  under `AudioProxy.S3`'s `:store` profile, as does `AudioProxy.Config`'s boot
+  writability probe. With no `AP_VARIANT_S3_*` set that profile *is* the
+  source-side one and nothing about this module's behavior differs; with them
+  set, the store can live on another provider or answer to another principal,
+  and a source credential is never what writes a variant.
+
+  The presign matters most and is the least visible: a SigV4 signature covers
+  the host, so a redirect-mode HIT signed with the source profile against a
+  store on a different endpoint is not a degraded URL, it is an unverifiable
+  one.
+
   ## A PUT is the commit point
 
   There is no staging, because there is nothing to stage: an object does not
-  exist until its upload completes, and `AudioProxy.S3.put_stream/4` aborts a
+  exist until its upload completes, and `AudioProxy.S3.put_stream/5` aborts a
   multipart upload on every failure path it can see. So the local backend's
   `tmp/` dance and its boot-time sweep have no analogue here, and
   atomic-or-absent is a property of the protocol rather than of this module.
@@ -88,6 +102,12 @@ defmodule AudioProxy.VariantStore.S3 do
   # moduledoc.
   @key_format ~r/^[a-f0-9]{64}$/
 
+  # Every request this module makes runs under the store-side profile — see
+  # "The store's own identity" in the moduledoc. Named once, here, so that a
+  # sixth operation added below cannot silently be the one that signs with the
+  # source's credentials.
+  @profile :store
+
   # The seam's ETag, which S3 will not let us set as the object's own.
   @etag_metadata "etag"
 
@@ -110,7 +130,7 @@ defmodule AudioProxy.VariantStore.S3 do
   @impl true
   def get_stream(key, range) do
     # `head/1` first, and it is not redundant. Without it this callback answers
-    # from any object under the key — `AudioProxy.S3.get_stream/3` reads a size
+    # from any object under the key — `AudioProxy.S3.get_stream/4` reads a size
     # and streams — so a stray object that is not a variant would come back as
     # bytes here while `head/1` calls it a miss, which is the two callbacks
     # disagreeing about whether the same key is stored.
@@ -121,7 +141,7 @@ defmodule AudioProxy.VariantStore.S3 do
     # only in proxy mode, which is already the mode that moves every byte
     # through the BEAM, and never in redirect mode, which is the default.
     with {:ok, _entry} <- head(key) do
-      case S3.get_stream(bucket(), key, range) do
+      case S3.get_stream(bucket(), key, range, @profile) do
         {:ok, stream} -> {:ok, stream}
         {:error, :invalid_range} -> {:error, :invalid_range}
         {:error, reason} -> miss(reason, key, "get")
@@ -132,10 +152,16 @@ defmodule AudioProxy.VariantStore.S3 do
   @impl true
   def put_stream(key, chunks, metadata) do
     if valid_key?(key) do
-      S3.put_stream(bucket(), key, chunks,
-        content_type: metadata.content_type,
-        cache_control: metadata.cache_control,
-        metadata: %{@etag_metadata => metadata.etag}
+      S3.put_stream(
+        bucket(),
+        key,
+        chunks,
+        [
+          content_type: metadata.content_type,
+          cache_control: metadata.cache_control,
+          metadata: %{@etag_metadata => metadata.etag}
+        ],
+        @profile
       )
     else
       {:error, :invalid_key}
@@ -145,7 +171,7 @@ defmodule AudioProxy.VariantStore.S3 do
   @impl true
   def presign(key, opts) do
     if valid_key?(key) do
-      S3.presign_get(bucket(), key, opts)
+      S3.presign_get(bucket(), key, opts, @profile)
     else
       {:error, :invalid_key}
     end
@@ -154,7 +180,7 @@ defmodule AudioProxy.VariantStore.S3 do
   ## Reading
 
   defp lookup(key, op) do
-    case S3.head(bucket(), key) do
+    case S3.head(bucket(), key, @profile) do
       {:ok, object} -> {:ok, object}
       {:error, reason} -> miss(reason, key, op)
     end
@@ -188,7 +214,7 @@ defmodule AudioProxy.VariantStore.S3 do
   # On the read paths that reach `miss/3` it is currently unreachable, and the
   # reason is worth knowing rather than rediscovering: **a HEAD response carries
   # no body**, so the `NoSuchBucket` code never arrives, and `translate/1` has
-  # nothing to match on. `head/1` is a HEAD, and `AudioProxy.S3.get_stream/3`
+  # nothing to match on. `head/1` is a HEAD, and `AudioProxy.S3.get_stream/4`
   # opens with one too — so a missing bucket reads as an ordinary miss on both,
   # and only a write surfaces it (as `{:http, 404, NoSuchBucket}` to the tee,
   # which reports it as a write failure). `AudioProxy.VariantStore.S3Test` pins

@@ -201,16 +201,78 @@ No provider on this page is known to diverge on any of the three. That is not
 the same as tested: MinIO is what CI runs against, here as everywhere else on
 this page.
 
+## Two providers, or two credentials
+
+Everything above assumes one S3 configuration doing both jobs: fetching sources
+and keeping variants. The `AP_VARIANT_S3_*` group overrides the variant store's
+half of it, which is what makes two shapes expressible.
+
+**Cross-provider.** Sources live where the catalogue already is; variants go
+somewhere cheaper, closer to the CDN, or simply elsewhere. Sources on
+Cloudflare R2 with the cache on AWS:
+
+```bash
+# Sources: R2. Path-style is derived from the endpoint, so it is not written.
+AP_S3_ENDPOINT=https://ACCOUNT_ID.r2.cloudflarestorage.com
+AWS_REGION=auto
+AWS_ACCESS_KEY_ID=R2_KEY
+AWS_SECRET_ACCESS_KEY=R2_SECRET
+
+# Variants: AWS, with an identity of its own.
+AP_VARIANT_STORE=s3://variants
+AP_VARIANT_S3_ENDPOINT=https://s3.eu-central-1.amazonaws.com
+AP_VARIANT_S3_ADDRESSING=virtual
+AP_VARIANT_S3_REGION=eu-central-1
+AP_VARIANT_S3_ACCESS_KEY_ID=AKIA…
+AP_VARIANT_S3_SECRET_ACCESS_KEY=…
+```
+
+Two things in that block are easy to get wrong. The AWS endpoint is written
+out even though AWS is the default, because an unset override means *inherit*
+— leaving `AP_VARIANT_S3_ENDPOINT` out would point the store at R2. And
+`AP_VARIANT_S3_ADDRESSING=virtual` goes with it: the store side derives
+path-style from having an endpoint at all, which is right for every
+S3-compatible provider on this page and wrong for AWS. The pair spells exactly
+the request AWS's own default produces.
+
+**Split principals, one provider.** The same group with only the credentials
+set gives the source buckets a read-only key while the cache gets one that can
+write — the scoping IAM policy on a single credential cannot express when the
+two live in different accounts, and a clearer separation even when it can:
+
+```bash
+AWS_REGION=eu-central-1
+AWS_ACCESS_KEY_ID=READ_ONLY_KEY          # GetObject/HeadObject on the masters
+AWS_SECRET_ACCESS_KEY=…
+
+AP_VARIANT_STORE=s3://variants
+AP_VARIANT_S3_ACCESS_KEY_ID=WRITER_KEY   # Put/Get/Head/DeleteObject on variants
+AP_VARIANT_S3_SECRET_ACCESS_KEY=…
+AP_VARIANT_S3_REGION=eu-central-1
+```
+
+The region is repeated because the credential group is all-or-nothing: setting
+a key and secret without it aborts boot naming the region. That is deliberate
+— a key from one principal signing in another's region is a request every
+store rejects, and finding out at boot beats finding out on the first hit.
+
+The store-side permissions are the three in *What a variant store needs from a
+provider* above: the boot probe writes and deletes under
+`.audio-proxy-boot-probe/`, so `DeleteObject` is not optional even though
+nothing on the request path deletes anything.
+
+CI exercises this against MinIO for sources and a request-recording endpoint
+for the store — enough to pin that store requests carry the store's identity
+and go to the store's endpoint, and that a source request is still verified by
+a real store. No two-real-provider combination is tested, here as everywhere
+else on this page.
+
 ## Limitations worth knowing before you commit
 
-**One endpoint for the whole deployment.** `AP_S3_ENDPOINT` is global, so
-source objects and cached variants must live on the same provider. Reading
-sources from AWS while caching variants to Hetzner is not expressible today.
-
-**One addressing style for the whole deployment.** `AP_S3_ADDRESSING` is
-global, so sources and variants are addressed the same way. Since the endpoint
-is global too, this only matters if a single store wants different styles for
-different buckets, which none of these do.
+**Two endpoints, not more.** `AP_S3_ENDPOINT` covers every source and
+`AP_VARIANT_S3_ENDPOINT` the variant store; there is no per-bucket endpoint or
+per-bucket credential. Sources spread across two providers are not expressible,
+and the source allowlist names many buckets under one identity.
 
 **Virtual-hosted addressing constrains bucket names.** The bucket becomes a
 DNS label, so a name with dots (`my.audio.masters`) fails certificate matching

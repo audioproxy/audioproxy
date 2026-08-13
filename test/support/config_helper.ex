@@ -15,6 +15,20 @@ defmodule AudioProxy.ConfigHelper do
 
   @doc """
   Merges `overrides` into the stored config, restoring the original on test exit.
+
+  An `:s3` override with no `:variant_s3` beside it installs both — but only
+  while the two stored profiles still agree. That is the fallback
+  `AudioProxy.Config.build!/1` applies to an environment carrying no
+  `AP_VARIANT_S3_*`: unset means the store runs on the source's configuration.
+  Without it, a test that pointed `:s3` at MinIO would have every *store*
+  operation sign with the empty store profile and answer `:not_configured` — a
+  break in a test with nothing wrong with it.
+
+  The "while they agree" half is the other trap, and it was found by walking
+  into it: a test that installs two *different* profiles and then adjusts only
+  `:s3` — to break a credential, to move an endpoint — must not have its store
+  profile silently overwritten with the source's. Once the two have been split,
+  they stay split, and only an explicit `:variant_s3` moves the store side.
   """
   @spec put_config(map()) :: AudioProxy.Config.t()
   def put_config(overrides) when is_map(overrides) do
@@ -23,8 +37,23 @@ defmodule AudioProxy.ConfigHelper do
     previous = AudioProxy.Config.all()
     on_exit(fn -> AudioProxy.Config.put_all(previous) end)
 
-    previous |> Map.merge(overrides) |> AudioProxy.Config.put_all()
+    previous
+    |> Map.merge(inherit_variant_s3(overrides, previous))
+    |> AudioProxy.Config.put_all()
   end
+
+  # Keyword form is accepted for `:s3` the same way `validate_keys!/2` accepts
+  # it, so the inheritance cannot be the one place that only understands maps.
+  defp inherit_variant_s3(%{s3: s3} = overrides, previous)
+       when not is_map_key(overrides, :variant_s3) and (is_map(s3) or is_list(s3)) do
+    if Map.get(previous, :variant_s3) == Map.get(previous, :s3) do
+      Map.put(overrides, :variant_s3, Map.new(s3))
+    else
+      overrides
+    end
+  end
+
+  defp inherit_variant_s3(overrides, _previous), do: overrides
 
   @doc """
   The byte-limit floor, with `overrides` merged over it.
@@ -96,18 +125,24 @@ defmodule AudioProxy.ConfigHelper do
 
     check_keys!(overrides, Map.keys(reference), s3_keys, caller, "")
 
+    # Both S3 groups, because they are the same shape and so the same typo:
+    # `variant_s3: %{endpiont: …}` is no more readable than `s3: %{endpiont: …}`
+    # and no less silent.
+    #
     # `Map.new/1` before the check, because a caller may write the whole
     # override in keyword syntax — `base_config/1` takes `keyword() | map()`
     # and converts only the top level. Matching on `is_map` alone would wave
     # `s3: [endpiont: …]` through, which is the typo this exists to catch,
     # arriving through the documented interface.
-    case Map.fetch(overrides, :s3) do
-      {:ok, s3} when is_map(s3) or is_list(s3) ->
-        check_keys!(Map.new(s3), s3_keys, [], caller, ":s3 ")
+    Enum.each([:s3, :variant_s3], fn group ->
+      case Map.fetch(overrides, group) do
+        {:ok, values} when is_map(values) or is_list(values) ->
+          check_keys!(Map.new(values), s3_keys, [], caller, ":#{group} ")
 
-      _other ->
-        :ok
-    end
+        _other ->
+          :ok
+      end
+    end)
   end
 
   defp check_keys!(map, known, nested, caller, label) do
