@@ -112,6 +112,19 @@ The cost is real and worth stating: without the override there is no no-write gu
 - **Commit before running** so `git status --short` afterwards proves the reviewer mutated nothing.
 - Runs take 5–20 minutes and are I/O-bound. A stalled byte count plus a live process is normal mid-thought.
 
+**A third failure is the provider rejecting its own conversation, and it is neither of the two below.** On `guard-config-documentation` two runs died mid-review with a non-zero exit and this on stderr:
+
+```
+Error from provider (Console Go): Upstream request failed: [invalid_request_error]
+Invalid request: the message at position 22 with role 'assistant' must not be empty
+```
+
+Position 22 on `opencode-go/kimi-k2.7-code` at loop step 10, position 33 on `opencode-go/kimi-k3` at step 13 — **two models on the same route**, so this is the route's accumulated-conversation validation, not a model quirk, and swapping the model does not dodge it. The trigger is an assistant turn that produced reasoning and a tool call but no text part, which the route then replays as an empty message. It is time-dependent: the longer the review runs, the likelier a reasoning-only turn is in the history. Tell it from the other two by exit status and the stderr line — it is the only one of the three that names an error at all.
+
+Two consequences. **Recovery is the same SQLite dig** as the empty-output case below, and it works: 72 KB of reasoning off the second run held a consolidated, severity-rated finding list that reconciled cleanly and turned up four real defects. And **`opencode/…` is not a drop-in fallback for `opencode-go/…`** — the first-party route answered `Insufficient balance` in under a second, which at least fails fast and unambiguously.
+
+**Adding "emit findings as you go" to the brief does not solve this, and the logs will suggest it did.** Run three wrote eight narrator lines to stdout — "Suite is green (119 passed). Now let me empirically probe the scan regex…" — so the byte count grew, the run looked healthy, and every actual finding was still stranded in reasoning when the provider killed it. Progress narration is not findings. Judge a run by whether a *severity-rated finding* has reached stdout, never by the file being non-empty.
+
 **A clean exit with an empty output file is a distinct failure — do not confuse it with the hang above.** A reasoning model can spend its entire final turn thinking and never emit a text part: exit 0, a full log ending in `exiting loop`, several completed steps, and nothing to print. Observed at 131,000 characters of reasoning, much of it degenerating into repetition, with no answer at the end. The two failures share the 0-byte symptom and nothing else — tell them apart by exit status and log tail, never by the size of the output file. Two consequences:
 
 - **The brief must demand the findings as the final message** — "think briefly, then write; if you are running long, write what you have." Keep carrying it: three consecutive runs once returned nothing, and the first run carrying that instruction returned a review that found a real bug. **It is not the reliable prevention this file used to claim, though.** On `bound-probe-concurrency` the failure recurred with the instruction present and prominent — 19 loop steps, clean exit, 71 bytes of stdout holding only "I'll read the branch, run the tests, and write the review", and the whole review stranded in 105,000 characters of reasoning. So treat the instruction as improving the odds and the recovery below as the thing you actually rely on. An answer arriving all at once at the end is still what success looks like, not a symptom. It recurred again on `extract-test-fixtures` — 7 steps, 6 tool calls, clean exit, **0 bytes**, 21,646 characters of reasoning holding a complete audit. Two recurrences now, so plan the recovery into the schedule rather than treating it as the exception.
@@ -178,6 +191,7 @@ itself:
 | `AudioProxy.Eventually` | Waiting for a condition that nothing announces. | A poll loop is imported, never written. |
 | `AudioProxy.Fixtures` | Generated audio fixtures, and the fixture root they live in. | A fixture path is never a fixed name under `System.tmp_dir!()`. |
 | `AudioProxy.TestServer` | Booting a real listener, and reading back the port it got. | A test that binds a socket boots it through this helper. |
+| `AudioProxy.MarkedTable` | Reading a table out of a marked region of a published document. | A drift guard parses its table through this, never with its own regex. |
 
 Promoting another duplicated helper adds a row here and a subsection below. The
 section is meant to grow a row at a time; nothing above needs rewriting to make
@@ -315,6 +329,27 @@ now breaks in one place: a `MatchError` from this module means Bandit or
 Thousand Island changed how a bound port is reported, not that the calling test
 is wrong. The `{127, 0, 0, 1}` on both sides of that match is an assertion that
 the listener came up loopback-only, not leftover pattern.
+
+`AudioProxy.MarkedTable` owns the parser the documentation drift guards share,
+for the tables fenced by `<!-- <name>-table:start -->` in `llms-full.txt` and
+`README.md`:
+
+| Function | Holds |
+|---|---|
+| `rows/2` | The rows of a marked table, each as its list of backticked cell tokens. A non-backticked cell is `nil`; a row whose *first* cell is not backticked is dropped, which is what skips the header and the `\|---\|` separator. |
+| `first_cells/2` | Just the first cell of each row — the key, the code, the variable name. What a coverage guard almost always wants. |
+
+One rule, and it was bought rather than reasoned:
+
+- **A guard parses its table through this module, never with its own regex.**
+  The README's configuration guard shipped with a hand-rolled copy of the
+  parser that already existed in `llms_docs_test.exs`, and the copy was not
+  equivalent: on a line holding nothing but `|` the original returned no row and
+  the copy raised `ArgumentError` from `hd([])`. Two parsers, one document
+  format, one of them wrong — found by an adversarial review within a day of
+  the copy being written. A missing marker still raises `MatchError` on purpose:
+  a guard that silently parsed an empty region would pass while checking
+  nothing.
 
 ## Open questions (decide as they come up)
 
