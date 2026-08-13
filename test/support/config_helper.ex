@@ -18,6 +18,8 @@ defmodule AudioProxy.ConfigHelper do
   """
   @spec put_config(map()) :: AudioProxy.Config.t()
   def put_config(overrides) when is_map(overrides) do
+    validate_keys!(overrides, "AudioProxy.ConfigHelper.put_config/1")
+
     previous = AudioProxy.Config.all()
     on_exit(fn -> AudioProxy.Config.put_all(previous) end)
 
@@ -55,5 +57,71 @@ defmodule AudioProxy.ConfigHelper do
       %{max_src_bytes: 2_000_000_000, max_variant_bytes: 2_000_000_000},
       Map.new(overrides)
     )
+  end
+
+  @doc """
+  Raises unless every key of `overrides` is one `AudioProxy.Config` defines.
+
+  The config floor stops the *environment* from silently changing what a test
+  asserts. This stops a *typo* from doing the same thing: `probe_timout: 1`
+  merges cleanly, installs a key nothing reads, and leaves `probe_timeout` at
+  whatever the floor or the boot environment gave it — so the test fails far
+  from the mistake, or passes while asserting something weaker than intended.
+  That sentence is why this function exists.
+
+  `caller` names the helper the override was handed to, so the message points
+  at the call site that wrote the key rather than at the merge below it.
+
+  The acceptable set is `Map.keys(AudioProxy.Config.build!(%{}))`, computed
+  here rather than restated: a new setting is accepted the moment `lib/`
+  defines it, with no edit to this file. `build!/1` on an empty environment is
+  pure — it reads nothing and stores nothing — and the `:s3` sub-map is checked
+  one level down against `build!(%{}).s3`, because that is the group whose keys
+  are least familiar. Nothing below `:s3` is a map, so there is no deeper
+  recursion.
+
+  Only key *names* are checked. Values are `AudioProxy.Config.build!/1`'s
+  business, and a test that pins a deliberately invalid value is a legitimate
+  thing to write.
+  """
+  @spec validate_keys!(map(), binary()) :: :ok
+  def validate_keys!(overrides, caller) when is_map(overrides) do
+    reference = AudioProxy.Config.build!(%{})
+
+    check_keys!(overrides, Map.keys(reference), caller, "")
+
+    case Map.fetch(overrides, :s3) do
+      {:ok, s3} when is_map(s3) -> check_keys!(s3, Map.keys(reference.s3), caller, ":s3 ")
+      _other -> :ok
+    end
+  end
+
+  defp check_keys!(map, known, caller, label) do
+    case Enum.reject(Map.keys(map), &(&1 in known)) do
+      [] ->
+        :ok
+
+      [unknown | _rest] ->
+        raise ArgumentError,
+              "#{caller}: unknown #{label}config key #{inspect(unknown)}" <>
+                suggestion(unknown, known)
+    end
+  end
+
+  # Jaro is what a typo looks like to a string metric. Below the threshold the
+  # key is named and nothing is guessed: a wrong suggestion sends the reader
+  # somewhere worse than no suggestion at all.
+  @suggestion_threshold 0.8
+
+  defp suggestion(unknown, known) do
+    unknown = Atom.to_string(unknown)
+
+    known
+    |> Enum.map(&{&1, String.jaro_distance(unknown, Atom.to_string(&1))})
+    |> Enum.max_by(&elem(&1, 1), fn -> nil end)
+    |> case do
+      {key, score} when score > @suggestion_threshold -> " — did you mean #{inspect(key)}?"
+      _none -> ""
+    end
   end
 end

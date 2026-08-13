@@ -54,6 +54,9 @@ defmodule AudioProxy.SignedRequest do
 
       put_config(SignedRequest.base_config(local_root: tmp_dir, probe_timeout: 1))
 
+  An override naming a key `AudioProxy.Config` does not define is refused here,
+  by `AudioProxy.ConfigHelper.validate_keys!/2`, before the merge — so the
+  error names this call site rather than the `put_config/1` one line below.
   """
   @spec base_config(keyword() | map()) :: map()
   def base_config(overrides) do
@@ -64,6 +67,8 @@ defmodule AudioProxy.SignedRequest do
             "AudioProxy.SignedRequest.base_config/1 requires :local_root — " <>
               "pass the test's tmp dir explicitly"
     end
+
+    ConfigHelper.validate_keys!(overrides, "AudioProxy.SignedRequest.base_config/1")
 
     ConfigHelper.byte_limits()
     |> Map.merge(%{key: @key, salt: @salt, allow_insecure: false})

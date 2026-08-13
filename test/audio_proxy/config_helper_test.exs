@@ -52,6 +52,12 @@ defmodule AudioProxy.ConfigHelperTest do
       assert byte_limits(%{max_src_bytes: 10}).max_src_bytes == 10
     end
 
+    test "is not itself guarded, because put_config/1 is the chokepoint" do
+      # byte_limits/1 builds a map and installs nothing, so a key that never
+      # reaches put_config/1 or base_config/1 is nobody's mistake yet.
+      assert byte_limits(probe_timout: 1).probe_timout == 1
+    end
+
     test "is the floor AudioProxy.SignedRequest.base_config/1 is built on" do
       # The direction of the dependency, asserted rather than assumed: the
       # signing floor adds key material to this one, so the limits have a
@@ -59,6 +65,89 @@ defmodule AudioProxy.ConfigHelperTest do
       config = AudioProxy.SignedRequest.base_config(local_root: "/tmp/x")
 
       assert Map.take(config, [:max_src_bytes, :max_variant_bytes]) == byte_limits()
+    end
+  end
+
+  describe "validate_keys!/2" do
+    test "put_config/1 refuses a key nothing reads, naming it and the caller" do
+      # The whole point: :probe_timout merges cleanly and leaves :probe_timeout
+      # at whatever the environment gave it, so the failure would otherwise
+      # arrive somewhere far from the typo.
+      error =
+        assert_raise ArgumentError, fn ->
+          put_config(%{probe_timout: 1})
+        end
+
+      message = error.message
+
+      assert message =~ ":probe_timout"
+      assert message =~ "put_config/1"
+    end
+
+    test "the message suggests the nearest known key" do
+      # Asserting that the suggestion is there and names the right key, not the
+      # sentence around it — the wording is meant to be editable.
+      error = assert_raise ArgumentError, fn -> put_config(%{probe_timout: 1}) end
+      message = error.message
+
+      assert message =~ ":probe_timeout"
+    end
+
+    test "a key too far from anything known is named without a guess" do
+      # Below the jaro threshold nothing is suggested: a wrong suggestion sends
+      # the reader somewhere worse than no suggestion at all.
+      error = assert_raise ArgumentError, fn -> put_config(%{wibble: 1}) end
+      message = error.message
+
+      assert message =~ ":wibble"
+      refute message =~ "did you mean"
+    end
+
+    test "a known key is installed unchanged" do
+      put_config(%{serve_mode: :proxy})
+
+      assert Config.get(:serve_mode) == :proxy
+    end
+
+    test "a typo inside the :s3 group is caught too" do
+      # The group whose key names are least familiar, and the one a top-level
+      # check would wave through.
+      error =
+        assert_raise ArgumentError, fn ->
+          put_config(%{s3: %{endpiont: "http://localhost:9000"}})
+        end
+
+      message = error.message
+
+      assert message =~ ":endpiont"
+      assert message =~ ":endpoint"
+    end
+
+    test "a real :s3 key is not" do
+      put_config(%{s3: %{Config.get(:s3) | addressing: :path}})
+
+      assert Config.get(:s3).addressing == :path
+    end
+
+    test "base_config/1 refuses the key at the call site that wrote it" do
+      error =
+        assert_raise ArgumentError, fn ->
+          AudioProxy.SignedRequest.base_config(local_root: "/tmp/x", probe_timout: 1)
+        end
+
+      message = error.message
+
+      assert message =~ ":probe_timout"
+      assert message =~ "base_config/1"
+    end
+
+    test "every key AudioProxy.Config defines is accepted" do
+      # Derived, not restated: this fails the day someone hard-codes a list, and
+      # a new setting needs no edit to the support layer to be overridable.
+      reference = Config.build!(%{})
+
+      assert :ok = validate_keys!(reference, "test")
+      assert :ok = validate_keys!(%{s3: reference.s3}, "test")
     end
   end
 end
