@@ -134,8 +134,20 @@ defmodule AudioProxy.VariantCache do
     # so its life is capped by the URL that bought it: an unclamped presign
     # would let a 30-second URL hand out an hour of storage access, and
     # following it needs no signature of ours at all.
-    ttl = Expiry.clamp_ttl(Config.get(:presign_ttl), conn.assigns.options)
+    redirect(conn, key, entry, Expiry.clamp_ttl(Config.get(:presign_ttl), conn.assigns.options))
+  end
 
+  # Nothing left to sign for. Reachable in exactly one second — the one the
+  # URL's `exp` names, where `AudioProxy.Expiry.check/1` still passes because
+  # the boundary is exclusive — and a zero-second credential is not refused by
+  # the signer the way it might look: `ExAws.S3.presigned_url/5` returns
+  # `{:ok, "…&X-Amz-Expires=0&…"}` quite happily, and the store rejects it only
+  # when the client follows it. So the redirect would hand out a URL that is
+  # already dead instead of the bytes. Proxy them: the request was live when it
+  # arrived, and this is the same answer it would have got a second earlier.
+  defp redirect(conn, key, entry, 0), do: proxy(conn, key, entry)
+
+  defp redirect(conn, key, entry, ttl) do
     case VariantStore.presign(key, expires_in: ttl) do
       {:ok, url} ->
         {:ok,

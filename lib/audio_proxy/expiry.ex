@@ -109,9 +109,13 @@ defmodule AudioProxy.Expiry do
 
   Used for the presigned TTL of a HIT redirect. A `0` is possible in the
   expiring second and is left as `0` rather than floored: a credential that
-  outlives its URL, however briefly, is the thing this exists to prevent, and
-  a backend that refuses to sign for zero seconds falls back to proxying the
-  bytes — which is the same answer the request would have got a second earlier.
+  outlives its URL, however briefly, is the thing this exists to prevent.
+
+  A zero is a real answer, not a degenerate one, and the caller has to treat it
+  as such. Do not assume the signer refuses it — `ExAws.S3.presigned_url/5`
+  signs `X-Amz-Expires=0` without complaint, so a backend "failing" is not the
+  safety net it looks like. `AudioProxy.VariantCache` proxies the bytes rather
+  than redirecting when this returns `0`.
   """
   @spec clamp_ttl(non_neg_integer(), Options.t()) :: non_neg_integer()
   def clamp_ttl(ttl, options), do: min(ttl, remaining(options))

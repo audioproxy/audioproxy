@@ -126,6 +126,28 @@ defmodule AudioProxy.ExpiringUrlsTest do
       assert header(conn, "cache-control") == "public, max-age=31536000, immutable"
     end
 
+    test "the production router refuses it, not merely the test mounting" do
+      # Every other test here drives `AudioProxy.FakeFfmpeg.Router`, whose
+      # pipeline is a hand-copy of the production chain — so on its own the
+      # suite proves the *copy* checks expiry and says nothing about the
+      # deployment. Removing `AudioProxy.Plugs.CheckExpiry` from
+      # `AudioProxy.Plugs.RenderPipeline` left all 1051 tests green; this is the
+      # one that turns red.
+      #
+      # It needs no encoder precisely because of what it asserts: the check
+      # halts before the action, so the production router is drivable for it.
+      conn =
+        SignedRequest.conn(
+          :get,
+          signed("/f:opus/exp:#{in_seconds(-1)}/plain/local://piece.wav"),
+          []
+        )
+        |> AudioProxy.Router.call(AudioProxy.Router.init([]))
+
+      assert conn.status == 410
+      assert JSON.decode!(conn.resp_body)["error"] == "expired"
+    end
+
     test "expiry is judged after the signature, not before" do
       # An expired URL whose signature is also wrong is a 401: a client with a
       # bad key learns nothing about the timestamp, and the cheaper, more
@@ -273,13 +295,23 @@ defmodule AudioProxy.ExpiringUrlsTest do
     end
 
     test "one write-back, which a URL carrying no exp at all then hits" do
-      rest = "/f:opus/br:96/exp:#{in_seconds(3600)}/plain/local://piece.wav"
+      # `exp:600` rather than a year out, so a clamp leaking into the write-back
+      # would be a visibly different number below rather than a coincidence.
+      rest = "/f:opus/br:96/exp:#{in_seconds(600)}/plain/local://piece.wav"
 
       dated = request(signed(rest))
       assert header(dated, "x-audio-proxy") == "MISS"
 
       key = CacheKey.derive!(@options, "local://piece.wav")
       wait_until(fn -> match?({:ok, _entry}, VariantStore.head(key)) end)
+
+      # The invariant the whole class split rests on: this variant is shared by
+      # every `exp`, so the requester's remaining lifetime must not have been
+      # stored with it. Writing the clamped policy here instead left all 1051
+      # tests green, and would degrade the variant's cacheability permanently
+      # for every later requester — including ones with no `exp` at all.
+      {:ok, %{metadata: stored}} = VariantStore.head(key)
+      assert stored.cache_control == "public, max-age=31536000, immutable, no-transform"
 
       bare = request(signed("/f:opus/br:96/plain/local://piece.wav"))
 
@@ -288,6 +320,56 @@ defmodule AudioProxy.ExpiringUrlsTest do
       # about the requester was stored with it.
       assert header(bare, "x-audio-proxy") == "HIT"
       assert bare.resp_body == dated.resp_body
+
+      # And it is served under the full year, not the expiring URL's remainder.
+      assert header(bare, "cache-control") == "public, max-age=31536000, immutable, no-transform"
+    end
+  end
+
+  describe "the expiring second" do
+    test "a redirect with nothing left to sign for proxies the bytes instead" do
+      # `exp` exactly now is the one second where the check passes — the
+      # boundary is exclusive — and `clamp_ttl/2` is nevertheless 0. Signing for
+      # zero seconds is not refused by the signer the way it looks like it
+      # would be (`ExAws.S3.presigned_url/5` returns `{:ok, …X-Amz-Expires=0…}`),
+      # so redirecting here would hand the client a URL that is already dead.
+      #
+      # Driven through `serve/3` rather than the router because the outcome must
+      # not depend on which side of a second the request lands on: `remaining/1`
+      # is 0 for `exp` at or before now, so this is deterministic where a signed
+      # request would race the clock.
+      put_config(%{variant_store: {:module, PresigningStore}, serve_mode: :redirect})
+      key = store!("local://cached.wav")
+      {:ok, entry} = VariantStore.head(key)
+
+      conn =
+        Plug.Test.conn(:get, "/")
+        |> Plug.Conn.assign(:options, %AudioProxy.Options{expires_at: System.system_time(:second)})
+
+      assert {:ok, served} = AudioProxy.VariantCache.serve(conn, key, entry)
+
+      assert served.status == 200
+      assert served.resp_body == @variant
+      assert header(served, "location") == nil
+    end
+
+    test "a redirect with a second left still redirects" do
+      # The neighbouring case, so the clause above is a boundary rather than a
+      # blanket disabling of redirect mode under `exp`.
+      put_config(%{variant_store: {:module, PresigningStore}, serve_mode: :redirect})
+      key = store!("local://cached.wav")
+      {:ok, entry} = VariantStore.head(key)
+
+      conn =
+        Plug.Test.conn(:get, "/")
+        |> Plug.Conn.assign(:options, %AudioProxy.Options{
+          expires_at: System.system_time(:second) + 5
+        })
+
+      assert {:ok, served} = AudioProxy.VariantCache.serve(conn, key, entry)
+
+      assert served.status == 302
+      assert served |> header("location") =~ ~r/expires_in=[1-5]$/
     end
   end
 end
