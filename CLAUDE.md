@@ -56,7 +56,13 @@ Stay with the stdlib and core/OTP tooling as far as possible. GenStage is accept
   | `docs/ffmpeg-arguments.md` | How options become ffmpeg args: filter order, per-format flags, measured trade-offs, known gaps. | Is this how the sausage is made? |
   | `llms.txt`, `llms-full.txt` | The API contract as one self-contained markdown file, at the repo root per the llms.txt convention and carried in the hex package. | Would someone with *only* this file still build the URL correctly? |
 
-  **The llms files carry the same obligation the README does, and part of it is enforced.** Any slice that changes the API surface — an option, an error code, an endpoint, a config variable, the signing rule — updates `llms-full.txt` in the same change. The option table and the error table there are compared against `AudioProxy.Options.keys/0` and `AudioProxy.ErrorJSON.rows/0` by `test/llms_docs_test.exs`, and the worked signing example is recomputed from `AudioProxy.Signature.sign/3`, so those three cannot drift silently. The error half needs one thing kept up: `rows/0` derives its table from `@representative_errors`, so a new `render/1` clause reaches the guard only once it is listed there — `AudioProxy.ErrorJSONTest` counts the clauses to make sure it is. Everything else in the file can: the endpoint list, the config table, the response semantics, the cross-key rules. Treat the guards as covering the part that is easiest to forget, not as covering the file.
+  **The llms files carry the same obligation the README does, and part of it is enforced.** Any slice that changes the API surface — an option, an error code, an endpoint, a config variable, the signing rule — updates `llms-full.txt` in the same change. Three tables there are compared against the implementation by `test/llms_docs_test.exs` — options against `AudioProxy.Options.keys/0`, errors against `AudioProxy.ErrorJSON.rows/0`, configuration against `AudioProxy.Config.variables/0` — and the worked signing example is recomputed from `AudioProxy.Signature.sign/3`, so those four cannot drift silently. The README's configuration table is checked against `variables/0` by the same rule, in `test/readme_examples_test.exs`: it is the same list written twice, and both copies now have to agree with the code.
+
+  Two of those guards need something kept up, and both have a test of their own for it. `ErrorJSON.rows/0` derives its table from `@representative_errors`, so a new `render/1` clause reaches the guard only once it is listed there — `AudioProxy.ErrorJSONTest` counts the clauses to make sure it is. `Config.variables/0` is a hand-written list beside the reads it describes, so `AudioProxy.ConfigTest` scans `config.ex` for `(env, "AP_…")` call sites and fails when the list and the reads disagree in either direction.
+
+  **The configuration guard covers variable *names*, not defaults.** A default that moves — `AP_QUEUE_SIZE` from `32`, `AP_PRESIGN_TTL` from `300` — still ships wrong if nobody edits the table; only a variable arriving or leaving fails CI. That was the deliberate call: several defaults are derived rather than literal, and the README and `llms-full.txt` word those differently for different readers, so comparing them would mean both quoting one rendered string. The `AWS_*` credentials variables are outside the guard too, described in prose beside each table.
+
+  Everything else in the file is unguarded: the endpoint list, the response semantics, the cross-key rules. Treat the guards as covering the part that is easiest to forget, not as covering the file.
 
   The README is the one with a hard rule: **no implementation detail.** A reader arrives wanting to render audio, not to learn how the filtergraph is assembled. Internals that are genuinely worth writing down — and most are — go to `docs/` and get linked from the README's documentation table, not inlined into it. When a section starts explaining *how* rather than *how to*, it has outgrown the README.
 
@@ -105,6 +111,19 @@ The cost is real and worth stating: without the override there is no no-write gu
   When the tool-using smoke test *does* hang, the tool-less prompt stops being a trap and becomes the diagnostic: run `"Reply with exactly: OK"` next. `OK` back in a couple of seconds proves the provider, the credentials and init are all fine and puts the fault squarely on the tool permission — which is a much shorter list to work through than "something is wrong with opencode". A hang on both means the problem is upstream of the review.
 - **Commit before running** so `git status --short` afterwards proves the reviewer mutated nothing.
 - Runs take 5–20 minutes and are I/O-bound. A stalled byte count plus a live process is normal mid-thought.
+
+**A third failure is the provider rejecting its own conversation, and it is neither of the two below.** On `guard-config-documentation` two runs died mid-review with a non-zero exit and this on stderr:
+
+```
+Error from provider (Console Go): Upstream request failed: [invalid_request_error]
+Invalid request: the message at position 22 with role 'assistant' must not be empty
+```
+
+Position 22 on `opencode-go/kimi-k2.7-code` at loop step 10, position 33 on `opencode-go/kimi-k3` at step 13 — **two models on the same route**, so this is the route's accumulated-conversation validation, not a model quirk, and swapping the model does not dodge it. The trigger is an assistant turn that produced reasoning and a tool call but no text part, which the route then replays as an empty message. It is time-dependent: the longer the review runs, the likelier a reasoning-only turn is in the history. Tell it from the other two by exit status and the stderr line — it is the only one of the three that names an error at all.
+
+Two consequences. **Recovery is the same SQLite dig** as the empty-output case below, and it works: 72 KB of reasoning off the second run held a consolidated, severity-rated finding list that reconciled cleanly and turned up four real defects. And **`opencode/…` is not a drop-in fallback for `opencode-go/…`** — the first-party route answered `Insufficient balance` in under a second, which at least fails fast and unambiguously.
+
+**Adding "emit findings as you go" to the brief does not solve this, and the logs will suggest it did.** Run three wrote eight narrator lines to stdout — "Suite is green (119 passed). Now let me empirically probe the scan regex…" — so the byte count grew, the run looked healthy, and every actual finding was still stranded in reasoning when the provider killed it. Progress narration is not findings. Judge a run by whether a *severity-rated finding* has reached stdout, never by the file being non-empty.
 
 **A clean exit with an empty output file is a distinct failure — do not confuse it with the hang above.** A reasoning model can spend its entire final turn thinking and never emit a text part: exit 0, a full log ending in `exiting loop`, several completed steps, and nothing to print. Observed at 131,000 characters of reasoning, much of it degenerating into repetition, with no answer at the end. The two failures share the 0-byte symptom and nothing else — tell them apart by exit status and log tail, never by the size of the output file. Two consequences:
 
@@ -172,6 +191,7 @@ itself:
 | `AudioProxy.Eventually` | Waiting for a condition that nothing announces. | A poll loop is imported, never written. |
 | `AudioProxy.Fixtures` | Generated audio fixtures, and the fixture root they live in. | A fixture path is never a fixed name under `System.tmp_dir!()`. |
 | `AudioProxy.TestServer` | Booting a real listener, and reading back the port it got. | A test that binds a socket boots it through this helper. |
+| `AudioProxy.MarkedTable` | Reading a table out of a marked region of a published document. | A drift guard parses its table through this, never with its own regex. |
 
 Promoting another duplicated helper adds a row here and a subsection below. The
 section is meant to grow a row at a time; nothing above needs rewriting to make
@@ -309,6 +329,27 @@ now breaks in one place: a `MatchError` from this module means Bandit or
 Thousand Island changed how a bound port is reported, not that the calling test
 is wrong. The `{127, 0, 0, 1}` on both sides of that match is an assertion that
 the listener came up loopback-only, not leftover pattern.
+
+`AudioProxy.MarkedTable` owns the parser the documentation drift guards share,
+for the tables fenced by `<!-- <name>-table:start -->` in `llms-full.txt` and
+`README.md`:
+
+| Function | Holds |
+|---|---|
+| `rows/2` | The rows of a marked table, each as its list of backticked cell tokens. A non-backticked cell is `nil`; a row whose *first* cell is not backticked is dropped, which is what skips the header and the `\|---\|` separator. |
+| `first_cells/2` | Just the first cell of each row — the key, the code, the variable name. What a coverage guard almost always wants. |
+
+One rule, and it was bought rather than reasoned:
+
+- **A guard parses its table through this module, never with its own regex.**
+  The README's configuration guard shipped with a hand-rolled copy of the
+  parser that already existed in `llms_docs_test.exs`, and the copy was not
+  equivalent: on a line holding nothing but `|` the original returned no row and
+  the copy raised `ArgumentError` from `hd([])`. Two parsers, one document
+  format, one of them wrong — found by an adversarial review within a day of
+  the copy being written. A missing marker still raises `MatchError` on purpose:
+  a guard that silently parsed an empty region would pass while checking
+  nothing.
 
 ## Open questions (decide as they come up)
 

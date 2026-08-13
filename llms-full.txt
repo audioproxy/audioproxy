@@ -257,10 +257,12 @@ Failures before the response begins are JSON, one shape everywhere:
 
 ## Configuration
 
-All configuration is `AP_`-prefixed environment variables, read and validated once at boot; a malformed value aborts startup naming the variable. Booleans accept `1`/`true`/`yes`/`on` and their negatives. The listener port is `AP_PORT`, then `PORT`, then `4000`.
+All configuration is `AP_`-prefixed environment variables, read and validated once at boot; a malformed value aborts startup naming the variable. Booleans accept `1`/`true`/`yes`/`on` and their negatives.
 
+<!-- config-table:start -->
 | Variable | Default | Purpose |
 |---|---|---|
+| `AP_PORT` | `4000` | Port the proxy listens on; `PORT` is read when it is unset |
 | `AP_KEY` | unset | HMAC key for signatures, hex, ≥ 32 bytes decoded |
 | `AP_SALT` | unset | HMAC salt, hex |
 | `AP_ALLOW_INSECURE` | `false` | Accept the literal `insecure` in place of a signature. Development only |
@@ -284,6 +286,7 @@ All configuration is `AP_`-prefixed environment variables, read and validated on
 | `AP_S3_ENDPOINT` | unset | An S3-compatible store instead of AWS. Origin only |
 | `AP_S3_ADDRESSING` | `virtual`, or `path` with an endpoint | Whether a request names its bucket in the host or the path |
 | `AP_S3_CA_BUNDLE` | unset | PEM bundle replacing the system trust store, for a store behind a private CA |
+<!-- config-table:end -->
 
 S3 credentials are the standard `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_REGION` — or `AWS_DEFAULT_REGION`, which is read when `AWS_REGION` is unset — plus an optional `AWS_SESSION_TOKEN`. They are validated as a group at boot — all three or none. They come from the environment only: there is no IMDS or STS lookup, so an instance role does not work.
 
@@ -321,19 +324,24 @@ Each `$SIG` differs: it signs the rest of that particular path.
 The source of truth for this contract is [docs/audio-proxy-api-v1.md](https://github.com/audioproxy/audioproxy/blob/main/docs/audio-proxy-api-v1.md).
 
 <!--
-  Editing this file: three regions above are machine-checked, and this note
+  Editing this file: four regions above are machine-checked, and this note
   lives at the bottom because the convention wants the H1 first.
 
-  `test/llms_docs_test.exs` parses the two marked tables and compares
+  `test/llms_docs_test.exs` parses the three marked tables and compares
   them, as sets, against the implementation: option keys against
   `AudioProxy.Options.keys/0`, error rows against
-  `AudioProxy.ErrorJSON.rows/0`. The signing example is recomputed with
+  `AudioProxy.ErrorJSON.rows/0`, configuration variables against
+  `AudioProxy.Config.variables/0`. The signing example is recomputed with
   `AudioProxy.Signature.sign/3`.
 
   So the tables have a fixed shape. Inside a marked region, every line that
   starts with `|` and whose first cell is a single backticked token is read as
   a row; the header and its `|---|` separator are skipped. One row per option
-  key, one row per error row — do not merge, split, or annotate the first cell.
-  Prose outside the markers is yours; prose inside the first cell is not.
+  key, error row and variable — do not merge, split, or annotate the first
+  cell. Prose outside the markers is yours; prose inside the first cell is not.
+
+  Variable *names* are checked, not defaults: several defaults are derived
+  rather than literal, and this file and the README word them differently for
+  different readers. A default that moves is on you.
 -->
 

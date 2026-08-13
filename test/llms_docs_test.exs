@@ -6,10 +6,16 @@ defmodule AudioProxy.LlmsDocsTest do
   A document an agent reads instead of the code is only worth publishing while
   the two agree, and prose cannot be checked. Coverage can: the option table
   must name exactly the keys the parser knows, the error table exactly the
-  rows `AudioProxy.ErrorJSON` renders, and the worked signing example must be
+  rows `AudioProxy.ErrorJSON` renders, the configuration table exactly the
+  variables `AudioProxy.Config` reads, and the worked signing example must be
   what `AudioProxy.Signature.sign/3` actually produces. Each failure names the
-  key, row or value that moved, so the fix is to the document rather than to
-  this test.
+  key, row, variable or value that moved, so the fix is to the document rather
+  than to this test.
+
+  The configuration table is checked by *name* only. Several defaults are
+  derived rather than literal, and this file and the README render those
+  differently on purpose, so guarding defaults would mean both quoting one
+  rendered string — see the change's design note.
 
   The parsed regions are delimited by HTML comments in the file itself, whose
   footer comment states the shape. Everything outside them is prose.
@@ -21,7 +27,9 @@ defmodule AudioProxy.LlmsDocsTest do
 
   use ExUnit.Case, async: true
 
+  alias AudioProxy.Config
   alias AudioProxy.ErrorJSON
+  alias AudioProxy.MarkedTable
   alias AudioProxy.Options
   alias AudioProxy.Signature
 
@@ -136,16 +144,40 @@ defmodule AudioProxy.LlmsDocsTest do
              """
     end
 
-    test "neither table repeats a row" do
+    test "the documented configuration variables are exactly the ones read" do
+      documented = MapSet.new(table("config"), fn [variable | _rest] -> variable end)
+      known = MapSet.new(Config.variables())
+
+      missing = difference(known, documented)
+      stale = difference(documented, known)
+
+      assert missing == [],
+             """
+             Variables AudioProxy.Config reads but llms-full.txt does not document: \
+             #{inspect(missing)}
+             Add a row for each to the configuration table in llms-full.txt.
+             """
+
+      assert stale == [],
+             """
+             Variables llms-full.txt documents that AudioProxy.Config does not read: \
+             #{inspect(stale)}
+             Remove the stale rows from llms-full.txt.
+             """
+    end
+
+    test "no table repeats a row" do
       # The guards compare sets, so a duplicated row collapses and passes —
       # and the copy, with whatever prose it carries, is published unchecked.
       # Cheap to close, and the only way the set comparison can be satisfied
       # by a document that is visibly wrong.
       keys = Enum.map(table("options"), fn [key | _rest] -> key end)
       errors = Enum.map(table("errors"), fn [status, error | _rest] -> {status, error} end)
+      variables = Enum.map(table("config"), fn [variable | _rest] -> variable end)
 
       assert keys -- Enum.uniq(keys) == [], "the options table repeats a key"
       assert errors -- Enum.uniq(errors) == [], "the error table repeats a row"
+      assert variables -- Enum.uniq(variables) == [], "the configuration table repeats a variable"
     end
 
     test "every documented option key is one the parser knows" do
@@ -187,39 +219,10 @@ defmodule AudioProxy.LlmsDocsTest do
     |> Enum.reverse()
   end
 
-  # Rows of a marked table, as lists of their backticked cell tokens. A line
-  # counts as a row only when its first cell is a single backticked token,
-  # which skips the header and the `|---|` separator.
-  defp table(name) do
-    name
-    |> region()
-    |> Enum.filter(&String.starts_with?(&1, "|"))
-    |> Enum.map(&cells/1)
-    |> Enum.reject(&(&1 == []))
-  end
-
-  defp cells(row) do
-    row
-    |> String.split("|", trim: true)
-    |> Enum.map(&String.trim/1)
-    |> Enum.map(fn cell ->
-      case Regex.run(~r/^`([^`]+)`$/, cell) do
-        [_match, token] -> token
-        nil -> nil
-      end
-    end)
-    |> case do
-      [nil | _rest] -> []
-      cells -> cells
-    end
-  end
-
-  defp region(name) do
-    [_before, inside | _after] =
-      String.split(full(), ["<!-- #{name}-table:start -->", "<!-- #{name}-table:end -->"])
-
-    lines(inside)
-  end
+  # Rows of a marked table, as lists of their backticked cell tokens.
+  # `AudioProxy.MarkedTable` owns the shape; `AudioProxy.ReadmeExamplesTest`
+  # reads the README's configuration table through the same function.
+  defp table(name), do: MarkedTable.rows(full(), name)
 
   defp signing_example do
     [_before, inside | _after] =

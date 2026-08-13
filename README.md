@@ -521,8 +521,10 @@ All configuration comes from `AP_`-prefixed environment variables. See `docs/aud
 
 Note that the variables below are the full configuration surface for the design, so several of them are parsed and validated but not yet consumed by anything.
 
+<!-- config-table:start -->
 | Variable | Type | Default | Purpose |
 |---|---|---|---|
+| `AP_PORT` | positive integer | `4000` | Port the proxy listens on. `PORT` is read when it is unset, so a host that sets `PORT` for something else will be followed |
 | `AP_KEY` | hex, ≥ 32 bytes decoded | unset | HMAC key for URL signatures |
 | `AP_SALT` | hex | unset | HMAC salt |
 | `AP_ALLOW_INSECURE` | boolean | `false` | Accept unsigned URLs (dev only) |
@@ -546,10 +548,9 @@ Note that the variables below are the full configuration surface for the design,
 | `AP_S3_ENDPOINT` | origin URL | unset | Talk to an S3-compatible store instead of AWS. See [S3 credentials](#s3-credentials) and [docs/s3-providers.md](docs/s3-providers.md) |
 | `AP_S3_ADDRESSING` | `virtual` \| `path` | `virtual` with no `AP_S3_ENDPOINT`, `path` with one | Whether a request names its bucket in the host (`bucket.host/key`) or in the path (`host/bucket/key`). Tigris requires `virtual`; see [docs/s3-providers.md](docs/s3-providers.md) |
 | `AP_S3_CA_BUNDLE` | path to a PEM file | unset | Verify the store's certificate against this bundle instead of the system trust store, for a store behind a private CA. Must be readable at boot |
+<!-- config-table:end -->
 
 Booleans accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`, case-insensitively. An empty value counts as unset.
-
-The listener port is read from `AP_PORT`, then `PORT`, then `4000`.
 
 **Sizing the container.** `AP_MAX_CONCURRENCY` and `AP_MAX_VARIANT_BYTES` are the two variables that decide how much memory a container needs, and the answer is a lookup rather than a guess: a render's output is held in memory until the render ends, so a full-length transcode costs its own size while a source of any length costs nothing. [docs/capacity.md](docs/capacity.md) opens with a matrix — find your output length and format in a row and your memory limit in a column, and read the largest safe `AP_MAX_CONCURRENCY` — plus the reverse table, for a concurrency you have already fixed. The formula, the measured per-format costs and the worked examples follow it as the derivation, including why full-length lossless output is refused by design. Read it before serving anything longer than a preview.
 
@@ -841,7 +842,7 @@ Point an agent at `llms-full.txt` and it has everything it needs to construct co
 
 **Read them at the tag you are running.** `GET /health` reports the version, so `curl -s $BASE/health` and then reading these files at that tag gives you documentation matched to the deployment in front of you. That matters while the URL contract is still `0.x`.
 
-Three things in `llms-full.txt` are machine-checked rather than trusted: the set of option keys, against the parser; the set of error codes, against the error mapping; and the worked signing example, recomputed from the signer on every run. A new option or a new error code that goes undocumented fails CI. The rest — value ranges, defaults, the configuration table, the prose — is reviewed the way the README is, so treat the guards as covering the part that is easiest to forget rather than the whole document.
+Four things in `llms-full.txt` are machine-checked rather than trusted: the set of option keys, against the parser; the set of error codes, against the error mapping; the set of environment variables, against the ones `AudioProxy.Config` reads — a check the [configuration table](#configuration) above gets too, since it is the same list written twice; and the worked signing example, recomputed from the signer on every run. A new option, error code or variable that goes undocumented fails CI. The rest — value ranges, the defaults themselves, the prose — is reviewed the way the README is, so treat the guards as covering the part that is easiest to forget rather than the whole document.
 
 ## Stack
 
