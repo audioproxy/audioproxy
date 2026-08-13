@@ -37,6 +37,13 @@ defmodule AudioProxy.Config do
   | `AP_S3_ENDPOINT` | `http(s)://host[:port]` | unset (`nil`) — AWS proper |
   | `AP_S3_ADDRESSING` | `virtual` \\| `path` | `:virtual`, or `:path` with an endpoint |
   | `AP_S3_CA_BUNDLE` | readable PEM file | unset (`nil`) — system trust store |
+  | `AP_VARIANT_S3_ENDPOINT` | `http(s)://host[:port]` | the source-side endpoint |
+  | `AP_VARIANT_S3_ADDRESSING` | `virtual` \\| `path` | derived; see below |
+  | `AP_VARIANT_S3_CA_BUNDLE` | readable PEM file | the source-side bundle |
+  | `AP_VARIANT_S3_ACCESS_KEY_ID` | string | the source-side credential |
+  | `AP_VARIANT_S3_SECRET_ACCESS_KEY` | string | the source-side credential |
+  | `AP_VARIANT_S3_REGION` | string | the source-side credential |
+  | `AP_VARIANT_S3_SESSION_TOKEN` | string | the source-side credential |
   | `AP_ALLOW_ORIGIN` | `*` or `scheme://host[:port]` | unset (`nil`) — no CORS headers |
 
   The listener port is read from `AP_PORT`, falling back to `PORT` (which the
@@ -60,6 +67,44 @@ defmodule AudioProxy.Config do
   Validated all-or-nothing: a half-configured client fails at its first
   request instead of at boot, which is the failure this module exists to
   prevent.
+
+  ## The two S3 profiles
+
+  Reading sources and running the variant store are two jobs, and a
+  deployment may want to give them different providers (sources on R2,
+  variants on AWS) or different principals (a read-only credential for the
+  source buckets, a writing one for the store). So the config carries two
+  profiles of the same shape: `:s3`, read by everything that fetches a
+  source, and `:variant_s3`, read by every variant-store operation.
+
+  `AP_VARIANT_S3_*` is an *override* group. Each variable that is unset falls
+  back to the source-side value, so a deployment that sets none of them has
+  two identical profiles and behaves exactly as it did before the split.
+
+  Two rules make that fallback well-behaved:
+
+    * **Credentials are group-atomic.** Set any of the variant credential
+      variables and the identity is the variant's own: `ACCESS_KEY_ID`,
+      `SECRET_ACCESS_KEY` and `REGION` must all be set (`SESSION_TOKEN` stays
+      optional, and is *not* inherited — a session token belongs to the
+      principal that minted it). A store half-borrowing the source's identity
+      is never a deployment intent, so the partial set aborts boot naming
+      exactly what is missing.
+
+    * **Addressing derives per side.** With `AP_VARIANT_S3_ENDPOINT` set and
+      `AP_VARIANT_S3_ADDRESSING` unset, the style is derived from the
+      *variant* endpoint by the same rule the shared pair uses — so an R2
+      store behind AWS sources gets path-style without being told. With no
+      variant endpoint there is nothing to derive from that the source has not
+      already derived from, so the source's effective style is inherited
+      whole; that is what keeps an explicit `AP_S3_ADDRESSING` from being
+      silently dropped on the store side.
+
+  There is no way to spell "the variant store is on AWS proper while the
+  sources are not" by *unsetting* the endpoint — an unset override means
+  inherit. Write it out instead: `AP_VARIANT_S3_ENDPOINT=https://s3.<region>.amazonaws.com`
+  with `AP_VARIANT_S3_ADDRESSING=virtual`, which is the request AWS's own
+  default produces. `docs/s3-providers.md` has the worked example.
   """
 
   defmodule Error do
@@ -158,7 +203,8 @@ defmodule AudioProxy.Config do
           metrics_bind: :inet.ip_address(),
           metrics_port: pos_integer(),
           allow_origin: String.t() | nil,
-          s3: s3()
+          s3: s3(),
+          variant_s3: s3()
         }
 
   @typedoc """
@@ -170,6 +216,8 @@ defmodule AudioProxy.Config do
 
   `addressing` and `ca_bundle` are independent of the credentials: both have a
   usable value whether or not S3 is configured at all.
+
+  Two of these are built, not one: see "The two S3 profiles" above.
   """
   @type s3 :: %{
           region: String.t() | nil,
@@ -228,6 +276,11 @@ defmodule AudioProxy.Config do
     # before it is computed.
     max_concurrency = integer(env, "AP_MAX_CONCURRENCY", System.schedulers_online(), :positive)
 
+    # Read ahead of the map because the store-side profile is defined by
+    # fallback: every `AP_VARIANT_S3_*` an operator did not set is the
+    # source-side value, so the source-side group has to exist first.
+    s3 = s3(env)
+
     validate!(%{
       port: port(env),
       key: hex(env, "AP_KEY", @min_key_bytes),
@@ -262,7 +315,8 @@ defmodule AudioProxy.Config do
       metrics_bind: ip(env, "AP_METRICS_BIND", @default_metrics_bind),
       metrics_port: integer(env, "AP_METRICS_PORT", @default_metrics_port, :positive),
       allow_origin: origin(env, "AP_ALLOW_ORIGIN"),
-      s3: s3(env)
+      s3: s3,
+      variant_s3: variant_s3(env, s3)
     })
   end
 
@@ -322,6 +376,13 @@ defmodule AudioProxy.Config do
     AP_S3_ENDPOINT
     AP_S3_ADDRESSING
     AP_S3_CA_BUNDLE
+    AP_VARIANT_S3_ENDPOINT
+    AP_VARIANT_S3_ADDRESSING
+    AP_VARIANT_S3_CA_BUNDLE
+    AP_VARIANT_S3_ACCESS_KEY_ID
+    AP_VARIANT_S3_SECRET_ACCESS_KEY
+    AP_VARIANT_S3_REGION
+    AP_VARIANT_S3_SESSION_TOKEN
   )
 
   @doc """
@@ -526,6 +587,82 @@ defmodule AudioProxy.Config do
     }
   end
 
+  # The store-side profile: the same shape as `s3/1`, built by overriding it.
+  # Every variable an operator did not set reads through to `source`, so a
+  # deployment with no `AP_VARIANT_S3_*` at all gets two equal maps and the
+  # store behaves exactly as it did when there was one profile.
+  #
+  # The endpoint is read before the credentials are merged because addressing
+  # needs to know whether *this* side was given an endpoint of its own —
+  # inheriting one is not the same as being handed one, and only the second
+  # re-runs the derivation. See the moduledoc.
+  defp variant_s3(env, source) do
+    endpoint = s3_endpoint(env, "AP_VARIANT_S3_ENDPOINT")
+
+    credentials =
+      variant_credentials!(
+        source,
+        fetch(env, "AP_VARIANT_S3_ACCESS_KEY_ID"),
+        fetch(env, "AP_VARIANT_S3_SECRET_ACCESS_KEY"),
+        fetch(env, "AP_VARIANT_S3_REGION"),
+        fetch(env, "AP_VARIANT_S3_SESSION_TOKEN")
+      )
+
+    Map.merge(credentials, %{
+      endpoint: endpoint || source.endpoint,
+      addressing: variant_addressing(env, source, endpoint),
+      ca_bundle: readable_file(env, "AP_VARIANT_S3_CA_BUNDLE") || source.ca_bundle
+    })
+  end
+
+  # With an endpoint of its own, the store derives its style from that endpoint
+  # exactly as the shared pair does — which is what makes an R2 store behind
+  # AWS sources work unconfigured. With no endpoint of its own there is nothing
+  # to derive from that the source did not already derive from, so the source's
+  # *effective* style is inherited: re-deriving would discard an explicit
+  # `AP_S3_ADDRESSING` on the store side only, which is the one asymmetry
+  # nobody asked for.
+  defp variant_addressing(env, source, nil) do
+    enum(env, "AP_VARIANT_S3_ADDRESSING", @s3_addressing_styles, source.addressing)
+  end
+
+  defp variant_addressing(env, _source, endpoint) do
+    enum(env, "AP_VARIANT_S3_ADDRESSING", @s3_addressing_styles, default_addressing(endpoint))
+  end
+
+  # Identity does not degrade per variable. An access key from one principal
+  # with a secret from another signs nothing, and a variant key against the
+  # source's region is a signature the store rejects — so either the store has
+  # an identity of its own or it has the source's, and the half-set case is a
+  # boot failure naming what is missing.
+  #
+  # The session token is inside the group but is never *inherited*: it is
+  # scoped to the principal that minted it, so carrying the source's token
+  # onto the variant's key produces credentials no store will accept.
+  defp variant_credentials!(source, nil, nil, nil, nil) do
+    Map.take(source, [:region, :access_key_id, :secret_access_key, :session_token])
+  end
+
+  defp variant_credentials!(_source, id, secret, region, token) do
+    missing =
+      for {var, nil} <- [
+            {"AP_VARIANT_S3_ACCESS_KEY_ID", id},
+            {"AP_VARIANT_S3_SECRET_ACCESS_KEY", secret},
+            {"AP_VARIANT_S3_REGION", region}
+          ],
+          do: var
+
+    unless missing == [] do
+      raise Error,
+            "#{Enum.join(missing, ", ")} must be set too — the AP_VARIANT_S3_* credentials are " <>
+              "all-or-nothing, and a variant store cannot sign with half of one identity and " <>
+              "half of another. Unset every AP_VARIANT_S3_* credential variable to have the " <>
+              "store use the AWS_* credentials the sources use"
+    end
+
+    %{region: region, access_key_id: id, secret_access_key: secret, session_token: token}
+  end
+
   # The asymmetry is the point. No endpoint means AWS, where virtual-hosted is
   # what regions launched after 2019 accept at all. An endpoint means an
   # S3-compatible store, and every one this project documents — MinIO, Ceph,
@@ -710,10 +847,11 @@ defmodule AudioProxy.Config do
   # The key is outside the cache-key alphabet, so the probe cannot collide
   # with a variant however unlucky the timing.
   defp probe_store!(%{variant_store: {:s3, bucket}} = config) do
-    unless AudioProxy.S3.configured?() do
+    unless AudioProxy.S3.configured?(:store) do
       raise Error,
             "AP_VARIANT_STORE=s3://#{bucket} needs AWS credentials — set AWS_ACCESS_KEY_ID, " <>
-              "AWS_SECRET_ACCESS_KEY and AWS_REGION, or use a file:/// store"
+              "AWS_SECRET_ACCESS_KEY and AWS_REGION (or the AP_VARIANT_S3_* equivalents, if " <>
+              "the store has an identity of its own), or use a file:/// store"
     end
 
     # The probe is a real S3 request, and a real S3 request needs the `:httpc`
@@ -733,9 +871,12 @@ defmodule AudioProxy.Config do
     # write worked — and that this probe just left an object behind, which a
     # crashloop would repeat once per attempt. Saying "refused the boot probe"
     # for both would send someone to check write permissions that are fine.
-    case AudioProxy.S3.put_stream(bucket, key, []) do
+    # Under the store's own profile, like every other store operation: a probe
+    # that proved the *source* credentials could write would prove nothing
+    # about the deployment it is guarding.
+    case AudioProxy.S3.put_stream(bucket, key, [], [], :store) do
       :ok ->
-        case AudioProxy.S3.delete(bucket, key) do
+        case AudioProxy.S3.delete(bucket, key, :store) do
           :ok ->
             config
 

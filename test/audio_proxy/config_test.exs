@@ -38,6 +38,15 @@ defmodule AudioProxy.ConfigTest do
                  endpoint: nil,
                  addressing: :virtual,
                  ca_bundle: nil
+               },
+               variant_s3: %{
+                 region: nil,
+                 access_key_id: nil,
+                 secret_access_key: nil,
+                 session_token: nil,
+                 endpoint: nil,
+                 addressing: :virtual,
+                 ca_bundle: nil
                }
              }
     end
@@ -641,6 +650,193 @@ defmodule AudioProxy.ConfigTest do
 
     test "the accepted styles are published for the docs and the router" do
       assert Config.s3_addressing_styles() == [:virtual, :path]
+    end
+  end
+
+  describe "the AP_VARIANT_S3_* override group" do
+    @source %{
+      "AWS_ACCESS_KEY_ID" => "source-id",
+      "AWS_SECRET_ACCESS_KEY" => "source-secret",
+      "AWS_REGION" => "eu-central-1"
+    }
+
+    @variant_credentials %{
+      "AP_VARIANT_S3_ACCESS_KEY_ID" => "store-id",
+      "AP_VARIANT_S3_SECRET_ACCESS_KEY" => "store-secret",
+      "AP_VARIANT_S3_REGION" => "us-east-1"
+    }
+
+    test "with none of them set, the two profiles are the same map" do
+      # The upgrade guarantee, at the config layer: a deployment that has
+      # never heard of this change gets exactly one configuration, spelled
+      # twice. Asserted over a *populated* environment rather than an empty
+      # one, so that every field of the group is compared with something in it.
+      env =
+        Map.merge(@source, %{
+          "AWS_SESSION_TOKEN" => "temporary",
+          "AP_S3_ENDPOINT" => "http://minio:9000"
+        })
+
+      config = Config.build!(env)
+
+      assert config.variant_s3 == config.s3
+    end
+
+    test "an explicit source addressing is inherited rather than re-derived" do
+      # The subtle half of "unset means inherit": with no variant endpoint
+      # there is nothing to derive from that the source did not derive from
+      # already, so re-running the rule would silently drop an explicit
+      # AP_S3_ADDRESSING on the store side only.
+      config = Config.build!(Map.put(@source, "AP_S3_ADDRESSING", "path"))
+
+      assert config.s3.addressing == :path
+      assert config.variant_s3.addressing == :path
+    end
+
+    test "each variable falls back on its own" do
+      config =
+        Config.build!(
+          Map.merge(@source, %{
+            "AP_S3_ENDPOINT" => "https://sources.example",
+            "AP_VARIANT_S3_ENDPOINT" => "https://store.example"
+          })
+        )
+
+      assert config.variant_s3.endpoint.host == "store.example"
+      # Untouched by the endpoint override: identity degrades per variable.
+      assert config.variant_s3.access_key_id == "source-id"
+      assert config.variant_s3.region == "eu-central-1"
+    end
+
+    test "a complete variant credential group replaces the source's identity" do
+      config = Config.build!(Map.merge(@source, @variant_credentials))
+
+      assert config.s3.access_key_id == "source-id"
+      assert config.variant_s3.access_key_id == "store-id"
+      assert config.variant_s3.secret_access_key == "store-secret"
+      assert config.variant_s3.region == "us-east-1"
+    end
+
+    test "a session token is never inherited across identities" do
+      # It is scoped to the principal that minted it, so carrying the source's
+      # onto the variant's key produces credentials no store accepts.
+      env =
+        @source
+        |> Map.put("AWS_SESSION_TOKEN", "source-token")
+        |> Map.merge(@variant_credentials)
+
+      assert Config.build!(env).variant_s3.session_token == nil
+
+      assert Config.build!(Map.put(env, "AP_VARIANT_S3_SESSION_TOKEN", "store-token")).variant_s3.session_token ==
+               "store-token"
+    end
+
+    test "a partial credential group aborts naming every variable that is missing" do
+      error =
+        assert_raise Error, fn ->
+          Config.build!(Map.put(@source, "AP_VARIANT_S3_ACCESS_KEY_ID", "store-id"))
+        end
+
+      assert error.message =~ "AP_VARIANT_S3_SECRET_ACCESS_KEY"
+      assert error.message =~ "AP_VARIANT_S3_REGION"
+      # The one that *was* set is not in the list of what is missing.
+      refute error.message =~ "AP_VARIANT_S3_ACCESS_KEY_ID must"
+    end
+
+    test "a variant region alone aborts — unlike AWS_REGION, which configures nothing" do
+      # The asymmetry is deliberate and worth pinning: AWS_REGION alone is a
+      # deployment with no S3 at all, while AP_VARIANT_S3_REGION alone can only
+      # mean an identity someone started writing and did not finish.
+      error =
+        assert_raise Error, fn ->
+          Config.build!(Map.put(@source, "AP_VARIANT_S3_REGION", "us-east-1"))
+        end
+
+      assert error.message =~ "AP_VARIANT_S3_ACCESS_KEY_ID"
+      assert error.message =~ "AP_VARIANT_S3_SECRET_ACCESS_KEY"
+    end
+
+    test "a session token alone aborts rather than half-borrowing an identity" do
+      error =
+        assert_raise Error, fn ->
+          Config.build!(Map.put(@source, "AP_VARIANT_S3_SESSION_TOKEN", "store-token"))
+        end
+
+      assert error.message =~ "AP_VARIANT_S3_ACCESS_KEY_ID"
+    end
+
+    test "addressing derives from the variant endpoint, not the source's" do
+      # The cross-provider case in one line: AWS sources (virtual-hosted) with
+      # a MinIO store (path-style), neither addressing variable set.
+      config = Config.build!(Map.put(@source, "AP_VARIANT_S3_ENDPOINT", "http://minio:9000"))
+
+      assert config.s3.addressing == :virtual
+      assert config.variant_s3.addressing == :path
+    end
+
+    test "and the other way round, which is the R2-sources-AWS-store shape" do
+      env =
+        Map.merge(@source, %{
+          "AP_S3_ENDPOINT" => "https://accountid.r2.cloudflarestorage.com",
+          "AP_VARIANT_S3_ENDPOINT" => "https://s3.us-east-1.amazonaws.com",
+          "AP_VARIANT_S3_ADDRESSING" => "virtual"
+        })
+
+      config = Config.build!(env)
+
+      assert config.s3.addressing == :path
+      assert config.variant_s3.addressing == :virtual
+    end
+
+    test "an explicit variant addressing overrides the derivation" do
+      config =
+        Config.build!(
+          Map.merge(@source, %{
+            "AP_VARIANT_S3_ENDPOINT" => "http://minio:9000",
+            "AP_VARIANT_S3_ADDRESSING" => "virtual"
+          })
+        )
+
+      assert config.variant_s3.addressing == :virtual
+    end
+
+    test "an unusable variant addressing is refused at boot, naming its own variable" do
+      error =
+        assert_raise Error, fn ->
+          Config.build!(Map.put(@source, "AP_VARIANT_S3_ADDRESSING", "vhost"))
+        end
+
+      assert error.message =~ "AP_VARIANT_S3_ADDRESSING"
+    end
+
+    test "a variant endpoint is held to the same shape as the shared one" do
+      for value <- ["http://minio:9000/s3", "http://key:secret@minio:9000", "minio:9000"] do
+        error =
+          assert_raise Error, fn ->
+            Config.build!(Map.put(@source, "AP_VARIANT_S3_ENDPOINT", value))
+          end
+
+        assert error.message =~ "AP_VARIANT_S3_ENDPOINT"
+        refute error.message =~ "secret"
+      end
+    end
+
+    @tag :tmp_dir
+    test "a CA bundle overrides on its own, and must be readable", %{tmp_dir: tmp_dir} do
+      bundle = Path.join(tmp_dir, "store-ca.pem")
+      File.write!(bundle, "-----BEGIN CERTIFICATE-----\n")
+
+      config = Config.build!(Map.put(@source, "AP_VARIANT_S3_CA_BUNDLE", bundle))
+
+      assert config.variant_s3.ca_bundle == Path.expand(bundle)
+      assert config.s3.ca_bundle == nil
+
+      error =
+        assert_raise Error, fn ->
+          Config.build!(Map.put(@source, "AP_VARIANT_S3_CA_BUNDLE", Path.join(tmp_dir, "no.pem")))
+        end
+
+      assert error.message =~ "AP_VARIANT_S3_CA_BUNDLE"
     end
   end
 

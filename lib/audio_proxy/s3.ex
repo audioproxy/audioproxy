@@ -51,6 +51,20 @@ defmodule AudioProxy.S3 do
   place: the request path takes it from the config map, `presigned_url/5`
   from its own options. See `sign_get/3`.
 
+  ## Two profiles, and `:source` is the default
+
+  Fetching a source and running the variant store are two jobs that a
+  deployment may hand to different providers or different principals, so
+  every function here takes the profile to run under as its **last**
+  argument: `:source` (the default, the `AWS_*`/`AP_S3_*` group) or `:store`
+  (that group with `AP_VARIANT_S3_*` overlaid). `AudioProxy.Config` builds
+  both and documents the fallback; all this module does is pick one.
+
+  Defaulting to `:source` rather than requiring the argument is deliberate:
+  the store is the *small* side — one module and the boot probe — and every
+  other caller is a source fetch, so an omitted profile is right far more
+  often than it is wrong.
+
   ## Errors are data
 
   Every function returns `{:ok, _}` or `{:error, t:error/0}`. `:not_found`
@@ -66,6 +80,14 @@ defmodule AudioProxy.S3 do
 
   @typedoc "A bucket name."
   @type bucket :: String.t()
+
+  @typedoc """
+  Which configuration profile an operation runs under.
+
+  `:source` is the shared `AWS_*`/`AP_S3_*` group; `:store` is that group with
+  the `AP_VARIANT_S3_*` overrides applied. See the moduledoc.
+  """
+  @type profile :: :source | :store
 
   @typedoc "An object key, as raw bytes — never percent-encoded."
   @type key :: String.t()
@@ -128,15 +150,18 @@ defmodule AudioProxy.S3 do
 
   Options: `:expires_in` (seconds, defaulting to `AP_PRESIGN_TTL`).
   """
-  @spec presign_get(bucket(), key(), keyword()) :: {:ok, String.t()} | {:error, error()}
-  def presign_get(bucket, key, opts \\ []) do
-    if configured?(), do: sign_get(bucket, key, opts), else: {:error, :not_configured}
+  @spec presign_get(bucket(), key(), keyword(), profile()) ::
+          {:ok, String.t()} | {:error, error()}
+  def presign_get(bucket, key, opts \\ [], profile \\ :source) do
+    if configured?(profile),
+      do: sign_get(bucket, key, opts, profile),
+      else: {:error, :not_configured}
   end
 
-  defp sign_get(bucket, key, opts) do
+  defp sign_get(bucket, key, opts, profile) do
     expires_in = Keyword.get(opts, :expires_in, Config.get(:presign_ttl))
 
-    overrides = config()
+    overrides = config(profile)
 
     # `presigned_url/5` signs locally rather than issuing a request, so it
     # wants a built `%ExAws.Config{}` where the request path takes overrides.
@@ -156,15 +181,17 @@ defmodule AudioProxy.S3 do
   end
 
   @doc "Object existence, size, ETag and metadata."
-  @spec head(bucket(), key()) :: {:ok, object()} | {:error, error()}
-  def head(bucket, key) do
-    if configured?(), do: head_object(bucket, key), else: {:error, :not_configured}
+  @spec head(bucket(), key(), profile()) :: {:ok, object()} | {:error, error()}
+  def head(bucket, key, profile \\ :source) do
+    if configured?(profile),
+      do: head_object(bucket, key, profile),
+      else: {:error, :not_configured}
   end
 
-  defp head_object(bucket, key) do
+  defp head_object(bucket, key, profile) do
     bucket
     |> ExAws.S3.head_object(key)
-    |> request()
+    |> request(profile)
     |> case do
       {:ok, %{headers: headers}} -> {:ok, object(headers)}
       {:error, reason} -> {:error, reason}
@@ -208,19 +235,20 @@ defmodule AudioProxy.S3 do
   uploads. This code aborts on every path it can see; a hard kill of the VM
   is not one of them.
   """
-  @spec put_stream(bucket(), key(), Enumerable.t(), keyword()) :: :ok | {:error, error() | term()}
-  def put_stream(bucket, key, chunks, opts \\ []) do
-    if configured?() do
-      write(bucket, key, chunks, opts)
+  @spec put_stream(bucket(), key(), Enumerable.t(), keyword(), profile()) ::
+          :ok | {:error, error() | term()}
+  def put_stream(bucket, key, chunks, opts \\ [], profile \\ :source) do
+    if configured?(profile) do
+      write(bucket, key, chunks, opts, profile)
     else
       {:error, :not_configured}
     end
   end
 
-  defp write(bucket, key, chunks, opts) do
+  defp write(bucket, key, chunks, opts, profile) do
     case buffer_first_part(chunks) do
       {:whole, iodata} ->
-        put_object(bucket, key, IO.iodata_to_binary(iodata), opts)
+        put_object(bucket, key, IO.iodata_to_binary(iodata), opts, profile)
 
       # The upload is initiated *before* the stream is composed, so there is
       # exactly one path on which the suspended source is abandoned without
@@ -228,12 +256,12 @@ defmodule AudioProxy.S3 do
       # a failed initiate would drop the continuation on the floor, leaving
       # the source's `after_fun` unrun and whatever it holds open leaked.
       {:streamed, buffered, continuation} ->
-        case initiate(bucket, key, opts) do
+        case initiate(bucket, key, opts, profile) do
           {:ok, upload_id} ->
             buffered
             |> Stream.concat(resume(continuation))
             |> into_parts()
-            |> multipart(bucket, key, upload_id)
+            |> multipart(bucket, key, upload_id, profile)
 
           {:error, reason} ->
             halt(continuation)
@@ -254,15 +282,17 @@ defmodule AudioProxy.S3 do
   and the caller wanted the object gone rather than an inventory of what was
   there first.
   """
-  @spec delete(bucket(), key()) :: :ok | {:error, error()}
-  def delete(bucket, key) do
-    if configured?(), do: delete_object(bucket, key), else: {:error, :not_configured}
+  @spec delete(bucket(), key(), profile()) :: :ok | {:error, error()}
+  def delete(bucket, key, profile \\ :source) do
+    if configured?(profile),
+      do: delete_object(bucket, key, profile),
+      else: {:error, :not_configured}
   end
 
-  defp delete_object(bucket, key) do
+  defp delete_object(bucket, key, profile) do
     bucket
     |> ExAws.S3.delete_object(key)
-    |> request()
+    |> request(profile)
     |> case do
       {:ok, _response} -> :ok
       {:error, reason} -> {:error, reason}
@@ -280,13 +310,13 @@ defmodule AudioProxy.S3 do
   URL and the bytes never enter the BEAM at all, which is the default and the
   reason this costs more round trips than it might.
   """
-  @spec get_stream(bucket(), key(), {non_neg_integer(), non_neg_integer()} | nil) ::
+  @spec get_stream(bucket(), key(), {non_neg_integer(), non_neg_integer()} | nil, profile()) ::
           {:ok, Enumerable.t()} | {:error, error()}
-  def get_stream(bucket, key, range \\ nil) do
-    with true <- configured?() or {:error, :not_configured},
-         {:ok, %{size: size}} <- head(bucket, key),
+  def get_stream(bucket, key, range \\ nil, profile \\ :source) do
+    with true <- configured?(profile) or {:error, :not_configured},
+         {:ok, %{size: size}} <- head(bucket, key, profile),
          {:ok, slice} <- slice(range, size) do
-      {:ok, stream_slice(bucket, key, slice)}
+      {:ok, stream_slice(bucket, key, slice, profile)}
     end
   end
 
@@ -314,10 +344,10 @@ defmodule AudioProxy.S3 do
 
   ## Writing
 
-  defp put_object(bucket, key, body, opts) do
+  defp put_object(bucket, key, body, opts, profile) do
     bucket
     |> ExAws.S3.put_object(key, body, upload_opts(opts))
-    |> request()
+    |> request(profile)
     |> case do
       {:ok, _response} -> :ok
       {:error, reason} -> {:error, reason}
@@ -327,14 +357,14 @@ defmodule AudioProxy.S3 do
   # Initiate, then parts, then complete — and abort on anything that is not a
   # completion, including an exception, a `throw` or an `exit` from the chunk
   # stream. See the `put_stream/4` doc for why this is not `ExAws.S3.upload/4`.
-  defp multipart(stream, bucket, key, upload_id) do
+  defp multipart(stream, bucket, key, upload_id, profile) do
     try do
-      with {:ok, parts} <- upload_parts(bucket, key, upload_id, stream),
-           :ok <- complete(bucket, key, upload_id, parts) do
+      with {:ok, parts} <- upload_parts(bucket, key, upload_id, stream, profile),
+           :ok <- complete(bucket, key, upload_id, parts, profile) do
         :ok
       else
         {:error, reason} ->
-          abort(bucket, key, upload_id)
+          abort(bucket, key, upload_id, profile)
           {:error, reason}
       end
     rescue
@@ -342,7 +372,7 @@ defmodule AudioProxy.S3 do
       # cancelled. This is the path that leaves orphaned parts if nobody
       # aborts, which is exactly what `ExAws.S3.upload/4` does not do.
       exception ->
-        abort(bucket, key, upload_id)
+        abort(bucket, key, upload_id, profile)
         {:error, exception}
     catch
       # `throw` and `exit` unwind past `rescue`, and `exit` is the realistic
@@ -350,15 +380,15 @@ defmodule AudioProxy.S3 do
       # Aborted, then re-raised: the point is the cleanup, not swallowing a
       # shutdown something else initiated.
       kind, reason ->
-        abort(bucket, key, upload_id)
+        abort(bucket, key, upload_id, profile)
         :erlang.raise(kind, reason, __STACKTRACE__)
     end
   end
 
-  defp initiate(bucket, key, opts) do
+  defp initiate(bucket, key, opts, profile) do
     bucket
     |> ExAws.S3.initiate_multipart_upload(key, upload_opts(opts))
-    |> request()
+    |> request(profile)
     |> case do
       {:ok, %{body: %{upload_id: upload_id}}} when is_binary(upload_id) and upload_id != "" ->
         {:ok, upload_id}
@@ -374,11 +404,11 @@ defmodule AudioProxy.S3 do
   # Sequential on purpose: one part in flight keeps the memory bound at one
   # part plus one chunk, and a render never produces bytes faster than S3
   # accepts them.
-  defp upload_parts(bucket, key, upload_id, stream) do
+  defp upload_parts(bucket, key, upload_id, stream, profile) do
     stream
     |> Stream.with_index(1)
     |> Enum.reduce_while({:ok, []}, fn {part, number}, {:ok, parts} ->
-      case upload_part(bucket, key, upload_id, number, part) do
+      case upload_part(bucket, key, upload_id, number, part, profile) do
         {:ok, etag} -> {:cont, {:ok, [{number, etag} | parts]}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
@@ -389,10 +419,10 @@ defmodule AudioProxy.S3 do
     end
   end
 
-  defp upload_part(bucket, key, upload_id, number, body) do
+  defp upload_part(bucket, key, upload_id, number, body, profile) do
     bucket
     |> ExAws.S3.upload_part(key, upload_id, number, body)
-    |> request()
+    |> request(profile)
     |> case do
       {:ok, %{headers: headers}} ->
         case Enum.find(headers, fn {name, _value} -> String.downcase(name) == "etag" end) do
@@ -407,10 +437,10 @@ defmodule AudioProxy.S3 do
     end
   end
 
-  defp complete(bucket, key, upload_id, parts) do
+  defp complete(bucket, key, upload_id, parts, profile) do
     bucket
     |> ExAws.S3.complete_multipart_upload(key, upload_id, parts)
-    |> request()
+    |> request(profile)
     |> case do
       {:ok, _response} -> :ok
       {:error, reason} -> {:error, reason}
@@ -421,10 +451,10 @@ defmodule AudioProxy.S3 do
   # to try, and the caller is already reporting a failure. Logged at warning
   # so an operator can find the orphan, since a bucket listing will not show
   # it.
-  defp abort(bucket, key, upload_id) do
+  defp abort(bucket, key, upload_id, profile) do
     bucket
     |> ExAws.S3.abort_multipart_upload(key, upload_id)
-    |> request()
+    |> request(profile)
     |> case do
       {:ok, _response} ->
         :ok
@@ -604,11 +634,11 @@ defmodule AudioProxy.S3 do
   # A zero-length object is a legitimate variant — a render can produce no
   # bytes — and has no satisfiable range, so it streams as nothing rather
   # than asking S3 for a byte that is not there.
-  defp stream_slice(_bucket, _key, :empty), do: []
+  defp stream_slice(_bucket, _key, :empty, _profile), do: []
 
   # One ranged GET per chunk. `Stream.resource/3` is not needed — there is no
   # resource to release, only arithmetic — so this is a plain unfold.
-  defp stream_slice(bucket, key, {first, last}) do
+  defp stream_slice(bucket, key, {first, last}, profile) do
     Stream.unfold(first, fn
       offset when offset > last ->
         nil
@@ -616,7 +646,7 @@ defmodule AudioProxy.S3 do
       offset ->
         chunk_last = min(offset + @read_chunk - 1, last)
 
-        case get_range(bucket, key, offset, chunk_last) do
+        case get_range(bucket, key, offset, chunk_last, profile) do
           # A conforming store cannot answer a satisfiable range with nothing,
           # and `slice/2` has already established the range is satisfiable —
           # but advancing by zero would spin this unfold forever, so it ends
@@ -636,10 +666,10 @@ defmodule AudioProxy.S3 do
     end)
   end
 
-  defp get_range(bucket, key, first, last) do
+  defp get_range(bucket, key, first, last, profile) do
     bucket
     |> ExAws.S3.get_object(key, range: "bytes=#{first}-#{last}")
-    |> request()
+    |> request(profile)
     |> case do
       {:ok, %{body: body}} -> {:ok, body}
       {:error, reason} -> {:error, reason}
@@ -648,8 +678,8 @@ defmodule AudioProxy.S3 do
 
   ## Requests
 
-  defp request(operation) do
-    case ExAws.request(operation, config()) do
+  defp request(operation, profile) do
+    case ExAws.request(operation, config(profile)) do
       {:ok, response} -> {:ok, response}
       {:error, reason} -> {:error, translate(reason)}
     end
@@ -730,19 +760,19 @@ defmodule AudioProxy.S3 do
   Checked before every operation, because `ex_aws` treats a nil credential as
   "not provided" rather than as an error — see `t:error/0`.
   """
-  @spec configured?() :: boolean()
-  def configured?, do: Config.get(:s3).access_key_id != nil
+  @spec configured?(profile()) :: boolean()
+  def configured?(profile \\ :source), do: profile_config(profile).access_key_id != nil
 
   @doc """
-  The `ex_aws` config overrides for this deployment.
+  The `ex_aws` config overrides for one profile of this deployment.
 
   Public so a test can assert on the addressing decision without issuing a
   request.
   """
 
-  @spec config() :: keyword()
-  def config do
-    s3 = Config.get(:s3)
+  @spec config(profile()) :: keyword()
+  def config(profile \\ :source) do
+    s3 = profile_config(profile)
 
     [
       access_key_id: s3.access_key_id,
@@ -762,6 +792,11 @@ defmodule AudioProxy.S3 do
       virtual_host: s3.addressing == :virtual
     ] ++ security_token(s3.session_token) ++ endpoint(s3.endpoint)
   end
+
+  # The one place the two profiles are told apart. Everything above takes a
+  # profile only to hand it here.
+  defp profile_config(:source), do: Config.get(:s3)
+  defp profile_config(:store), do: Config.get(:variant_s3)
 
   # Omitted entirely rather than passed as `nil`: `ex_aws` sends the header
   # whenever the key is present, and a store reads an empty security token as
