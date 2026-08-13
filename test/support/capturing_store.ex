@@ -46,13 +46,28 @@ defmodule AudioProxy.CapturingStore do
   @content_type "audio/ogg"
   @cache_control "public, max-age=31536000, immutable, no-transform"
 
+  # The bytes a hit is made of. Patterned rather than random, so a wrong slice
+  # is a mismatch and not a coincidence — the same reason
+  # `AudioProxy.VariantCacheS3Test` builds its variant that way.
+  #
+  # It has to be non-empty, and that is not incidental: a zero-length object
+  # resolves to an empty range in `AudioProxy.S3.get_stream/4` and no GET is
+  # ever issued, so a store that reported `content-length: 0` would leave the
+  # proxy-mode read path untested while looking covered.
+  @body Enum.map_join(0..255, fn n -> <<n>> end)
+
   @typedoc "One captured request."
   @type request :: %{
           method: String.t(),
           path: String.t(),
           host: String.t(),
+          range: String.t(),
           authorization: String.t()
         }
+
+  @doc "The bytes `serve_hits!/0` makes a stored object out of."
+  @spec body() :: binary()
+  def body, do: @body
 
   @doc """
   Boots the listener and returns its endpoint, empty of captures.
@@ -91,11 +106,14 @@ defmodule AudioProxy.CapturingStore do
   end
 
   @doc """
-  Makes every subsequent HEAD report a complete variant.
+  Makes every subsequent HEAD and GET answer with a complete variant.
 
   Empty is the default, because the interesting path — render, then write back
   — only exists on a miss. A test about serving a HIT says so here rather than
   by writing an object this store would not have kept anyway.
+
+  The object is `body/0`, and reads of it honour `Range`, so a proxy-mode HIT
+  exercises the same sequence of ranged GETs a real store would answer.
   """
   @spec serve_hits!() :: :ok
   def serve_hits!, do: :persistent_term.put(@mode_key, :stored)
@@ -140,29 +158,64 @@ defmodule AudioProxy.CapturingStore do
       "HEAD" -> head(conn)
       "PUT" -> conn |> drain() |> Plug.Conn.put_resp_header("etag", @etag) |> ok()
       "DELETE" -> Plug.Conn.send_resp(conn, 204, "")
-      # A GET here is a presigned URL being followed, or proxy-mode reading
-      # back — neither is what this endpoint exists to observe, so it answers
-      # the smallest legitimate thing.
-      "GET" -> Plug.Conn.send_resp(conn, 200, "")
+      "GET" -> get(conn)
       _other -> conn |> drain() |> ok()
     end
   end
 
+  # `content-length` is set by hand here and nowhere else: a HEAD carries no
+  # body for the server to size, and the size is the whole point of the
+  # response — `AudioProxy.S3.head/3` reads it, and `get_stream/4` resolves the
+  # range against it before issuing a read.
   defp head(conn) do
     case :persistent_term.get(@mode_key, :empty) do
-      :stored -> stored(conn)
-      :empty -> Plug.Conn.send_resp(conn, 404, "")
+      :stored ->
+        conn
+        |> stored_headers()
+        |> Plug.Conn.put_resp_header("content-length", Integer.to_string(byte_size(@body)))
+        |> Plug.Conn.send_resp(200, "")
+
+      :empty ->
+        Plug.Conn.send_resp(conn, 404, "")
     end
   end
 
-  defp stored(conn) do
+  # Proxy-mode serving reads a variant back as a sequence of ranged GETs, so
+  # the slice is honoured rather than the whole object returned: a store that
+  # ignored `Range` would let a wrong offset pass unnoticed.
+  defp get(conn) do
+    case :persistent_term.get(@mode_key, :empty) do
+      :empty ->
+        Plug.Conn.send_resp(conn, 404, "")
+
+      :stored ->
+        {slice, status} = slice(header(conn, "range"))
+
+        conn |> stored_headers() |> Plug.Conn.send_resp(status, slice)
+    end
+  end
+
+  defp slice("bytes=" <> range) do
+    case String.split(range, "-") do
+      [first, last] ->
+        first = String.to_integer(first)
+        last = min(String.to_integer(last), byte_size(@body) - 1)
+
+        {binary_part(@body, first, last - first + 1), 206}
+
+      _unparsed ->
+        {@body, 200}
+    end
+  end
+
+  defp slice(_absent), do: {@body, 200}
+
+  defp stored_headers(conn) do
     conn
     |> Plug.Conn.put_resp_header("etag", @etag)
     |> Plug.Conn.put_resp_header("content-type", @content_type)
     |> Plug.Conn.put_resp_header("cache-control", @cache_control)
     |> Plug.Conn.put_resp_header("x-amz-meta-etag", @etag)
-    |> Plug.Conn.put_resp_header("content-length", "0")
-    |> Plug.Conn.send_resp(200, "")
   end
 
   defp ok(conn), do: Plug.Conn.send_resp(conn, 200, "")
@@ -190,6 +243,7 @@ defmodule AudioProxy.CapturingStore do
       method: conn.method,
       path: conn.request_path,
       host: conn.host,
+      range: header(conn, "range"),
       authorization: header(conn, "authorization")
     }
 

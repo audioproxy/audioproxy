@@ -180,6 +180,36 @@ defmodule AudioProxy.S3SplitStoreTest do
     end
   end
 
+  describe "a proxy-mode HIT under split configuration" do
+    setup do
+      CapturingStore.serve_hits!()
+      :ok
+    end
+
+    test "reads the variant back from the store, not from the source's", %{key: key} do
+      conn = render(key)
+
+      assert conn.status == 200
+      assert header(conn, "x-audio-proxy") == "HIT"
+      # The bytes came off the store endpoint rather than being re-rendered:
+      # a MISS here would carry the fake encoder's payload instead.
+      assert conn.resp_body == CapturingStore.body()
+    end
+
+    test "the read is ranged, and signed by the store", %{key: key} do
+      render(key)
+
+      gets = Enum.filter(CapturingStore.requests(), &(&1.method == "GET"))
+
+      # Proxy-mode serving is a sequence of ranged GETs — the fourth and last
+      # store operation, and the one that held only by construction until this
+      # test existed.
+      assert [_first | _rest] = gets
+      assert Enum.all?(gets, &(&1.range =~ ~r/^bytes=\d+-\d+$/))
+      assert CapturingStore.access_keys() == [@store_key_id]
+    end
+  end
+
   ## Driving the flows
 
   # The capture reports an empty store until a test calls `serve_hits!/0`, so
