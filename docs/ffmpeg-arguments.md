@@ -2,7 +2,7 @@
 
 Implementation reference for `AudioProxy.Ffmpeg.Command`. Nothing here is
 needed to *use* the proxy — the option grammar in the
-[README](../README.md#processing-options) and
+[README](audio-proxy-api-v1.md#3-processing-options) and
 [audio-proxy-api-v1.md](audio-proxy-api-v1.md) cover that. Read this when a
 render produces something you did not expect, or before changing the argument
 table.
@@ -202,4 +202,4 @@ belongs to the `/info` slice, so until then a 24-bit master requested as
 `f:wav` comes back 16-bit unless `bd:24` is given. Both cost a duplicate cache
 object or a documented fallback, not a wrong render, and both are tracked
 alongside the semantic no-ops described under
-[cache-key semantics](../README.md#cache-key-semantics).
+[cache-key semantics](audio-proxy-api-v1.md#3-processing-options).

@@ -192,7 +192,7 @@ metrics:
 
 It is a lagging signal, though: ffmpeg saturates a slot's CPU whether the queue behind it is empty or thirty deep, so utilization tells you the node is working, not that it is behind. **Queue depth is the leading signal** — it is the thing `/ready` already thresholds on, and scaling on it means adding capacity while requests are waiting rather than after they start timing out.
 
-`audio_proxy_render_queue_depth` is that number, exported by [`/metrics`](../README.md#metrics). The HPA shape is a custom Pods metric on it, with a target well below `AP_READY_QUEUE_THRESHOLD` so the fleet scales *before* nodes start shedding:
+`audio_proxy_render_queue_depth` is that number, exported by [`/metrics`](operations.md#metrics). The HPA shape is a custom Pods metric on it, with a target well below `AP_READY_QUEUE_THRESHOLD` so the fleet scales *before* nodes start shedding:
 
 ```yaml
 metrics:
@@ -242,7 +242,7 @@ With that mapping, fly-proxy is doing what `/ready` does for Kubernetes, at a fi
 Two things make this a small cost in practice:
 
 - **`auto_stop_machines`/`min_machines_running` keep *k* small.** A fleet that scales to one machine at idle has *k* = 1 for cold URLs outside peak.
-- **A CDN in front collapses same-URL storms at the edge.** Fly Proxy is not a cache; put a CDN in front and a thousand simultaneous requests for one cold URL become one origin request, so the *k* nodes never see the storm at all. Media responses are already `public, max-age=31536000, immutable`, and `AP_SERVE_MODE=proxy` is the mode that collaborates with an edge (see [Caching and CDNs](../README.md#caching-and-cdns) — redirect mode routes the bytes around the CDN). With that in place, the fleet's duplicate-render cost is what the summary above says: occasionally *k* cold renders, and only for URLs nothing has asked for yet.
+- **A CDN in front collapses same-URL storms at the edge.** Fly Proxy is not a cache; put a CDN in front and a thousand simultaneous requests for one cold URL become one origin request, so the *k* nodes never see the storm at all. Media responses are already `public, max-age=31536000, immutable`, and `AP_SERVE_MODE=proxy` is the mode that collaborates with an edge (see [edge-cache discipline](audio-proxy-api-v1.md#edge-cache-discipline) — redirect mode routes the bytes around the CDN). With that in place, the fleet's duplicate-render cost is what the summary above says: occasionally *k* cold renders, and only for URLs nothing has asked for yet.
 
 Size the machine from [docs/capacity.md](capacity.md): `AP_MAX_CONCURRENCY` against the VM's memory, not against its CPU count, since output is what is held in memory.
 
@@ -281,4 +281,4 @@ Per-node capacity first, then node count:
 3. **`AP_QUEUE_SIZE`** buys tolerance for bursts, not throughput. A deep queue with no autoscaler behind it converts a burst into a long wait and then a `504`. Keep it modest and let readiness plus the autoscaler handle sustained load.
 4. **`AP_READY_QUEUE_THRESHOLD`** at its default (half the queue) is a reasonable starting point. Lower it if you would rather shed early and scale aggressively; raise it if your nodes routinely absorb bursts that the balancer should not react to.
 
-The measurement that tells you whether any of this is working is the ratio of `MISS`/`COALESCED` to `HIT` in the request log (see [Logs](../README.md#logs)). A fleet whose miss rate does not fall as it warms is usually a fleet without a shared store.
+The measurement that tells you whether any of this is working is the ratio of `MISS`/`COALESCED` to `HIT` in the request log (see [Logs](operations.md#logs)). A fleet whose miss rate does not fall as it warms is usually a fleet without a shared store.
