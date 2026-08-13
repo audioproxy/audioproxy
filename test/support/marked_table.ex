@@ -3,9 +3,9 @@ defmodule AudioProxy.MarkedTable do
   Reads a markdown table out of an HTML-comment-marked region of a published
   document.
 
-  `llms-full.txt` and `README.md` both carry hand-written tables that a drift
-  guard compares against the implementation — option keys, error rows,
-  configuration variables. Each is fenced by `<!-- <name>-table:start -->` and
+  `llms-full.txt` carries hand-written tables that a drift guard compares
+  against the implementation — option keys, error rows, configuration
+  variables. Each is fenced by `<!-- <name>-table:start -->` and
   `<!-- <name>-table:end -->`, comments chosen because they are invisible in a
   rendered document.
 
@@ -13,6 +13,9 @@ defmodule AudioProxy.MarkedTable do
   two were not identical: one tolerated a line holding nothing but `|` and the
   other raised `ArgumentError` on it, which is precisely the divergence a
   duplicated helper produces and nobody notices until a document is edited.
+  That second guard read `README.md`, and `condense-readme` removed it, so
+  `AudioProxy.LlmsDocsTest` is the only caller today. The module stays because
+  the rule it encodes is about the *next* guard, not the last one.
 
   ## The shape a table must keep
 
@@ -39,17 +42,6 @@ defmodule AudioProxy.MarkedTable do
     |> Enum.filter(&String.starts_with?(&1, "|"))
     |> Enum.map(&cells/1)
     |> Enum.reject(&(&1 == []))
-  end
-
-  @doc """
-  The first cell of every row of a marked table.
-
-  What a coverage guard almost always wants: the option key, the variable name,
-  the thing the row is *about*.
-  """
-  @spec first_cells(binary(), binary()) :: [String.t()]
-  def first_cells(document, name) do
-    document |> rows(name) |> Enum.map(fn [first | _rest] -> first end)
   end
 
   defp region(document, name) do
