@@ -10,8 +10,8 @@ canonicality means a leaked or logged URL cannot be respelled into new
 distinct URLs that all verify.
 
 The reference signer (`AudioProxy.Signature.sign/3`) doubles as the client
-contract: tests, README examples, and third-party implementations all check
-against the same known-answer vectors.
+contract: tests, the worked example in `llms-full.txt`, and third-party
+implementations all check against the same known-answer vectors.
 
 ## Requirements
 

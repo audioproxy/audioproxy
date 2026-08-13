@@ -50,21 +50,27 @@ Stay with the stdlib and core/OTP tooling as far as possible. GenStage is accept
 
   | File | Holds | Test |
   |---|---|---|
-  | `README.md` | Usage only. What the proxy is, how to sign a URL, every option and its validation rules, configuration, how to run it. | Would someone *operating* this need it? |
-  | `docs/audio-proxy-api-v1.md` | The source of truth for URL grammar, options, cache-key rules, headers, error codes. | Is this the contract? |
+  | `README.md` | **Routing, not usage.** What the proxy is, its status and roadmap, the design sketch, the stack, the license, a quick start short enough to paste, and a table pointing at everything else. | Is this native to the *repository*? |
+  | `docs.audioproxy.dev` | Goal-first usage and operations: rendering, transforms, signing, configuration, sources, providers, scaling, capacity. The reader who wants to *use* the proxy goes here. | Would someone *operating* this need it? |
+  | `docs/audio-proxy-api-v1.md` | The source of truth for URL grammar, options, cache-key rules, headers, error codes. Synced 1:1 to the site; changed here, never there. | Is this the contract? |
+  | `docs/` (the guides) | `sources.md`, `rendering.md`, `scaling.md`, `capacity.md`, `s3-providers.md`, `operations.md`: the authored-from upstream for the site's guide pages, and the repo-local copy for a reader with no network. | Does the site have a page authored from this, or will it? |
   | `docs/development.md` | Toolchain, worktrees and devcontainers, the suite and its tags, CI. | Is this about working *on* the repo? |
   | `docs/ffmpeg-arguments.md` | How options become ffmpeg args: filter order, per-format flags, measured trade-offs, known gaps. | Is this how the sausage is made? |
   | `llms.txt`, `llms-full.txt` | The API contract as one self-contained markdown file, at the repo root per the llms.txt convention and carried in the hex package. | Would someone with *only* this file still build the URL correctly? |
 
-  **The llms files carry the same obligation the README does, and part of it is enforced.** Any slice that changes the API surface — an option, an error code, an endpoint, a config variable, the signing rule — updates `llms-full.txt` in the same change. Three tables there are compared against the implementation by `test/llms_docs_test.exs` — options against `AudioProxy.Options.keys/0`, errors against `AudioProxy.ErrorJSON.rows/0`, configuration against `AudioProxy.Config.variables/0` — and the worked signing example is recomputed from `AudioProxy.Signature.sign/3`, so those four cannot drift silently. The README's configuration table is checked against `variables/0` by the same rule, in `test/readme_examples_test.exs`: it is the same list written twice, and both copies now have to agree with the code.
+  **The site is a second repository, and the sync runs one way.** `bin/sync-proxy-docs` in `audioproxy-docs` copies `docs/audio-proxy-api-v1.md` verbatim and commits it; every other page there is *authored*, may diverge by design, and gets a drift issue rather than an overwrite when its upstream `docs/` counterpart changes. So a behavior change updates `docs/` and `llms-full.txt` here, and the site follows editorially. Nothing in this repository is authored from the site.
+
+  **The llms files carry the same obligation the README does, and part of it is enforced.** Any slice that changes the API surface — an option, an error code, an endpoint, a config variable, the signing rule — updates `llms-full.txt` in the same change. Three tables there are compared against the implementation by `test/llms_docs_test.exs` — options against `AudioProxy.Options.keys/0`, errors against `AudioProxy.ErrorJSON.rows/0`, configuration against `AudioProxy.Config.variables/0` — and the worked signing example is recomputed from `AudioProxy.Signature.sign/3`, so those four cannot drift silently. **`llms-full.txt` is the one guarded copy of the configuration surface.** The README carried a second one until `condense-readme` removed it, and the site's configuration page is in another repository with no access to `AudioProxy.Config`, so it is reviewed rather than compared. Publish the `AP_` surface once and guard it there.
 
   Two of those guards need something kept up, and both have a test of their own for it. `ErrorJSON.rows/0` derives its table from `@representative_errors`, so a new `render/1` clause reaches the guard only once it is listed there — `AudioProxy.ErrorJSONTest` counts the clauses to make sure it is. `Config.variables/0` is a hand-written list beside the reads it describes, so `AudioProxy.ConfigTest` scans `config.ex` for `(env, "AP_…")` call sites and fails when the list and the reads disagree in either direction.
 
-  **The configuration guard covers variable *names*, not defaults.** A default that moves — `AP_QUEUE_SIZE` from `32`, `AP_PRESIGN_TTL` from `300` — still ships wrong if nobody edits the table; only a variable arriving or leaving fails CI. That was the deliberate call: several defaults are derived rather than literal, and the README and `llms-full.txt` word those differently for different readers, so comparing them would mean both quoting one rendered string. The `AWS_*` credentials variables are outside the guard too, described in prose beside each table.
+  **The configuration guard covers variable *names*, not defaults.** A default that moves — `AP_QUEUE_SIZE` from `32`, `AP_PRESIGN_TTL` from `300` — still ships wrong if nobody edits the table; only a variable arriving or leaving fails CI. That was the deliberate call: several defaults are derived rather than literal, and `llms-full.txt` and the site's configuration page word those differently for different readers, so comparing them would mean both quoting one rendered string. The `AWS_*` credentials variables are outside the guard too, described in prose beside each table.
 
   Everything else in the file is unguarded: the endpoint list, the response semantics, the cross-key rules. Treat the guards as covering the part that is easiest to forget, not as covering the file.
 
-  The README is the one with a hard rule: **no implementation detail.** A reader arrives wanting to render audio, not to learn how the filtergraph is assembled. Internals that are genuinely worth writing down — and most are — go to `docs/` and get linked from the README's documentation table, not inlined into it. When a section starts explaining *how* rather than *how to*, it has outgrown the README.
+  The README is the one with a hard rule: **it routes, it does not explain.** It reached 889 lines by holding every option, the validation rules, the configuration surface, the error table, signing, caching and the whole of operations, while a documentation site it did not link to carried all of it too. `condense-readme` cut it to a landing page, and the rule that regrows it is this one, so keep it: a section that teaches the reader *how to* do something belongs on the site, a section that explains *how it works* belongs in `docs/`, and the README gets a table row pointing at whichever it is. When you find yourself writing a second paragraph about behavior, you are writing the wrong file.
+
+  Two things stay in the README that look like exceptions and are not. The **license and image-compliance section** is a distribution obligation attached to this repository, not usage. The **roadmap** is project status, which the site deliberately does not carry, because it would then need syncing on every release.
 
 ## Adversarial review — how this project does it
 
@@ -340,13 +346,15 @@ is wrong. The `{127, 0, 0, 1}` on both sides of that match is an assertion that
 the listener came up loopback-only, not leftover pattern.
 
 `AudioProxy.MarkedTable` owns the parser the documentation drift guards share,
-for the tables fenced by `<!-- <name>-table:start -->` in `llms-full.txt` and
-`README.md`:
+for the tables fenced by `<!-- <name>-table:start -->` in `llms-full.txt`:
 
 | Function | Holds |
 |---|---|
 | `rows/2` | The rows of a marked table, each as its list of backticked cell tokens. A non-backticked cell is `nil`; a row whose *first* cell is not backticked is dropped, which is what skips the header and the `\|---\|` separator. |
-| `first_cells/2` | Just the first cell of each row — the key, the code, the variable name. What a coverage guard almost always wants. |
+
+`AudioProxy.LlmsDocsTest` is its only caller since `condense-readme` removed the
+README's configuration table. `first_cells/2` went with that guard rather than
+staying as unused support API; re-add it beside the next guard that wants it.
 
 One rule, and it was bought rather than reasoned:
 

@@ -83,17 +83,22 @@ another repository with no access to `AudioProxy.Config`, and the drift-issue
 workflow is the mechanism that covers it — a human editorial pass, which is what
 the site's authored pages get by design.
 
-**3. `test/readme_examples_test.exs` is deleted rather than narrowed.**
+**3. `test/readme_examples_test.exs` is narrowed rather than deleted.**
 
-Both halves lose their subject. The examples move to the site's transforms page
-and the table is gone, so a narrowed file would guard an empty README. The
-example option strings are still exercised: `options_property_test.exs` holds
-the parse/normalize/round-trip contract, and the site's examples are checked by
-editorial review the way its other pages are.
+Only its configuration half loses its subject. The example half keeps one: the
+condensed quick start still renders variants, and an example URL that has
+quietly become a 422 is exactly the failure this file was written for. The
+options parser has tightened twice for combinations no encoder can honour, and
+each time an example could have rotted unnoticed until a reader pasted it.
 
-This is a real reduction in coverage, and it is worth naming: the site's example
-URLs are no longer parsed by anything. That is the same posture every other
-authored page on the site already has.
+So the `describe "the configuration table"` block goes, along with the
+`MarkedTable` and `Config` aliases and the two helpers only it used. The four
+example tests stay, with their minimum-count assertion lowered to the number of
+examples the condensed quick start actually carries. Deleting the file was the
+earlier plan, and it gave up a live guard to save a five-line edit.
+
+The examples that move to the site's transforms page are unguarded there, the
+same posture every other authored page has.
 
 **4. The paired docs-site work runs in parallel, not first.**
 
@@ -104,7 +109,28 @@ serialize two repositories for no benefit — the README can link to a page that
 lands a day later, and the interim link is a `docs/` file or the API reference,
 both of which exist today.
 
-**5. `CLAUDE.md` is edited in the same change.**
+**5. Logs and metrics move to `docs/operations.md` rather than being deleted.**
+
+Found while checking cross-links: of everything the README carried, all of it
+had a second home except two sections. Configuration, errors, `/info`, cache
+semantics and serve modes are in `docs/audio-proxy-api-v1.md`; signing and
+cache-key derivation are in §1 and §3; health and readiness are in
+`docs/scaling.md`, at more length than the README had them. But the metrics
+catalogue (eleven metric names, their labels, the fixed histogram buckets, the
+scrape config, the four signals) and the request-log format appeared **nowhere
+else in the repository** — not in the API doc, not in `llms-full.txt`, not on
+the site.
+
+Deleting them would have lost them until the site's operations page was written,
+which is scheduled in another repository on another timeline. So they become
+`docs/operations.md`, which is exactly the role decision 1 assigns `docs/`: the
+authored-from upstream a site guide is written against. Task 6.7 now has a
+source rather than a blank page.
+
+This is why the link audit runs before the commit and not after. The README was
+the only home for two sections, and nothing about removing them says so.
+
+**6. `CLAUDE.md` is edited in the same change.**
 
 The documentation-shape table is what produced the 889 lines. Leaving it and
 trimming the README would put the two in direct contradiction, and the table
@@ -116,9 +142,15 @@ wins, because it is the instruction an agent reads before writing.
   whole surface in one scroll now follows links. → `llms-full.txt` is exactly
   that document, self-contained by requirement, and the README points at it.
 
-- **The site's example URLs go unchecked** (decision 3). → Accepted; it matches
-  the posture of every other authored page. If it bites, the guard belongs in the
-  docs repository against a running proxy, not here.
+- **The examples that move to the site go unchecked** (decision 3). → Accepted;
+  it matches the posture of every other authored page. If it bites, the guard
+  belongs in the docs repository against a running proxy, not here. The ones the
+  README keeps stay guarded.
+
+- **The narrowed guard could be satisfied by too few examples.** A quick start
+  trimmed further in some later change would shrink the guarded set silently. →
+  The minimum-count assertion is the backstop, and it is set to what the quick
+  start carries rather than to zero.
 
 - **The README links to site pages that do not exist yet** (decision 4). → Each
   such link points at its `docs/` counterpart or the API reference until the site
@@ -131,15 +163,20 @@ wins, because it is the instruction an agent reads before writing.
 ## Migration Plan
 
 No deployment, no rollback: documentation only. The one ordering constraint is
-that `test/readme_examples_test.exs` must be deleted in the same commit that
-removes the configuration table from the README, or the suite fails between them.
-`CLAUDE.md` and the spec delta can land in either order.
+that the configuration-table guard must be removed in the same commit that
+removes the table from the README, or the suite fails between them. `CLAUDE.md`
+and the spec delta can land in either order.
+
+## Decided since drafting
+
+- **The README's prose drops its em-dashes.** The rewrite replaces them with
+  commas, semicolons, parentheses, or separate sentences, rather than carrying
+  the existing style forward. This applies to the README's prose only; `docs/`,
+  `CLAUDE.md` and the spec files keep theirs, since this change is not a
+  repository-wide restyle.
 
 ## Open Questions
 
-- **Does the README's prose keep its em-dashes?** The existing voice uses them
-  heavily and it is the author's own; the rewrite should preserve the house style
-  rather than quietly restyle it. Confirm before writing.
 - **Which site page does each removed section link to** before its page exists?
   Enumerated as a task rather than decided here, since the docs-side work is in
   flight in parallel.

@@ -27,9 +27,11 @@ as it is, the README regrows whatever this change removes.
 - **The configuration table is removed from the README.** `llms-full.txt` already
   carries the same list under the same machine-checked guard, so coverage is
   unchanged; only the second hand-maintained copy goes.
-- **`test/readme_examples_test.exs` is deleted in full.** Both of the things it
-  guards — the example option strings and the configuration table — are leaving
-  the README, so the file would have nothing left to check.
+- **`test/readme_examples_test.exs` is narrowed, not deleted.** Its
+  configuration-table half loses its subject and goes. Its example-URL half keeps
+  one: the condensed quick start still renders variants, so those option strings
+  are still parsed against `AudioProxy.Options` and still fail CI when a
+  validation rule tightens under them.
 - **`docs/` is unchanged.** It remains the authored-from upstream for the site's
   guide pages, and `bin/sync-proxy-docs` plus the drift-issue workflow in the
   docs repository keep working exactly as they do today.
@@ -61,7 +63,7 @@ untouched, so an agent or integrator reading the contract sees no difference.
 ## Impact
 
 - `README.md` — reduced from 889 lines to roughly 150.
-- `test/readme_examples_test.exs` — deleted.
+- `test/readme_examples_test.exs` — narrowed to its example-URL guards.
 - `CLAUDE.md` — documentation-shape table updated.
 - `openspec/specs/url-signing/spec.md` — a Purpose sentence citing "README
   examples" as a consumer of the signing vectors becomes stale; corrected in
