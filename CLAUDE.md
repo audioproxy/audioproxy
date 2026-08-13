@@ -192,6 +192,7 @@ itself:
 | `AudioProxy.Fixtures` | Generated audio fixtures, and the fixture root they live in. | A fixture path is never a fixed name under `System.tmp_dir!()`. |
 | `AudioProxy.TestServer` | Booting a real listener, and reading back the port it got. | A test that binds a socket boots it through this helper. |
 | `AudioProxy.MarkedTable` | Reading a table out of a marked region of a published document. | A drift guard parses its table through this, never with its own regex. |
+| `AudioProxy.CapturingStore` | A second S3 endpoint that answers plausibly and records which identity signed each request. | It verifies nothing and must not grow into a fake S3; what it proves is routing and identity, never a signature. |
 
 Promoting another duplicated helper adds a row here and a subsection below. The
 section is meant to grow a row at a time; nothing above needs rewriting to make
@@ -201,7 +202,7 @@ room.
 
 | Function | Holds |
 |---|---|
-| `put_config/1` | Merges overrides into the stored config and restores them on exit. Global state, hence `async: false`. |
+| `put_config/1` | Merges overrides into the stored config and restores them on exit. Global state, hence `async: false`. An `:s3` override with no `:variant_s3` beside it installs both — but only while the two stored profiles still agree, so a test that has deliberately split them can adjust one side without the other being overwritten. |
 | `byte_limits/1` | The two byte limits, with the caller's overrides merged over them. Requires nothing. Carries the reason the floor exists. |
 | `validate_keys!/2` | The known-key set, derived from `AudioProxy.Config.build!(%{})`. Called by `put_config/1` and `base_config/1`, not usually by a test. |
 
@@ -350,6 +351,31 @@ One rule, and it was bought rather than reasoned:
   the copy being written. A missing marker still raises `MatchError` on purpose:
   a guard that silently parsed an empty region would pass while checking
   nothing.
+
+`AudioProxy.CapturingStore` owns the second S3 endpoint, for the suites that
+need two at once — the split source/store configuration, where one MinIO
+cannot be both sides:
+
+| Function | Holds |
+|---|---|
+| `start!/0` | Boots the listener through `TestServer` and returns its endpoint, captures empty. |
+| `requests/0`, `access_keys/0` | What arrived, and which access key ids signed it — parsed out of SigV4's own `Credential=<key>/…`. |
+| `reset!/0`, `serve_hits!/0` | Forgetting the setup's own traffic, and switching HEAD from "empty store" to "a complete variant". |
+
+Two rules, and the first is the reason this is allowed to exist at all:
+
+- **It verifies nothing, and must not grow into a fake S3.** `AudioProxy.S3Test`
+  explains at length why a stub that decides whether a signature is valid only
+  ever agrees with the code that produced it, and that reasoning is unchanged.
+  What this endpoint proves is *routing and identity* — that store requests
+  went to the store's endpoint carrying the store's credential — which is
+  precisely the claim MinIO cannot make, because a store that verifies a
+  signature can only answer yes or no, never whose it was. The signature the
+  source side produces is still verified, by MinIO, in the same test.
+- **The empty store is the default.** The interesting path is a miss followed
+  by a write-back, so `head/1` reports nothing until a test asks for a hit. A
+  store that answered every HEAD with a variant would make a MISS render
+  unreachable, which is how the first draft of this helper was wrong.
 
 ## Open questions (decide as they come up)
 
