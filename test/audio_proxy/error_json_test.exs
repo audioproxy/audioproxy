@@ -77,6 +77,12 @@ defmodule AudioProxy.ErrorJSONTest do
              }
     end
 
+    test "410: an expired URL, which is not a signature complaint" do
+      assert {410, [], body} = decoded(:expired)
+
+      assert body == %{"error" => "expired", "message" => "URL has expired"}
+    end
+
     test "429: queue full carries Retry-After from the error (producer: add-render-semaphore)" do
       assert {429, headers, body} = decoded({:queue_full, 7})
 
@@ -168,6 +174,9 @@ defmodule AudioProxy.ErrorJSONTest do
       {:source_too_large, "max-age=10"},
       {:undecodable_source, "max-age=10"},
       {:video_source, "max-age=10"},
+      # The one row a year long: an expired URL cannot become valid again,
+      # because the timestamp it is judged against is inside the signature.
+      {:expired, "public, max-age=31536000, immutable"},
       {{:range_not_satisfiable, 200}, "no-store"},
       {{:queue_full, 3}, "no-store"},
       {:render_failed, "no-store"},

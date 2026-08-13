@@ -45,7 +45,8 @@ defmodule AudioProxy.VariantCache do
 
   ## The redirect is not the variant
 
-  Redirect mode answers `302` with a short-lived presigned URL and
+  Redirect mode answers `302` with a short-lived presigned URL — no longer
+  lived than the requesting URL itself, per `AudioProxy.Expiry` — and
   `Cache-Control: no-store`. The no-store is load-bearing rather than
   cautious: the redirect's `Location` *is* a credential with an expiry, and a
   cached 302 hands out URLs that have already expired. The immutable
@@ -74,7 +75,7 @@ defmodule AudioProxy.VariantCache do
 
   require Logger
 
-  alias AudioProxy.{Config, ErrorJSON, LogHandler, VariantStore}
+  alias AudioProxy.{Config, ErrorJSON, Expiry, LogHandler, VariantStore}
 
   @typedoc "What `lookup/1` found, if anything."
   @type hit :: {:ok, VariantStore.entry()} | :miss
@@ -129,7 +130,13 @@ defmodule AudioProxy.VariantCache do
   ## Redirect mode
 
   defp redirect(conn, key, entry) do
-    case VariantStore.presign(key, expires_in: Config.get(:presign_ttl)) do
+    # The `Location` is a credential the proxy will not be asked about again,
+    # so its life is capped by the URL that bought it: an unclamped presign
+    # would let a 30-second URL hand out an hour of storage access, and
+    # following it needs no signature of ours at all.
+    ttl = Expiry.clamp_ttl(Config.get(:presign_ttl), conn.assigns.options)
+
+    case VariantStore.presign(key, expires_in: ttl) do
       {:ok, url} ->
         {:ok,
          conn
@@ -244,10 +251,19 @@ defmodule AudioProxy.VariantCache do
   # The variant's own headers, as the write-back stored them — not rebuilt
   # from the options. That is what makes a proxied HIT and a followed redirect
   # byte-identical in what they claim to be.
+  #
+  # `Cache-Control` is the one exception, and it has to be: the stored policy
+  # belongs to bytes every `exp` shares, so it cannot carry any one requester's
+  # remaining lifetime. The clamp is applied here, on the way out, to the value
+  # the store gave back — the same clamp `AudioProxy.Plugs.RenderAction` applies
+  # to the MISS that stored it.
   defp describe(conn, metadata) do
     conn
     |> put_resp_content_type(metadata.content_type, nil)
-    |> put_resp_header("cache-control", metadata.cache_control)
+    |> put_resp_header(
+      "cache-control",
+      Expiry.clamp_cache_control(metadata.cache_control, conn.assigns.options)
+    )
     |> put_resp_header("etag", metadata.etag)
   end
 
