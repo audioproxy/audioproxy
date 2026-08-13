@@ -29,6 +29,7 @@ defmodule AudioProxy.LlmsDocsTest do
 
   alias AudioProxy.Config
   alias AudioProxy.ErrorJSON
+  alias AudioProxy.MarkedTable
   alias AudioProxy.Options
   alias AudioProxy.Signature
 
@@ -218,39 +219,10 @@ defmodule AudioProxy.LlmsDocsTest do
     |> Enum.reverse()
   end
 
-  # Rows of a marked table, as lists of their backticked cell tokens. A line
-  # counts as a row only when its first cell is a single backticked token,
-  # which skips the header and the `|---|` separator.
-  defp table(name) do
-    name
-    |> region()
-    |> Enum.filter(&String.starts_with?(&1, "|"))
-    |> Enum.map(&cells/1)
-    |> Enum.reject(&(&1 == []))
-  end
-
-  defp cells(row) do
-    row
-    |> String.split("|", trim: true)
-    |> Enum.map(&String.trim/1)
-    |> Enum.map(fn cell ->
-      case Regex.run(~r/^`([^`]+)`$/, cell) do
-        [_match, token] -> token
-        nil -> nil
-      end
-    end)
-    |> case do
-      [nil | _rest] -> []
-      cells -> cells
-    end
-  end
-
-  defp region(name) do
-    [_before, inside | _after] =
-      String.split(full(), ["<!-- #{name}-table:start -->", "<!-- #{name}-table:end -->"])
-
-    lines(inside)
-  end
+  # Rows of a marked table, as lists of their backticked cell tokens.
+  # `AudioProxy.MarkedTable` owns the shape; `AudioProxy.ReadmeExamplesTest`
+  # reads the README's configuration table through the same function.
+  defp table(name), do: MarkedTable.rows(full(), name)
 
   defp signing_example do
     [_before, inside | _after] =

@@ -25,6 +25,7 @@ defmodule AudioProxy.ReadmeExamplesTest do
 
   alias AudioProxy.Config
   alias AudioProxy.Ffmpeg.Command
+  alias AudioProxy.MarkedTable
   alias AudioProxy.Options
 
   # `/insecure/<options>/$SRC` — the dev-mode spelling the README uses, with the
@@ -117,31 +118,9 @@ defmodule AudioProxy.ReadmeExamplesTest do
 
   defp difference(a, b), do: a |> MapSet.difference(b) |> Enum.sort()
 
-  # The first cell of every row in the marked region, on the same terms
-  # `AudioProxy.LlmsDocsTest` parses its tables: a line starting with `|` whose
-  # first cell is a single backticked token, which skips the header and the
-  # `|---|` separator. The markers are HTML comments, so they are invisible in
-  # a rendered README.
-  defp config_variables do
-    [_before, inside | _after] =
-      "README.md"
-      |> File.read!()
-      |> String.split(["<!-- config-table:start -->", "<!-- config-table:end -->"])
-
-    inside
-    |> String.split("\n")
-    |> Enum.map(&String.trim/1)
-    |> Enum.filter(&String.starts_with?(&1, "|"))
-    |> Enum.flat_map(fn row ->
-      row
-      |> String.split("|", trim: true)
-      |> hd()
-      |> String.trim()
-      |> then(&Regex.run(~r/^`([^`]+)`$/, &1))
-      |> case do
-        [_match, variable] -> [variable]
-        nil -> []
-      end
-    end)
-  end
+  # Parsed by `AudioProxy.MarkedTable`, the same function `AudioProxy.LlmsDocsTest`
+  # reads its three tables with. This file had its own copy for a day, and the
+  # copy differed: it raised `ArgumentError` on a line holding nothing but `|`,
+  # where the original returned no row.
+  defp config_variables, do: MarkedTable.first_cells(File.read!("README.md"), "config")
 end
