@@ -8,11 +8,12 @@ defmodule AudioProxy.Eventually do
   child list emptying, a variant landing in the store, an OS process exiting —
   where the only way to know is to look again.
 
-  ## Two waits, because there are two contracts
+  ## Three waits, because there are three contracts
 
   `wait_until/2` flunks when its deadline expires; `eventually?/2` returns
-  `false`. That is the one distinction in here worth reading twice, and the
-  names carry it so a call site does not have to:
+  `false`; `wait_for/2` hands back what it waited for. That is the one
+  distinction in here worth reading twice, and the names carry it so a call
+  site does not have to:
 
     * `wait_until/2` is for a **precondition** — something that must become
       true for the rest of the test to mean anything. Expiry is a broken test,
@@ -21,8 +22,22 @@ defmodule AudioProxy.Eventually do
     * `eventually?/2` is for a wait that **is** the assertion, including the
       negative one (`refute eventually?(...)`). Its caller wants the answer,
       not a failure.
+    * `wait_for/2` is for a wait whose **result is a value** the test then
+      asserts on — the scrape body that finally matched, the pid of the
+      restarted process. Polling and then re-reading would reopen the race the
+      poll exists to close, because the value can change again in between, so
+      the wait carries out the one it observed.
 
-  Before this module the two lived in seventeen files under four names
+  `wait_for/2`'s condition returns `{:ok, value}` or `{:retry, observed}`
+  rather than something truthy, and the payload on the retry branch is the
+  reason this is a third function rather than `eventually?/2` with a different
+  return type. A scrape body that does not match yet is perfectly truthy, so
+  truthiness cannot carry the verdict; and "the counter never reached X" is
+  not a diagnostic without the last scrape printed beside it. `observed` is
+  what the failure message prints, which is what makes a custom message
+  parameter unnecessary.
+
+  Before this module the first two lived in seventeen files under four names
   (`wait_until` in eleven, `eventually` in two, `await` in two, and the
   `gone_within?`/`alive?` pair in four) and were told apart only by which file
   you happened to be reading.
@@ -81,7 +96,36 @@ defmodule AudioProxy.Eventually do
   """
   @spec eventually?((-> as_boolean(term())), non_neg_integer()) :: boolean()
   def eventually?(condition, deadline \\ @deadline) do
-    poll(condition, System.monotonic_time(:millisecond) + deadline)
+    match?({:ok, _}, poll(fn -> truthy(condition) end, deadline))
+  end
+
+  @doc """
+  Polls `condition` until it returns `{:ok, value}`, returns that `value`, or
+  flunks when `deadline` (milliseconds) expires.
+
+  For a wait whose result is a value the test goes on to assert on. The retry
+  branch returns `{:retry, observed}`, and `observed` is what the failure
+  message prints — make it whatever identifies the fault.
+
+      body =
+        wait_for(fn ->
+          %{body: body} = scrape()
+          if body =~ expected, do: {:ok, body}, else: {:retry, body}
+        end)
+  """
+  @spec wait_for((-> {:ok, value} | {:retry, term()}), non_neg_integer()) :: value
+        when value: term()
+  def wait_for(condition, deadline \\ @deadline) do
+    case poll(condition, deadline) do
+      {:ok, value} ->
+        value
+
+      {:expired, observed} ->
+        flunk(
+          "condition never returned {:ok, _} within #{deadline}ms; last observed:\n" <>
+            describe(observed)
+        )
+    end
   end
 
   @doc """
@@ -108,17 +152,53 @@ defmodule AudioProxy.Eventually do
   @spec alive?(integer()) :: boolean()
   def alive?(os_pid), do: AudioProxy.OsProcess.alive?(os_pid)
 
-  defp poll(condition, expiry) do
-    cond do
-      condition.() ->
-        true
+  # The one loop, in the shape of the wait that carries the most: a verdict
+  # plus a payload. `eventually?/2` reaches it through `truthy/1`, which is a
+  # lossless narrowing — the two boolean waits simply throw the payload away —
+  # so adding `wait_for/2` did not fork a second loop or a second interval.
+  defp poll(condition, deadline) do
+    poll_until(condition, System.monotonic_time(:millisecond) + deadline)
+  end
 
-      System.monotonic_time(:millisecond) >= expiry ->
-        false
+  defp poll_until(condition, expiry) do
+    case condition.() do
+      {:ok, value} ->
+        {:ok, value}
 
-      true ->
-        Process.sleep(@interval)
-        poll(condition, expiry)
+      {:retry, observed} ->
+        if System.monotonic_time(:millisecond) >= expiry do
+          {:expired, observed}
+        else
+          Process.sleep(@interval)
+          poll_until(condition, expiry)
+        end
     end
   end
+
+  defp truthy(condition) do
+    case condition.() do
+      value when value in [nil, false] -> {:retry, value}
+      value -> {:ok, value}
+    end
+  end
+
+  # The last observation printed raw when it is text — `await_scrape`'s whole
+  # diagnostic was a multi-line scrape body, and `inspect/1` would escape the
+  # newlines out of it. Unbounded on that branch deliberately: the body *is*
+  # the diagnostic, and a truncated exposition is the one that omits the line
+  # you were looking for.
+  #
+  # `String.valid?/1` rather than `is_binary/1` alone, because a message
+  # carrying invalid UTF-8 does not merely print badly: `:io.put_chars` raises
+  # from inside `ExUnit.CLIFormatter`, which takes down the formatter and the
+  # runner with it. A wait that expires would then kill the whole suite rather
+  # than fail one test.
+  defp describe(observed) when is_binary(observed) do
+    if String.valid?(observed), do: observed, else: inspect(observed)
+  end
+
+  # Everything else at `inspect/2`'s default limit — a pid or a tuple prints
+  # whole, and a term large enough to be truncated is one no reader wanted in
+  # full.
+  defp describe(observed), do: inspect(observed, pretty: true)
 end

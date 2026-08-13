@@ -21,6 +21,7 @@ defmodule AudioProxy.MetricsEndpointTest do
 
   import AudioProxy.CoalesceHelper
   import AudioProxy.ConfigHelper
+  import AudioProxy.Eventually, only: [wait_for: 2]
   import AudioProxy.SignedRequest, except: [conn: 3]
   import ExUnit.CaptureLog
   import Plug.Conn, only: [get_resp_header: 2]
@@ -189,8 +190,16 @@ defmodule AudioProxy.MetricsEndpointTest do
         assert head =~ "200 ok"
       end)
 
+      # 10 s, not the 1 s the old attempts-times-interval arithmetic implied:
+      # each attempt is an HTTP request whose own cost that arithmetic never
+      # charged to the budget.
       body =
-        await_scrape(metrics, ~s(audio_proxy_renders_total{format="mp3",outcome="success"} 1))
+        wait_for(
+          fn ->
+            scrape_for(metrics, ~s(audio_proxy_renders_total{format="mp3",outcome="success"} 1))
+          end,
+          10_000
+        )
 
       # The render happened, it was a cache miss, and the request that carried
       # it was counted — the three signals from three different event families,
@@ -205,9 +214,14 @@ defmodule AudioProxy.MetricsEndpointTest do
       # the last scrape that did.
       refute body =~ ~s(audio_proxy_http_requests_total{endpoint="metrics")
 
-      assert await_scrape(
-               metrics,
-               ~s(audio_proxy_http_requests_total{endpoint="metrics",status="2xx"})
+      assert wait_for(
+               fn ->
+                 scrape_for(
+                   metrics,
+                   ~s(audio_proxy_http_requests_total{endpoint="metrics",status="2xx"})
+                 )
+               end,
+               10_000
              )
     end
 
@@ -227,15 +241,20 @@ defmodule AudioProxy.MetricsEndpointTest do
   # request may not be counted by the time the client has read it. Polling is
   # the honest wait: there is nothing to synchronise on that is not the
   # counter itself.
-  defp await_scrape(port, expected, attempts \\ 50) do
+  #
+  # One attempt is a whole HTTP request, so the deadline these are polled
+  # under is denominated in requests rather than in polls — see the 10 s at
+  # each call site, and `AudioProxy.Eventually`'s note that the deadline is
+  # checked between evaluations and never during one.
+  #
+  # The scrape that did not match is the `{:retry, body}` payload because it
+  # is the entire diagnostic: "the counter never reached X" says nothing that
+  # the last exposition does not say better.
+  defp scrape_for(port, expected) do
     socket = RawHttp.get("/metrics", port)
     %{body: body} = RawHttp.read_one(socket, 5_000)
 
-    cond do
-      body =~ expected -> body
-      attempts > 0 -> Process.sleep(20) && await_scrape(port, expected, attempts - 1)
-      true -> flunk("counter never reached #{expected}; last scrape:\n#{body}")
-    end
+    if body =~ expected, do: {:ok, body}, else: {:retry, body}
   end
 
   ## The grammar

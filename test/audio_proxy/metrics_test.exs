@@ -15,6 +15,7 @@ defmodule AudioProxy.MetricsTest do
 
   use ExUnit.Case, async: false
 
+  import AudioProxy.Eventually, only: [wait_for: 2]
   import ExUnit.CaptureLog
 
   alias AudioProxy.Metrics
@@ -306,7 +307,19 @@ defmodule AudioProxy.MetricsTest do
       Process.exit(before, :kill)
       assert_receive {:DOWN, ^ref, :process, ^before, :killed}, 5_000
 
-      restarted = await_restart(before)
+      # A registry peek, so the old 100 × 20 ms can be taken at face value:
+      # 2 s. The pid is the point of the wait — reading it back afterwards
+      # could catch a *second* restart rather than the one waited for.
+      restarted =
+        wait_for(
+          fn ->
+            case Process.whereis(Metrics) do
+              pid when pid in [nil, before] -> {:retry, pid}
+              other -> {:ok, other}
+            end
+          end,
+          2_000
+        )
 
       assert is_pid(restarted) and restarted != before
 
@@ -323,14 +336,6 @@ defmodule AudioProxy.MetricsTest do
       assert lines("audio_proxy_renders_total") == [
                ~s(audio_proxy_renders_total{format="mp3",outcome="success"} 1)
              ]
-    end
-
-    defp await_restart(old, attempts \\ 100) do
-      case Process.whereis(Metrics) do
-        nil when attempts > 0 -> Process.sleep(20) && await_restart(old, attempts - 1)
-        ^old when attempts > 0 -> Process.sleep(20) && await_restart(old, attempts - 1)
-        other -> other
-      end
     end
   end
 
