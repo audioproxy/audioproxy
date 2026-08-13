@@ -37,17 +37,17 @@
 
 - [x] 5.1 Read the rewritten README end to end as a first-time visitor: can they render something, and can they find everything else?
 - [x] 5.2 Confirm the line count is in the target range and no usage reference material remains
-- [ ] 5.3 Adversarial review per `CLAUDE.md`, reconciled against a self-review written first
+- [x] 5.3 Adversarial review per `CLAUDE.md`, reconciled against a self-review written first
 - [x] 5.4 Commit as `docs:` scoped changes, one logical change each; open the PR
 
 ## 6. Paired work in `audioproxy-docs` (tracked there, running in parallel)
 
-- [ ] 6.1 Configuration page: the full `AP_*` surface, the `AWS_*` credentials group, sizing guidance
-- [ ] 6.2 Signing page: the HMAC rule, the Elixir and Ruby reference signers, dev mode
-- [ ] 6.3 Errors page: the status/code/when table
-- [ ] 6.4 `/info` page: the endpoint, its fields, its caching and probe behavior
-- [ ] 6.5 Variant store and serve modes page: backends, write-back, `redirect` vs `proxy`
-- [ ] 6.6 Caching and CDNs page: the `Cache-Control` table, revalidation, `HEAD`, `Range`
-- [ ] 6.7 Operations page, authored from `docs/operations.md`: logs, metrics, and a pointer to scaling for health and readiness
-- [ ] 6.8 Fold the README's example URLs into the transforms page
-- [ ] 6.9 Confirm the interim links chosen in 1.2 are replaced with their real targets once these land
+- [x] 6.1 Configuration page: the full `AP_*` surface, the `AWS_*` credentials group, sizing guidance
+- [x] 6.2 Signing page: the HMAC rule, the Elixir and Ruby reference signers, dev mode
+- [x] 6.3 Errors page: the status/code/when table
+- [x] 6.4 `/info` page: the endpoint, its fields, its caching and probe behavior
+- [x] 6.5 Variant store and serve modes page: backends, write-back, `redirect` vs `proxy`
+- [x] 6.6 Caching and CDNs page: the `Cache-Control` table, revalidation, `HEAD`, `Range`
+- [x] 6.7 Operations page, authored from `docs/operations.md`: logs, metrics, and a pointer to scaling for health and readiness
+- [x] 6.8 Fold the README's example URLs into the transforms page
+- [x] 6.9 Confirm the interim links chosen in 1.2 are replaced with their real targets once these land

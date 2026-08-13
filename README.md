@@ -10,7 +10,7 @@ Point it at your audio and ask for a variant by URL: a 30-second preview, a mono
 
 **Full documentation: [docs.audioproxy.dev](https://docs.audioproxy.dev)**, covering how to render, sign, configure, deploy and observe.
 
-> **Status: early, `v0.6.0`.** Transcoding works end to end and you can try it in about a minute. Sources live on a mounted directory or in S3-compatible object storage. With a variant store configured, local or `s3://`, completed renders are kept and served back with `Range` support, so a variant is encoded once rather than per request. See the [Roadmap](#roadmap).
+> **Status: early, `v0.6.0`.** Transcoding works end to end and you can try it in about a minute. Sources live on a mounted directory or in S3-compatible object storage; HTTPS sources are designed but not yet rendering, per the roadmap below. With a variant store configured, local or `s3://`, completed renders are kept and served back with `Range` support, so a variant is encoded once rather than per request. See the [Roadmap](#roadmap).
 
 ## Quick start
 
@@ -90,7 +90,7 @@ PORT=4000 mix run --no-halt
 
 That path needs `ffmpeg` and `ffprobe` on `PATH`. See [docs/development.md](https://github.com/audioproxy/audioproxy/blob/main/docs/development.md) for a development container that already has them, and for the test suite.
 
-The proxy is also published to hex as an OTP application (`{:audio_proxy, "~> 0.6"}`), so it can run inside a BEAM node you already deploy. It is an application rather than a library: adding the dependency is the whole integration, and starting it reads the `AP_*` environment, binds two listeners, and expects ffmpeg on `PATH`. The [configuration reference](https://docs.audioproxy.dev/reference/api-v1/) covers what that commits you to.
+The proxy is also published to hex as an OTP application (`{:audio_proxy, "~> 0.6"}`), so it can run inside a BEAM node you already deploy. It is an application rather than a library: adding the dependency is the whole integration, and starting it reads the `AP_*` environment, binds two listeners, and expects ffmpeg on `PATH`. [Configuration](https://docs.audioproxy.dev/guides/configuration/) covers what that commits you to.
 
 ## Roadmap
 
@@ -123,11 +123,11 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 
 ## Documentation
 
-Start at **[docs.audioproxy.dev](https://docs.audioproxy.dev)**. It is the goal-first documentation: how to render a variant, sign a URL, configure the proxy, choose a provider, and run more than one node.
+Start at **[docs.audioproxy.dev](https://docs.audioproxy.dev)**. It is the goal-first documentation: how to render a variant, sign a URL, configure the proxy, choose a provider, run more than one node, and read a running one.
 
 | Document | What it covers |
 |---|---|
-| [docs.audioproxy.dev](https://docs.audioproxy.dev) | **Start here.** Quickstart, transforms, sources, rendering, S3 providers, scaling, capacity, Rails |
+| [docs.audioproxy.dev](https://docs.audioproxy.dev) | **Start here.** Quickstart, transforms, signing, sources, rendering, configuration, variant store, caching, operations, S3 providers, scaling, capacity, Rails |
 | [docs/audio-proxy-api-v1.md](docs/audio-proxy-api-v1.md) | **The source of truth.** URL grammar, every processing option, cache-key rules, response headers, error codes |
 | [llms.txt](llms.txt), [llms-full.txt](llms-full.txt) | The same contract as markdown, in one file, checked against the code. See [For AI agents](#for-ai-agents) |
 | [docs/development.md](https://github.com/audioproxy/audioproxy/blob/main/docs/development.md) | Toolchain, per-slice worktrees and devcontainers, the test suite and its tags, CI, how a release is cut |

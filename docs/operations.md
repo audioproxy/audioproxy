@@ -16,9 +16,9 @@ Everything goes to stdout, one line per completed request:
 12:31:11.006 request_id=GMf5ECRh8raItPUAAAOl [warning] render 504 render_timeout opts=f:mp3 src=local://long.wav cache=MISS 72 bytes in 300004.7ms
 ```
 
-Reading one left to right: the endpoint (`render`, `health`, or `unknown` for a
-path that matched no route), the status, the error code from the API doc's error
-table when the request failed, the normalized options string and the canonical
+Reading one left to right: the endpoint class (the same seven values the
+`endpoint` metrics label carries, below), the status, the error code from the
+API doc's error table when the request failed, the normalized options string and the canonical
 source once the proxy has got far enough to know them (a `401` knows neither and
 omits both), whether the request rendered or shared one, the bytes sent, and how
 long it took.
@@ -37,7 +37,7 @@ instead, which is what makes the log line up with a proxy or gateway in front.
 
 | Level | What appears |
 |---|---|
-| `error` | Nothing routine: a render the host could not start at all (no encoder on `PATH`), a subprocess that survived `SIGKILL`, and crashes |
+| `error` | Nothing routine: a missing `ffmpeg` or `ffprobe` on `PATH`, a subprocess that survived `SIGKILL`, a probe coordinator that died, a failure to signal an OS process, and crashes |
 | `warning` | `5xx` and `504` responses, and the ffmpeg diagnostic behind a failed render |
 | `info` | **Default.** The above, plus one line per request, `4xx` included: a `401` is a normal outcome for a public endpoint, not an incident |
 | `debug` | The above, plus `/health`, `/ready` and `/metrics` (silent otherwise, so a liveness probe every second and a scrape every fifteen do not become the log), the render lifecycle, and client disconnects |
@@ -88,8 +88,8 @@ is `success`, `cancelled` (the client went away mid-stream), or the failure clas
 from the API doc's error table (`timeout`, `undecodable`, `not_found`, …); on a
 cache lookup it is `hit`, `miss` or `coalesced`, the same three values the
 `X-Audio-Proxy` header carries. `endpoint` is the route class (`render`, `info`,
-`health`, `ready`, `metrics`, `unknown`) and `status` a code family (`2xx`,
-`4xx`, …).
+`health`, `ready`, `metrics`, `preflight`, `unknown`) and `status` a code
+family (`2xx`, `4xx`, …).
 
 Every label is a fixed, bounded set. Nothing derived from a request — not the
 source, not the options, not the cache key — becomes a label, so no client can

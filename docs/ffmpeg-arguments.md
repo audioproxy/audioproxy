@@ -1,9 +1,9 @@
 # How options become ffmpeg arguments
 
 Implementation reference for `AudioProxy.Ffmpeg.Command`. Nothing here is
-needed to *use* the proxy — the option grammar in the
-[README](audio-proxy-api-v1.md#3-processing-options) and
-[audio-proxy-api-v1.md](audio-proxy-api-v1.md) cover that. Read this when a
+needed to *use* the proxy — the
+[option grammar](audio-proxy-api-v1.md#3-processing-options) in
+[audio-proxy-api-v1.md](audio-proxy-api-v1.md) covers that. Read this when a
 render produces something you did not expect, or before changing the argument
 table.
 
