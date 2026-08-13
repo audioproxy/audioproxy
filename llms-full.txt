@@ -118,6 +118,7 @@ Options are `/`-separated `key:value` segments between the signature and the sou
 | `pk_fmt` | `json` \| `dat` | Peaks only: serialization. Default `json` |
 | `dl` | filename | Sets `Content-Disposition: attachment`. Opaque, kept percent-encoded, control bytes refused |
 | `cb` | opaque string | Cache-buster; participates in the cache key. Control bytes refused |
+| `exp` | integer Unix seconds, 1–253402300799 | Expires the URL: a `410` from this second on. The one key excluded from the cache key — see *Expiring URLs* |
 
 <!-- options-table:end -->
 
@@ -137,6 +138,21 @@ Each is a `422` naming the offending segment:
 - `f:peaks` refuses `br`, `q`, `sr`, `bd`, `gain` and `norm` — peaks are computed from the decoded source, so an option that cannot change the output would hand identical bytes two cache keys.
 - `sr` above 48000 is refused for lossy formats.
 - A fade must fit inside a bounded trim, and a fade-out requires the trim to be bounded at all: its start is `duration - out`, and without a duration there is nothing to count back from. A fade-in needs no trim.
+
+### Expiring URLs
+
+Options come in two classes. **Variant options** — every key above except `exp` — normalize into the canonical options string, which is the cache key, and become ffmpeg arguments. **Request options** — `exp` — are parsed, validated and signed like any other path bytes, and excluded from the canonical string, the cache key and the ffmpeg arguments.
+
+So two URLs differing only in `exp` are one variant: identical cache key, identical arguments, coalesced into one render. That is the point of the class. A per-recipient timestamp inside the cache key would mint one render per recipient for byte-identical audio, which is what makes `exp` an option rather than a query parameter.
+
+`exp:<unix-seconds>` refuses the request with `410 expired` from that second onwards, checked after signature verification and before any source access, so an expired URL touches no storage and starts no subprocess. It is tamper-proof for free: it is in the path, so it is in the HMAC.
+
+Four rules to build against:
+
+- **No clock-skew leeway.** Pad your own timestamps if you want a margin. The boundary is exclusive — a request arriving in the second `exp` names is still served.
+- **A past timestamp is valid grammar.** `exp:1` signs and parses; the answer is `410`, not `422`. That is what makes the `410` a permanent, cacheable verdict rather than a parse error.
+- **Both lifetimes are clamped** to at most `exp - now`: a successful response's `max-age`, and the presigned URL a `302` cache hit redirects to.
+- **`/info` cannot carry `exp`** — that endpoint has no options segment.
 
 ### Waveform peaks
 
@@ -164,7 +180,7 @@ Peaks respect `t`, `ch` and `fade` and ignore everything about encoding. Pick `p
 lowercase-hex(SHA-256(normalized-options ‖ "\n" ‖ canonical-source))
 ```
 
-Normalization is what makes this deterministic: keys are sorted lexicographically, applicable defaults are materialized (`f` always; the `norm` targets when `norm` is present; `ch`, `pts` and `pk_fmt` under `f:peaks`), and every number is rendered minimally (`30`, never `30.0`). So `f:opus/br:96` and `br:96/f:opus` are one variant with one key, while any genuine difference — `cb` included — yields a different one.
+Normalization is what makes this deterministic: keys are sorted lexicographically, applicable defaults are materialized (`f` always; the `norm` targets when `norm` is present; `ch`, `pts` and `pk_fmt` under `f:peaks`), and every number is rendered minimally (`30`, never `30.0`). So `f:opus/br:96` and `br:96/f:opus` are one variant with one key, while any genuine difference — `cb` included — yields a different one. `exp` is the one exception, and a deliberate one: it never enters the normalized string, so two URLs differing only in their expiry are one variant.
 
 Normalization is syntactic, not semantic: `t:0`, `fade:0:0` and `gain:0` are identity renders that keep their own keys, and therefore cost duplicate cache objects.
 
@@ -199,10 +215,13 @@ A `Range` this proxy does not implement — several ranges at once, a unit other
 | `200` from `/info` | `public, max-age=3600` |
 | `404`, `413`, `415` | `max-age=10` |
 | `401`, `422` | `max-age=60` |
+| `410` | `public, max-age=31536000, immutable` |
 | `302` cache hit, `416`, `429`, `5xx` | `no-store` |
 | `/health`, `/ready`, `/metrics` | `no-store` |
 
-A rendered variant is genuinely immutable: the URL encodes it completely. `/info` is not, because it describes a file somebody may re-upload.
+A rendered variant is genuinely immutable: the URL encodes it completely. `/info` is not, because it describes a file somebody may re-upload. The `410` is the other permanent one, and for a different reason: the timestamp it is judged against is inside the signature, so no later request can make that URL valid.
+
+Under `exp` the `max-age` of a successful response is clamped to at most `exp - now`, and the presigned URL of a `302` cache hit to the same bound. The `Cache-Control` *stored* with the variant is never clamped, because those bytes are shared by every `exp`.
 
 ## `/info`
 
@@ -241,6 +260,7 @@ Failures before the response begins are JSON, one shape everywhere:
 | `413` | `source_too_large` | The source exceeds `AP_MAX_SRC_BYTES`. Renders only; `/info` describes a source of any size |
 | `415` | `undecodable_source` | The source format is not decodable, or on `/info` carries no audio at all |
 | `415` | `video_source` | The source contains a video stream, and this proxy serves audio only. Cover art is not video |
+| `410` | `expired` | The URL carried an `exp` that has passed. The signature verified; only the clock refused it. Permanent, and cacheable as such |
 | `416` | `range_not_satisfiable` | A `Range` no byte of a cached variant can satisfy. Carries `Content-Range: bytes */size`. Unreachable on an uncached variant, where ranges are ignored |
 | `422` | `invalid_options` | Invalid or conflicting options. The message names the offending segment |
 | `429` | `queue_full` | A pool is full: the render queue, a wait for a render slot that ran out of budget, or the probe ceiling. Carries `Retry-After`; the causes are deliberately indistinguishable |

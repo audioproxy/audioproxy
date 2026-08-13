@@ -241,6 +241,34 @@ Generate a real key with `openssl rand -hex 32`. `AP_KEY` must decode to at leas
 
 > **Dev mode, never enable in production.** Setting `AP_ALLOW_INSECURE=true` makes the literal segment `insecure` pass as a signature (`/insecure/f:opus/…/plain/…`). It exists for local development and smoke tests; with it on, anyone who can reach the proxy can render anything.
 
+## Expiring URLs
+
+A signed URL is otherwise permanent: the signature covers the path and nothing else, so a leaked URL works forever and the only way to revoke it is to rotate the key — which revokes every URL you ever issued. Add `exp:<unix-seconds>` to time-box one URL:
+
+```elixir
+rest = "/f:opus/br:96/exp:#{System.system_time(:second) + 300}/plain/s3://masters/piece.wav"
+
+AudioProxy.Signature.sign(rest, key, salt)
+```
+
+Requested before that second, it renders exactly as the same URL without `exp` would. From that second on, it is a `410`:
+
+```json
+{"error": "expired", "message": "URL has expired"}
+```
+
+`exp` needs no mechanism of its own to be tamper-proof — it is part of the path, so it is inside the signature, and changing or removing it is the same `401` as changing anything else.
+
+**It does not participate in the cache key.** That is the whole reason it is worth having as an option rather than a query parameter: mint a fresh five-minute URL on every page view and all of them still resolve to *one* rendered variant. Two requests differing only in `exp` coalesce into a single render, and the one already in the store answers both.
+
+**Expiry caps everything the response hands out.** A `200`'s `Cache-Control: max-age` is clamped to at most `exp − now`, so a CDN cannot keep serving the body after the URL is dead, and a cache-hit redirect's presigned storage URL is clamped to the same bound, so the `302` cannot trade a short-lived URL for a long-lived one. Without both, enforcement at the proxy would be theater.
+
+Three things worth knowing before you generate them:
+
+- **There is no clock-skew leeway.** If you want a margin, add it to your own timestamp. A margin here would be one every deployment pays.
+- **A timestamp in the past is a valid URL** — it signs, it parses, and it answers `410`. It is not a `422`, which is what lets the `410` be a permanent verdict a CDN can cache and serve on your behalf.
+- **`/info` cannot carry it**: that endpoint has no options segment. Info URLs are meant for your own services rather than for end users.
+
 ## Rendering a variant
 
 End to end, with a directory of your own audio and a real signature:
@@ -329,7 +357,7 @@ Cheap is not free, though, so probes have a ceiling of their own: `AP_MAX_PROBE_
 
 ## Processing options
 
-The options segments describe the variant completely, and their normalized form *is* the cache key. `AudioProxy.Options` parses, validates, and normalizes them; `AudioProxy.CacheKey` hashes the result. Invalid or conflicting options are rejected with an `AudioProxy.OptionError` naming the offending segment, which the HTTP layer will render as a `422`.
+The options segments describe the variant completely, and their normalized form *is* the cache key — with one exception, `exp`, which describes the *request* instead and is covered under [Expiring URLs](#expiring-urls). `AudioProxy.Options` parses, validates, and normalizes them; `AudioProxy.CacheKey` hashes the result. Invalid or conflicting options are rejected with an `AudioProxy.OptionError` naming the offending segment, which the HTTP layer will render as a `422`.
 
 ```elixir
 {:ok, opts} = AudioProxy.Options.parse("f:opus/br:96/t:12.5:30/fade:0.5:1")
@@ -359,6 +387,7 @@ AudioProxy.CacheKey.derive!("br:96/f:opus", "s3://masters/piece.wav")
 | `ch` under `f:peaks` | `1` \| `2` | Peaks default to **mono** rather than following the source; `ch:2` gives per-channel pairs |
 | `dl` | filename | Sets `Content-Disposition: attachment` |
 | `cb` | opaque string | Cache-buster; participates in the cache key |
+| `exp` | positive integer, Unix seconds | Expires the URL — a `410` from this second on. The one key that does **not** participate in the cache key; see [Expiring URLs](#expiring-urls) |
 
 Decimals are accepted to three places (millisecond precision) and rejected beyond that rather than silently rounded, so float formatting can never destabilize a cache key. `-0` is collapsed to `0` at parse time: it renders as `0`, so it cannot be told apart in a cache key, and letting it into the struct would let it be told apart in the ffmpeg arguments. `dl` and `cb` values stay percent-encoded and are treated as opaque bytes.
 
@@ -416,7 +445,7 @@ Pick `pts` to match the pixel width you will draw at. `t` narrows the region the
 
 The rules about `br`, `q` and `bd:32f` come from the same principle applied one layer down: ffmpeg accepts `-b:a` on a flac encode and ignores it, so `f:flac/br:320` would be two cache keys for one file. Rejecting is cheaper than storing the duplicate.
 
-Unknown keys, repeated keys, empty segments, and valueless segments are rejected too. There is no last-write-wins and no silent ignoring, because either would let two different URLs mean the same variant. Values are also bounded above (`br` ≤ 10000, `sr` ≤ 384000, `pts` ≤ 100000, `|gain|` ≤ 100) so a mistyped URL fails here as a 422 rather than downstream as a render error, and `dl`/`cb` reject control characters. That last rule is what makes the cache key's separator sound (see below).
+Unknown keys, repeated keys, empty segments, and valueless segments are rejected too. There is no last-write-wins and no silent ignoring, because either would let two different URLs mean the same variant. Values are also bounded above (`br` ≤ 10000, `sr` ≤ 384000, `pts` ≤ 100000, `|gain|` ≤ 100, `exp` ≤ 253402300799) so a mistyped URL fails here as a 422 rather than downstream as a render error, and `dl`/`cb` reject control characters. That last rule is what makes the cache key's separator sound (see below).
 
 ### Cache-key semantics
 
@@ -424,7 +453,7 @@ Unknown keys, repeated keys, empty segments, and valueless segments are rejected
 lowercase-hex(SHA-256(normalized-options ‖ "\n" ‖ canonical-source))
 ```
 
-Normalization is what makes this deterministic: keys are sorted lexicographically, applicable defaults are materialized (`f`, the `norm` targets when `norm` is present, `pts`/`pk_fmt` under `f:peaks`), and every number is rendered minimally (`30`, never `30.0`). So `f:opus/br:96` and `br:96/f:opus` are one variant with one key, while any genuine difference, `cb` included, yields a different one. The `"\n"` is load-bearing: without it, `("", "/gain:3")` and `("gain:3", "")` would hash identical bytes, which is why control characters are refused in the only two options whose values are opaque.
+Normalization is what makes this deterministic: keys are sorted lexicographically, applicable defaults are materialized (`f`, the `norm` targets when `norm` is present, `pts`/`pk_fmt` under `f:peaks`), and every number is rendered minimally (`30`, never `30.0`). So `f:opus/br:96` and `br:96/f:opus` are one variant with one key, while any genuine difference, `cb` included, yields a different one. `exp` is the deliberate exception: it never reaches the normalized string, so it cannot reach the key ([Expiring URLs](#expiring-urls)). The `"\n"` is load-bearing: without it, `("", "/gain:3")` and `("gain:3", "")` would hash identical bytes, which is why control characters are refused in the only two options whose values are opaque.
 
 Normalization is syntactic, not semantic: `t:0`, `fade:0:0` and `gain:0` are identity renders but keep their own keys, so those spellings cost duplicate cache objects. Collapsing them is tracked as follow-up work. The property suite (`test/audio_proxy/options_property_test.exs`) holds this line: normalization is idempotent, order-insensitive, and always re-parses.
 
@@ -504,6 +533,7 @@ Failures are JSON, one shape everywhere: `{"error": "…", "message": "…"}`.
 | `413` | `source_too_large` | The source exceeds `AP_MAX_SRC_BYTES`. Renders only — `/info` describes a source of any size |
 | `415` | `undecodable_source` | The source format is not decodable, or — on `/info` — carries no audio at all |
 | `415` | `video_source` | The source contains a video stream, and this proxy serves audio only. Cover art is not video. See [Sources](#sources) |
+| `410` | `expired` | The URL's `exp` has passed. The signature was fine — see [Expiring URLs](#expiring-urls) |
 | `422` | `invalid_options` | Invalid or conflicting options; the message names the offending segment |
 | `429` | `queue_full` | A pool is full: either the render queue (or this request waited longer than `AP_RENDER_TIMEOUT` for a render slot), or `AP_MAX_PROBE_CONCURRENCY` probes are already running. `Retry-After` is set either way, and the two are deliberately indistinguishable to a client |
 | `500` | `render_failed` | The render failed for a reason that is not yours: no encoder on the host, no disk space, a failure the proxy could not classify. Worth retrying |
