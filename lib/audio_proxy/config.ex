@@ -35,6 +35,8 @@ defmodule AudioProxy.Config do
   | `AP_METRICS_BIND` | IP address literal | `127.0.0.1` |
   | `AP_METRICS_PORT` | positive integer | `9568` |
   | `AP_S3_ENDPOINT` | `http(s)://host[:port]` | unset (`nil`) — AWS proper |
+  | `AP_S3_ADDRESSING` | `virtual` \\| `path` | `:virtual`, or `:path` with an endpoint |
+  | `AP_S3_CA_BUNDLE` | readable PEM file | unset (`nil`) — system trust store |
   | `AP_ALLOW_ORIGIN` | `*` or `scheme://host[:port]` | unset (`nil`) — no CORS headers |
 
   The listener port is read from `AP_PORT`, falling back to `PORT` (which the
