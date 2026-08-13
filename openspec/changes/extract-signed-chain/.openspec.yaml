@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-08-13
+goal: Mount the pre-action plug chain from one place so the production pipeline
+  and the test pipelines cannot drift
