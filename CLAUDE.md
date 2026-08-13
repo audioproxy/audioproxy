@@ -183,6 +183,7 @@ room.
 |---|---|
 | `put_config/1` | Merges overrides into the stored config and restores them on exit. Global state, hence `async: false`. |
 | `byte_limits/1` | The two byte limits, with the caller's overrides merged over them. Requires nothing. Carries the reason the floor exists. |
+| `validate_keys!/2` | The known-key set, derived from `AudioProxy.Config.build!(%{})`. Called by `put_config/1` and `base_config/1`, not usually by a test. |
 
 **Which floor a file reaches for is decided by whether it signs.** A test that
 signs a URL or resolves a `local://` source takes `SignedRequest.base_config/1`;
@@ -201,7 +202,7 @@ have one definition and the dependency runs one way: config is the lower layer.
 | `conn/3` | A `Plug.Test` conn with request headers folded in. Call it qualified; a file importing `Plug.Test` too imports this module `except: [conn: 3]`. |
 | `header/2` | The first response header, or `nil`. |
 
-Two rules that are easy to get wrong:
+Three rules that are easy to get wrong:
 
 - **A new endpoint test starts from `base_config/1`, not a fresh literal map.**
   The floor pins every config value the request chain reads so that an
@@ -211,6 +212,17 @@ Two rules that are easy to get wrong:
   `base_config(local_root: tmp_dir, probe_timeout: 1)` reads as floor-plus-subject.
   Never bury a test's subject inside the floor, and never widen the floor to
   accommodate one file.
+- **A mistyped override is refused, not merged.** `probe_timout: 1` used to
+  install a key nothing reads and leave `probe_timeout` at whatever the
+  environment gave it — the same class of failure the floor exists to prevent,
+  one layer in. Both `base_config/1` and `put_config/1` now raise, naming every
+  unknown key — with the nearest match where jaro finds one, and with
+  `s3: %{…}` where the key is real but written a level too high. The set comes
+  from `AudioProxy.Config.build!(%{})`, including the `:s3` group — in map or
+  keyword form, since a keyword `:s3` is how the typo got through once — so
+  a new config setting is overridable the moment `lib/` defines it and no
+  support-layer edit is owed. A rejection is a finding: the key names something
+  nothing reads.
 
 `put_config/1` stays an explicit call in each file's `setup`: it writes global
 state, which is what makes `async: false` mandatory, and hiding it would make
