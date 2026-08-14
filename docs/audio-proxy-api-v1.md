@@ -114,7 +114,7 @@ The gate does not run on a cache hit, because a hit is immutable bytes that alre
 | `fade` | `in[:out]` seconds | Applied inside the trimmed region |
 | `gain` | dB, signed | Static gain |
 | `norm` | `ebu[:I[:TP[:LRA]]]` | Loudness normalization via `loudnorm`; default `-16:-1.5:11`. **Note:** proper two-pass loudnorm requires a full first pass — v1 does single-pass (good enough for previews), flag in docs |
-| `enhance` | `voice` | A named enhancement preset: high-pass, denoise, de-ess, compress, in that order, ahead of every stage above. Orthogonal to `norm` — the preset shapes dynamics, it does not hit a loudness target, and the two combine |
+| `enhance` | `voice` | A named enhancement preset: high-pass, denoise, de-ess, compress, limit, in that order, ahead of every stage above. The final limiter is what keeps the makeup gain from clipping a transient the compressor let through. Orthogonal to `norm` — the preset shapes dynamics, it does not hit a loudness target, and the two combine |
 
 **A preset value is pinned to its chain, permanently.** `enhance:voice` maps to one exact filter chain, and that is the contract rather than an implementation detail: a variant is addressed by a key derived from the *name* and served `immutable`, so a chain that changed under a name would give two different renders one cache key — a CDN keeps serving the old bytes, a cold cache produces the new ones, and no part of the URL distinguishes them. An improved chain therefore ships as a **new value** (`voice2`), and `enhance:voice` renders the same bytes it always did. An unrecognized preset name is a `422`, which is what makes adding one a safe, additive change.
 

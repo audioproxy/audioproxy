@@ -125,7 +125,8 @@ otherwise be the one route reading a source unrestricted.
 highpass=f=80,
 afftdn=nr=12:nf=-30,
 deesser=i=0.4:m=0.5:f=0.5:s=o,
-acompressor=threshold=0.125:ratio=3:attack=20:release=250:makeup=2
+acompressor=threshold=0.125:ratio=3:attack=20:release=250:makeup=2,
+alimiter=limit=0.977:level=disabled
 ```
 
 Every filter is stock ffmpeg — the preset adds no dependency and no build flag.
@@ -135,8 +136,36 @@ What each is aimed at, on speech:
 |---|---|---|
 | `highpass=f=80` | Rumble, handling noise, plosives | 80 Hz sits under a low male voice and above almost every room |
 | `afftdn=nr=12:nf=-30` | Broadband hiss | 12 dB of reduction against a −30 dBFS floor. Deliberately gentle: past roughly 20 dB the artefacts are more distracting on speech than the hiss was |
-| `deesser=i=0.4:m=0.5:f=0.5:s=o` | Sibilance, which the compressor would otherwise pump on | `i` is intensity and `f` is a **normalized** frequency, not Hz |
+| `deesser=i=0.4:m=0.5:f=0.5:s=o` | Sibilance, which the compressor would otherwise pump on | `i` is intensity and `f` is a **normalized** frequency, not Hz — see below |
 | `acompressor=threshold=0.125:…` | A wandering mic distance | 3:1 above −18 dBFS (`0.125` linear is how this filter spells it), 20 ms attack, 250 ms release, 2× makeup |
+| `alimiter=limit=0.977:level=disabled` | The transient the compressor lets past | A −0.2 dBFS ceiling. `level=disabled` matters: see below |
+
+### The de-esser's band follows the *source's* sample rate
+
+`deesser`'s `f` is a fraction of the sample rate rather than a frequency in Hz,
+and the preset runs before `aresample` — so the band it works on is a fraction
+of the **source's** rate, not of any `sr` the request asked for. The same preset
+de-esses around 11 kHz on a 44.1 kHz master and around 5.5 kHz on a 22 kHz one.
+
+This costs the cache nothing: the source is part of the cache key, so equal keys
+still imply the same source, the same argv and the same bytes. Enhancing before
+the resample also remains the right order — denoise at full bandwidth, then
+downsample. It is worth knowing when a preset sounds different on two masters
+that differ only in rate.
+
+### Why the limiter is there, and why `level=disabled`
+
+The chain shipped without a limiter, and measurement is what added it. The
+compressor's 20 ms attack lets a transient shorter than that through
+*uncompressed*, and the 2× makeup then adds its full 6 dB on top. A fixture of
+5 ms bursts peaking at **−3.1 dBFS** came back at **0.0 dBFS** — the preset
+introducing clipping that the source did not have. With `alimiter` it comes back
+at −0.2 dBFS, and the render's duration is unchanged.
+
+`level=disabled` is load-bearing rather than tidy. `alimiter`'s `level` option
+defaults to *enabled*, which auto-normalizes the output back up to full scale,
+so the obvious spelling `alimiter=limit=0.977` still measured 0.0 dBFS and read
+exactly like a limiter doing nothing.
 
 ### Why it is first
 
@@ -162,16 +191,34 @@ that says so — and a failure there is never an expectation to update, it is a
 decision between "this is a new preset" and "this would have silently
 re-rendered every cached `enhance:voice` variant".
 
-What the chain *does* is asserted separately, and spectrally:
-`command_enhance_ffmpeg_test.exs` renders a fixture built from 40 Hz rumble,
-a 200 Hz speech tone, 7 kHz sibilance and noise, then measures each band. The
-rumble drops ≥ 6 dB, the speech band moves ≤ 3 dB, the band above 6 kHz drops
-≥ 2 dB. Measured identically on ffmpeg 7.1.5 and 8.1.1. Golden bytes were
-rejected for this: they would pin the encoder and the ffmpeg version alongside
-the behaviour, and fail on a distro bump that changed nothing the preset
-promises. The band assertions state the promise itself — energy below a voice
-removed, the voice left where it was — and the middle one is what stops the
-whole test passing for a chain that merely turned everything down.
+What the chain *does* is asserted separately and spectrally, in
+`command_enhance_ffmpeg_test.exs` — **one fixture per stage**, because a single
+whole-chain assertion is not enough. An earlier version measured three bands on
+one fixture and stayed green with `acompressor` deleted; mutating each filter in
+turn showed `afftdn` was unasserted too. Two of the stages were pinned only as
+characters.
+
+| Stage | Fixture | Assertion |
+|---|---|---|
+| `highpass` | tones at 40/200/7000 Hz plus noise | below 60 Hz drops ≥ 6 dB |
+| `deesser` | the same | above 6 kHz drops ≥ 2 dB |
+| `afftdn` | broadband noise alone | overall level drops ≥ 3 dB |
+| `acompressor` | a loud half and a quiet half | the gap between them narrows ≥ 4 dB |
+| `alimiter` | 5 ms bursts over a quiet bed | no sample exceeds the ceiling |
+
+Each assertion was checked by deleting its stage and confirming that exactly
+that test fails. Two of them needed a fixture of their own to say anything at
+all: on steady tones a compressor is indistinguishable from a gain, and a
+"noise band" measured on the tone fixture reads mostly skirt leakage from the
+7 kHz tone rather than noise — which is how a first attempt at the `afftdn`
+assertion measured the wrong thing and concluded the stage was useless.
+
+A sixth assertion belongs to no stage: the speech band must move ≤ 3 dB. It is
+what stops every "drops by" line above being satisfied by `volume=-20dB`.
+
+Measured identically on ffmpeg 7.1.5 and 8.1.1. Golden bytes were rejected for
+this: they would pin the encoder and the ffmpeg version alongside the behaviour,
+and fail on a distro bump that changed nothing the preset promises.
 
 ## Why `f:peaks` runs ffmpeg twice, and why it is mono
 

@@ -114,7 +114,7 @@ Options are `/`-separated `key:value` segments between the signature and the sou
 | `fade` | `in[:out]` seconds | Fades inside the trimmed region. An omitted out-fade is `0`, not a mirror of the in |
 | `gain` | signed number dB, \|value\| ≤ 100 | Static gain |
 | `norm` | `ebu[:I[:TP[:LRA]]]` | EBU R128 loudness normalization. Targets default to `-16:-1.5:11`; ranges are I −70–−5, TP −9–0, LRA 1–50. Single-pass `loudnorm`: good for previews, not for masters |
-| `enhance` | `voice` | Enhancement preset: high-pass, denoise, de-ess, compress, applied ahead of every other filter. Independent of `norm`, and the two combine. A preset value is pinned to its chain forever — see *Presets are pinned* |
+| `enhance` | `voice` | Enhancement preset: high-pass, denoise, de-ess, compress, limit — applied ahead of every other filter, and peak-limited so the preset cannot clip a source that did not. Independent of `norm`, and the two combine. A preset value is pinned to its chain forever — see *Presets are pinned* |
 | `pts` | integer, 1–100000 | Peaks only: number of min/max pairs. Default `800` |
 | `pk_fmt` | `json` \| `dat` | Peaks only: serialization. Default `json` |
 | `dl` | filename | Sets `Content-Disposition: attachment`. Opaque, kept percent-encoded, control bytes refused |

@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: enhance preset option
-The system SHALL accept `enhance:voice`, applying a pinned conventional enhancement chain (high-pass, denoise, de-ess, compression) with a fixed position in the filter order, orthogonal to `norm:`, and SHALL treat preset values as immutable: a changed chain is a new value, never a mutation of an existing one.
+The system SHALL accept `enhance:voice`, applying a pinned conventional enhancement chain (high-pass, denoise, de-ess, compression, peak limiting) with a fixed position in the filter order, orthogonal to `norm:`, and SHALL treat preset values as immutable: a changed chain is a new value, never a mutation of an existing one.
 
 #### Scenario: Preset renders and caches as one variant
 - **WHEN** a source renders with `enhance:voice` twice with different option spellings around it

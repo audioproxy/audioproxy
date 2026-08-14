@@ -196,7 +196,8 @@ defmodule AudioProxy.Ffmpeg.CommandTest do
                "highpass=f=80," <>
                  "afftdn=nr=12:nf=-30," <>
                  "deesser=i=0.4:m=0.5:f=0.5:s=o," <>
-                 "acompressor=threshold=0.125:ratio=3:attack=20:release=250:makeup=2"
+                 "acompressor=threshold=0.125:ratio=3:attack=20:release=250:makeup=2," <>
+                 "alimiter=limit=0.977:level=disabled"
     end
 
     test "the vocabulary is exactly the presets that have a chain" do
@@ -226,7 +227,8 @@ defmodule AudioProxy.Ffmpeg.CommandTest do
                "-dn",
                "-af",
                "highpass=f=80,afftdn=nr=12:nf=-30,deesser=i=0.4:m=0.5:f=0.5:s=o," <>
-                 "acompressor=threshold=0.125:ratio=3:attack=20:release=250:makeup=2",
+                 "acompressor=threshold=0.125:ratio=3:attack=20:release=250:makeup=2," <>
+                 "alimiter=limit=0.977:level=disabled",
                "-c:a",
                "libmp3lame",
                "-b:a",
@@ -423,7 +425,13 @@ defmodule AudioProxy.Ffmpeg.CommandTest do
             "t:0:30/fade:1.5:2.25/gain:-3.5/norm:ebu:-14:-1.5:9/sr:44100",
             "t:0:0.3/fade:0.1:0.2/gain:0.001",
             "f:peaks/t:0:10/fade:1:1",
-            "norm:ebu/dl:a;b$(id).mp3/cb:x,y:z"
+            "norm:ebu/dl:a;b$(id).mp3/cb:x,y:z",
+            # The preset is the longest filtergraph the builder emits and the
+            # only one nesting `=` inside a filter's parameters
+            # (`highpass=f=80`), so the alphabet has to be shown to cover it
+            # rather than assumed to.
+            "enhance:voice",
+            "enhance:voice/t:0:30/fade:1:1/norm:ebu/gain:-3/dl:a;b$(id).mp3"
           ] do
         assert filtergraph(options) =~
                  ~r/^[a-z]+=(t=(in|out)|[A-Za-z]+)?[:=]?[-0-9.:=a-zA-Z]*(,[a-z]+=[-0-9.:=a-zA-Z]*)*$/

@@ -269,13 +269,25 @@ defmodule AudioProxy.Ffmpeg.Command do
   #     3:1 above −18 dBFS (0.125 linear, which is how this filter spells it),
   #     with a 2× makeup. Speech-radio settings: enough to even out a wandering
   #     mic distance, not enough to sound processed.
+  #   * `alimiter=limit=0.977:level=disabled` — a −0.2 dBFS ceiling, and the
+  #     stage the chain shipped without until it was measured. The compressor's
+  #     20 ms attack lets a transient shorter than that through *uncompressed*,
+  #     and the makeup then adds its full 6 dB on top: a source peaking at
+  #     −3.1 dBFS came back at 0.0, i.e. clipped, where the source had not.
+  #     With the limiter it comes back at −0.2 and the duration is unchanged.
+  #
+  #     `level=disabled` is load-bearing rather than tidy. `alimiter`'s `level`
+  #     option defaults to *enabled*, which auto-normalizes the output back up
+  #     to full scale — so the obvious `alimiter=limit=0.977` still measured
+  #     0.0 dBFS and looked like the limiter had done nothing.
   #
   # `norm` is a separate stage and stays that way; the preset shapes dynamics,
   # it does not hit a loudness target.
   @enhance_chains %{
     voice:
       "highpass=f=80,afftdn=nr=12:nf=-30,deesser=i=0.4:m=0.5:f=0.5:s=o," <>
-        "acompressor=threshold=0.125:ratio=3:attack=20:release=250:makeup=2"
+        "acompressor=threshold=0.125:ratio=3:attack=20:release=250:makeup=2," <>
+        "alimiter=limit=0.977:level=disabled"
   }
 
   # Fragment length for `f:m4a`, in microseconds. See `container_args/1`.
@@ -387,7 +399,7 @@ defmodule AudioProxy.Ffmpeg.Command do
   render unenhanced audio under an enhanced key.
 
       iex> AudioProxy.Ffmpeg.Command.enhance_chain(:voice)
-      "highpass=f=80,afftdn=nr=12:nf=-30,deesser=i=0.4:m=0.5:f=0.5:s=o,acompressor=threshold=0.125:ratio=3:attack=20:release=250:makeup=2"
+      "highpass=f=80,afftdn=nr=12:nf=-30,deesser=i=0.4:m=0.5:f=0.5:s=o,acompressor=threshold=0.125:ratio=3:attack=20:release=250:makeup=2,alimiter=limit=0.977:level=disabled"
   """
   @spec enhance_chain(Options.enhance()) :: String.t()
   def enhance_chain(preset) when is_atom(preset), do: Map.fetch!(@enhance_chains, preset)

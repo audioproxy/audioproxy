@@ -101,7 +101,7 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 - Signed URLs, the full processing-options grammar, and the cache-key rules
 - Expiring URLs: `exp:<unix-seconds>` time-boxes one URL without rotating the key, and because it is not part of the cache key, minting a fresh short-lived URL per page view still resolves to one render
 - Transcoding to MP3, AAC/M4A, Opus, Vorbis, FLAC and WAV, with trimming, fades, loudness normalisation, channel and sample-rate control
-- `enhance:voice`, a speech-cleanup preset (high-pass, denoise, de-ess, compress) behind one option value, so it renders and caches as a single variant. A preset name is pinned to its chain permanently: an improved chain ships as a new value rather than changing what an existing URL returns
+- `enhance:voice`, a speech-cleanup preset (high-pass, denoise, de-ess, compress, limit) behind one option value, so it renders and caches as a single variant. A preset name is pinned to its chain permanently: an improved chain ships as a new value rather than changing what an existing URL returns
 - Renders stream while they encode, and concurrent requests for the same variant share one render
 - Sources on a mounted directory or in S3, read by ffmpeg through a presigned URL, so a trim fetches only the bytes it needs
 - A variant store on a local directory or in S3, so the cache survives a restart and is shared between nodes, and with it `AP_SERVE_MODE=redirect`. The store can carry its own `AP_VARIANT_S3_*` credentials and endpoint, so sources and variants may live with different providers or under different principals
