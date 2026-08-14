@@ -95,10 +95,17 @@ defmodule AudioProxy.SemaphorePropertyTest do
     {pid, outcome} = start_holder(semaphore)
 
     case {expected, outcome} do
-      {:granted, :granted} -> :ok
-      {:queued, :queued} -> :ok
-      {:queue_full, {:error, {:queue_full, _retry_after}}} -> :ok
-      {expected, actual} -> flunk("model said #{inspect(expected)}, semaphore said #{inspect(actual)}")
+      {:granted, :granted} ->
+        :ok
+
+      {:queued, :queued} ->
+        :ok
+
+      {:queue_full, {:error, {:queue_full, _retry_after}}} ->
+        :ok
+
+      {expected, actual} ->
+        flunk("model said #{inspect(expected)}, semaphore said #{inspect(actual)}")
     end
 
     # A rejected caller is not part of the run's identity space — the model
