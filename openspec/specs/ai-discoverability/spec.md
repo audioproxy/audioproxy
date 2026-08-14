@@ -21,9 +21,7 @@ and then cut: `/health` already reports the version unsigned, and the repository
 is public and tagged, so an agent resolves version → docs-at-that-tag without
 the proxy publishing anything. The argument, including the case that still
 favours serving, is recorded in the archived `add-llms-txt` change.
-
 ## Requirements
-
 ### Requirement: llms.txt documents exist and conform to the format
 The repository SHALL carry `llms.txt` and `llms-full.txt` at its root, following the llms.txt convention: exactly one H1 title, a blockquote summary immediately after it, and H2-sectioned link lists; `llms-full.txt` SHALL carry the same lead plus the complete API reference, sufficient on its own to construct a correct signed URL.
 
@@ -67,11 +65,13 @@ The error mapping SHALL publish its rows as data, and a test SHALL fail when tha
 - **THEN** the test fails, so an agent validating its own HMAC against it cannot be misled
 
 ### Requirement: Documented configuration cannot drift from the implementation
-The test suite SHALL fail when the set of `AP_`-prefixed environment variables documented in the llms content differs from the set `AudioProxy.Config` reads, in either direction, and the failure SHALL name the variables that differ. The README's configuration table SHALL be held to the same comparison, being the same list written twice.
+The test suite SHALL fail when the set of `AP_`-prefixed environment variables documented in the llms content differs from the set `AudioProxy.Config` reads, in either direction, and the failure SHALL name the variables that differ.
 
 The configuration surface SHALL be published by `AudioProxy.Config` as data, so the check runs against the module's own list rather than a copy of it.
 
-Variable *names* are compared, not their default values: several defaults are derived rather than literal, and the two documents render those differently for different readers.
+Variable *names* are compared, not their default values: several defaults are derived rather than literal, and the document renders them for a reader rather than for a comparison.
+
+`llms-full.txt` SHALL be the one guarded copy. The configuration surface is documented for operators on the documentation site, which is not machine-checked against this repository; a second guarded copy in `README.md` existed only because the README carried the same table, and it does not anymore.
 
 #### Scenario: Variable added without documentation
 - **WHEN** `AudioProxy.Config` reads an `AP_`-prefixed variable that the configuration table in `llms-full.txt` does not list
@@ -88,3 +88,8 @@ Variable *names* are compared, not their default values: several defaults are de
 #### Scenario: A read that moves out of the recognised shape cannot be trimmed away
 - **WHEN** a variable's read moves to a form the call-site scan does not recognise — a module attribute, a helper whose first argument is named differently — and the variable is then removed from the published list to make that failure go away
 - **THEN** a test still fails, because the variable's name remains written in the module as a string literal, and the failure names the variable rather than accepting the narrower list
+
+#### Scenario: The README carries no configuration table to guard
+- **WHEN** the drift-guard suite runs
+- **THEN** it reads the configuration surface from `llms-full.txt` only, and no test parses a configuration table out of `README.md`
+
