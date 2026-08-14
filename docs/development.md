@@ -374,13 +374,12 @@ release that carries it — an empty section is the normal state.
 - **`norm` without an explicit `sr` now renders at the source's sample rate**
   rather than at a flat 48 kHz (`peaks-follow-the-variant`). A normalized
   variant of a 44.1 kHz source, or of a 96 kHz master, is different bytes under
-  the same key than the release before it. Two consequences for the release
-  itself: say so in the notes, and **purge the playground's variant store**
-  before announcing, so the demo does not keep serving 48 kHz variants that
-  contradict the documentation. The change was taken deliberately while no
-  third-party deployment exists — see that change's proposal for the argument,
-  and for why the same fix after the first real deployment would have needed a
-  cache-busting story instead.
+  the same key than the release before it. Say so in the notes. Nothing has to
+  be purged: the playground has no volume and no variant store attached, so it
+  renders every request and cannot hold a stale 48 kHz variant. The change was
+  taken deliberately while no third-party deployment exists — see that change's
+  proposal for the argument, and for why the same fix after the first real
+  deployment would have needed a cache-busting story instead.
 
 **Release notes are claims, and claims name their checks.** Before publishing
 notes, every Highlight must point at the automated check that demonstrates it —

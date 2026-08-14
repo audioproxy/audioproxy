@@ -10,4 +10,4 @@
 - [x] 2.3 Frame-count guard: the decode emits what the reducer budgeted, asserted rather than assumed
 ## 3. Release
 - [x] 3.1 API doc §3.1/§3.2/§3.3, `llms-full.txt` (guards enforce), `docs/ffmpeg-arguments.md` filter-order note, and the release note the byte change owes
-- [ ] 3.2 Purge the playground's variant store on release, so no stale 48 kHz variant outlives the fix
+- [x] 3.2 Purge the playground's variant store on release, so no stale 48 kHz variant outlives the fix — moot: the playground has no volume and no variant store attached, so it renders every request and can hold nothing stale. Recorded in `docs/development.md` rather than left as a release chore
