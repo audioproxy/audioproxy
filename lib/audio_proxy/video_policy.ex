@@ -119,12 +119,22 @@ defmodule AudioProxy.VideoPolicy do
   @doc """
   Asks the configured policy what to do with a video-containing probe.
 
-  Defaults to `AudioProxy.VideoPolicy.Reject`. A module that answers with
-  anything but the two verdicts is a broken policy, and this refuses the source
-  and says so in the log rather than raising: the failure belongs to the
-  embedding release, and turning it into a 500 would report it as the proxy's.
-  Refusing is also the direction the rest of this gate fails — see
-  `AudioProxy.Ffprobe.has_video?/1` on why the asymmetry runs that way.
+  Defaults to `AudioProxy.VideoPolicy.Reject`.
+
+  **A bad answer and a bad policy are different failures, handled differently
+  on purpose.** A module that implements the behaviour and returns something
+  outside the enum is a *runtime* answer this cannot use: it refuses the source
+  and says so in the log, because refusing is the direction the rest of this
+  gate fails — see `AudioProxy.Ffprobe.has_video?/1` on why the asymmetry runs
+  that way — and because one odd answer should not take a request down.
+
+  A value that is not a module, or a module not exporting `verdict/1`, is a
+  *configuration* error and raises. That is the call `AudioProxy.Config` already
+  makes: malformed values raise "so a misconfigured container fails immediately
+  instead of serving traffic with surprising defaults". A release that misspells
+  its policy module has not asked for `:reject` — it has asked for something
+  that does not exist, and substituting the default would hide a broken
+  deployment behind behaviour that looks deliberate.
   """
   @spec verdict(map()) :: verdict()
   def verdict(probe) when is_map(probe) do

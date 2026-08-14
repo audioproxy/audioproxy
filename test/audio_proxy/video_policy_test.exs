@@ -51,6 +51,14 @@ defmodule AudioProxy.VideoPolicyTest do
     def verdict(_probe), do: :transcode_the_video
   end
 
+  # Deliberately without `@behaviour`: the realistic mistake is app env pointed
+  # at a module that was never meant to be a policy, and declaring the
+  # behaviour here would make the compiler catch what the test is about.
+  defmodule NotAPolicy do
+    @moduledoc false
+    def something_else, do: :ok
+  end
+
   # Application env rather than `put_config/1`: that is the whole point of the
   # seam, and a test that installed it through the `AP_` surface would be
   # asserting the opposite of what the change decided.
@@ -117,6 +125,38 @@ defmodule AudioProxy.VideoPolicyTest do
       assert log =~ "NonsensePolicy"
       assert log =~ ":transcode_the_video"
     end
+
+    test "a policy that is not a policy raises rather than refusing" do
+      # The other half of the failure taxonomy, and the half an adversarial
+      # review found missing: the test above covers a module that answers
+      # badly, which is a *runtime* answer, and says nothing about a module
+      # that cannot answer at all.
+      #
+      # Raising is the deliberate call, not an oversight. `AudioProxy.Config`
+      # raises on malformed values so a misconfigured container fails
+      # immediately rather than serving traffic with surprising defaults, and a
+      # misspelled policy module is the same class of mistake. Falling back to
+      # `:reject` would make a broken deployment indistinguishable from a
+      # working one that happens to refuse — while logging once per request.
+      # The three shapes a misconfiguration takes: unset to a nil, pointed at
+      # something that is not a module, and pointed at a module that exists but
+      # cannot answer.
+      for broken <- [nil, :not_a_module, NotAPolicy, __MODULE__.NeverDefined] do
+        put_policy(broken)
+
+        assert_raise UndefinedFunctionError, fn -> VideoPolicy.admit(video()) end
+      end
+    end
+
+    test "a source with no video is admitted even under a broken policy" do
+      # Fail-closed, stated precisely: the raise above costs a *video* request a
+      # 500, and costs an audio-only catalogue nothing at all, because the
+      # policy is still never consulted for it. A misconfigured release serves
+      # its ordinary traffic.
+      put_policy(nil)
+
+      assert VideoPolicy.admit(audio_only()) == :ok
+    end
   end
 
   describe "egress is a different layer" do
@@ -149,20 +189,24 @@ defmodule AudioProxy.VideoPolicyTest do
       end
     end
 
-    test "no format reaches a video encoder" do
-      # `-c:v` is the token that would carry one, and the vocabulary check is
-      # the second half: an argv naming a video codec at all — as a value, in
-      # any position — would be a policy having reached egress.
-      video_codecs = ~w(mpeg4 h264 libx264 hevc libx265 vp8 vp9 av1 libaom-av1 copy)
-
+    test "no format reaches a flag outside the audio vocabulary" do
+      # Deliberately *not* a hand-written list of video codec tokens. This file
+      # shipped one, and it was the same failure mode `@image_codecs` in
+      # `AudioProxy.Ffprobe` warns about: a name missing from the list is a
+      # hole in the check, and the list can only ever be as good as whoever
+      # last remembered to extend it.
+      #
+      # `Command.allowed_flags/0` is the exhaustive version and already exists.
+      # It is hand-maintained on purpose so that adding a flag forces a review,
+      # `AudioProxy.Ffmpeg.CommandTest` asserts it against a `-c:v`/`-vf`/`-map`
+      # denylist, and `AudioProxy.Ffmpeg.CommandPropertyTest` walks generated
+      # argv against it position by position. Checking membership here is the
+      # cheap end of that same guard, and points at where the real one lives.
       for format <- ~w(mp3 aac m4a ogg opus flac wav peaks) do
         argv = build("f:#{format}")
 
-        refute "-c:v" in argv, "f:#{format} names a video encoder switch"
-
-        for codec <- video_codecs do
-          refute codec in argv, "f:#{format} carries the video codec token #{codec}"
-        end
+        assert AudioProxy.ArgvWalk.flags(argv) -- Command.allowed_flags() == [],
+               "f:#{format} emits a flag outside the audio vocabulary"
       end
     end
   end
