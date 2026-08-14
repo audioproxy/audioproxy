@@ -161,13 +161,61 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
         assert abs(max) < @expected_peak / 2
       end
 
-      # And the bucket budget is untouched, which is the whole reason the preset
-      # is allowed here and `norm` is not: every filter in the chain preserves
-      # the frame count `Peaks.Render` budgeted from the probe. A chain that
-      # re-rated the decode would show up here as a different span.
+      # And the bucket budget is untouched, which is what makes every filter
+      # safe here: the chain preserves the frame count `Peaks.Render` budgeted
+      # from the probe. A chain that re-rated the decode would show up here as a
+      # different span.
       assert enhanced["samples_per_pixel"] == plain["samples_per_pixel"]
       assert enhanced["sample_rate"] == plain["sample_rate"]
       assert length(enhanced["data"]) == length(plain["data"])
+    end
+
+    # `gain` is arithmetic on every sample, so the picture scales with it and
+    # nothing else moves. Both halves are asserted: a waveform that ignored
+    # `gain` would sit under a player that did not.
+    test "gain scales the picture and leaves the buckets alone", %{port: port} do
+      plain = json("/f:peaks/pts:32/plain/local://sine.wav", port)
+      quieter = json("/f:peaks/pts:32/gain:-6/plain/local://sine.wav", port)
+
+      # −6 dB is a factor of 0.501, and the source is a sine at a known
+      # amplitude, so this is an equality within the sine's own band.
+      for {min, max} <- pairs(quieter) do
+        assert_in_delta min, -@expected_peak / 2, @signal_tolerance
+        assert_in_delta max, @expected_peak / 2, @signal_tolerance
+      end
+
+      assert_same_buckets(quieter, plain)
+    end
+
+    # The case the rate fix was for. Single-pass `loudnorm` hands its output
+    # back at 192 kHz, and the reducer budgets its buckets from the source's
+    # probed rate — so before `AudioProxy.Ffmpeg.Command` resampled back to that
+    # rate, the decode outran the budget and the overrun folded into the final
+    # bucket as a spike, under a header still claiming the source's rate.
+    test "a normalized render draws a normalized waveform over the same buckets",
+         %{port: port} do
+      plain = json("/f:peaks/pts:32/plain/local://sine.wav", port)
+      normalized = json("/f:peaks/pts:32/norm:ebu/plain/local://sine.wav", port)
+
+      # A full-amplitude 1 kHz sine measures near −4 LUFS, so normalizing it to
+      # −16 attenuates by roughly 12 dB. Bounded on both sides rather than
+      # pinned: single-pass loudnorm is an estimate, and what this asserts is
+      # that the normalization reached the picture at all.
+      loudest = normalized["data"] |> Enum.map(&abs/1) |> Enum.max()
+
+      assert loudest < @expected_peak / 2
+      assert loudest > @silence_ceiling
+
+      assert_same_buckets(normalized, plain)
+
+      # And no final-bucket spike: the last pair is drawn from a full bucket of
+      # the same steady sine as every other, which is exactly what an overrun
+      # folded into it would break.
+      {last_min, last_max} = normalized |> pairs() |> List.last()
+      {first_min, first_max} = normalized |> pairs() |> hd()
+
+      assert_in_delta last_min, first_min, @signal_tolerance
+      assert_in_delta last_max, first_max, @signal_tolerance
     end
 
     test "samples_per_pixel spans the trimmed region, not the whole source", %{port: port} do
@@ -322,6 +370,15 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
   # cached variant against an empty string and passing.
   defp body(%{head: head, body: body}) do
     if head =~ "transfer-encoding: chunked", do: RawHttp.dechunk(body), else: body
+  end
+
+  # What must not move when a filter changes the samples: the grid the pairs are
+  # drawn over, and the rate the header says they describe.
+  defp assert_same_buckets(processed, plain) do
+    assert processed["samples_per_pixel"] == plain["samples_per_pixel"]
+    assert processed["sample_rate"] == plain["sample_rate"]
+    assert processed["length"] == plain["length"]
+    assert length(processed["data"]) == length(plain["data"])
   end
 
   defp pairs(peaks) do

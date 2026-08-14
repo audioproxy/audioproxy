@@ -299,6 +299,51 @@ defmodule AudioProxy.Ffprobe do
   end
 
   @doc """
+  The source properties `AudioProxy.Ffmpeg.Command.build/3` takes, read off a
+  probe.
+
+  A third mapping alongside `contract/2` and `has_video?/1`, and pure for the
+  same reason: it is the render path's answer to "what is this source", where
+  `contract/2` is `/info`'s. They read the same audio stream and must not be
+  able to disagree about it, which is why this lives here rather than in the
+  render action.
+
+  Only keys the probe actually answered are present — an absent key is what
+  `build/3` reads as "fall back", so a `nil` value would have to be handled
+  twice. A rate ffprobe could not report and a lossy source's absent bit depth
+  are both ordinary, not errors.
+
+  `bits_per_raw_sample`/`bits_per_sample` are integers and `bd` is a token, so
+  the mapping is explicit and deliberately partial: 16 and 24 are the depths a
+  source can wear that `bd` also spells. A 32-bit source is *not* mapped, because
+  the depth alone cannot tell `pcm_s32le` from `pcm_f32le` and `bd:32f` means
+  the float one; it falls back to 16-bit, exactly as an unprobed source does.
+
+      iex> AudioProxy.Ffprobe.source_properties(%{"streams" => [
+      ...>   %{"codec_type" => "audio", "sample_rate" => "44100",
+      ...>     "bits_per_raw_sample" => 24}
+      ...> ]})
+      [sample_rate: 44100, bit_depth: :bd24]
+
+      iex> AudioProxy.Ffprobe.source_properties(%{"streams" => [
+      ...>   %{"codec_type" => "audio", "codec_name" => "mp3",
+      ...>     "sample_rate" => "44100", "bits_per_sample" => 0}
+      ...> ]})
+      [sample_rate: 44100]
+  """
+  @spec source_properties(map()) :: keyword()
+  def source_properties(probe) when is_map(probe) do
+    case probe |> Map.get("streams") |> audio_stream() do
+      nil ->
+        []
+
+      stream ->
+        [sample_rate: positive_integer(stream["sample_rate"]), bit_depth: depth_token(stream)]
+        |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    end
+  end
+
+  @doc """
   The probe deadline in milliseconds — `AP_PROBE_TIMEOUT` as the subprocess
   sees it.
   """
@@ -479,6 +524,12 @@ defmodule AudioProxy.Ffprobe do
   defp bit_depth(stream) do
     positive_integer(stream["bits_per_raw_sample"]) || positive_integer(stream["bits_per_sample"])
   end
+
+  # The depths a source can wear that `bd` also spells. See
+  # `source_properties/1` for why 32 is deliberately absent.
+  @depth_tokens %{16 => :bd16, 24 => :bd24}
+
+  defp depth_token(stream), do: Map.get(@depth_tokens, bit_depth(stream))
 
   # Codecs that are a picture rather than a moving image, for the case where no
   # disposition says so. Deliberately **not** a complete enumeration of every

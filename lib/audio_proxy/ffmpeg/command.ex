@@ -84,39 +84,48 @@ defmodule AudioProxy.Ffmpeg.Command do
       it — `gain` with `norm` means "normalize, then offset".
     * `aresample` after `loudnorm`, because single-pass `loudnorm` resamples
       its output to 192 kHz. When `norm` is given without `sr` we therefore
-      append `aresample=48000` ourselves; without it every normalized render
-      would be a 192 kHz file (or a silent auto-resample by the encoder).
-      48 kHz is the API's own lossy ceiling (§3.1) and universally supported,
-      but it does mean `norm` on a 96 kHz lossless master downsamples. Fixing
-      that needs the source's real rate, which this module deliberately does
-      not know.
+      append an `aresample` ourselves; without it every normalized render would
+      be a 192 kHz file (or a silent auto-resample by the encoder). The target
+      is the **source's own rate** — §3.1 defines an absent `sr` as "follow the
+      source", and a normalized render is not an exception — clamped to the
+      lossy ceiling for a lossy format, since a 96 kHz master is a legitimate
+      source for an mp3. Only where no probe supplied a rate does it fall back
+      to 48 kHz, which is the ceiling itself and universally supported. See
+      `resample/2`.
     * `afade` last, so the fade shape survives the stages above it.
 
   ## What the builder does not know
 
-  `build/3` takes a `t:source/0` because two decisions genuinely cannot be made
-  from the options alone. The protocol whitelist is one, and it is required.
-  The other is optional: with no `bd`, a lossless variant should follow the
-  source's own bit depth, the way `sr` follows its sample rate (§3.1). Until
-  the `/info` probe exists to supply it, the fallback is 16-bit — documented,
-  not silent.
+  `build/3` takes a `t:source/0` because three decisions genuinely cannot be
+  made from the options alone. The protocol whitelist is one, and it is
+  required. The other two are the source's own properties, and both exist
+  because §3.1 defines an absent option as "follow the source": with no `bd` a
+  lossless variant follows the source's bit depth, and with no `sr` a
+  normalized render resamples back to the source's rate. Both are optional
+  keys, and omitting either keeps the documented fallback — 16-bit and 48 kHz
+  — rather than guessing.
+
+  The render action supplies both from the probe its audio-only gate already
+  runs, so on the mounted pipeline they are always present; a caller that
+  builds argv without a probe (the suite, mostly) gets the fallbacks.
 
   ## Peaks
 
   `f:peaks` builds raw interleaved `s16le` PCM on stdout — the input to
-  `AudioProxy.Peaks`, not its output. Encoding and loudness options are already
-  refused for peaks by `AudioProxy.Options`; `t`, `ch`, `fade` and `enhance`
-  apply, since all four change the samples a waveform would be drawn from — a
-  picture that disagreed with the audio playing under it would be the defect.
+  `AudioProxy.Peaks`, not its output. Encoding options are refused for peaks by
+  `AudioProxy.Options`; every option that changes the samples applies — `t`,
+  `ch`, `fade`, `enhance`, `gain` and `norm` — since a picture that disagreed
+  with the audio playing under it would be the defect.
 
-  The preset is safe here in a way `norm` is not, and the difference is frame
-  count rather than taste: every filter in the chain is rate-preserving, so the
-  decode emits exactly the frames `AudioProxy.Peaks.Render` budgeted from the
-  probe (measured frame-exact at 220500 for a 5 s 44.1 kHz source, against
-  240000 once `loudnorm` re-rates the decode). `ch` is the one
-  option peaks read differently: absent, it means mono rather than "follow the
-  source", because the reducer has to know the interleaving up front and a
-  waveform UI draws one shape.
+  Frame count is what makes that safe, and it is a property of the chain rather
+  than of taste: every filter is rate-preserving, and the one that is not
+  (`loudnorm`, which hands back 192 kHz) is followed by an `aresample` back to
+  the source's own rate. So the decode emits the frames
+  `AudioProxy.Peaks.Render` budgeted from its probe, and the `sample_rate` the
+  header reports describes the samples actually reduced. `ch` is the one option
+  peaks read differently: absent, it means mono rather than "follow the source",
+  because the reducer has to know the interleaving up front and a waveform UI
+  draws one shape.
   """
 
   alias AudioProxy.{Config, Options}
@@ -127,9 +136,13 @@ defmodule AudioProxy.Ffmpeg.Command do
   `:type` is the resolved source's tag (`AudioProxy.Source.Type.tag/0`) and is
   **required**: it is what the input protocol whitelist is derived from, and a
   default would be a guess about which side of the network/filesystem boundary
-  this render sits on. `:bit_depth` is optional, and exists because a lossless
-  variant cannot pick a sane default without knowing the source's depth;
-  omitting it keeps the documented 16-bit fallback.
+  this render sits on.
+
+  `:bit_depth` and `:sample_rate` are optional and are the source's own, as the
+  probe reported them. Each exists because an option §3.1 documents as
+  following the source cannot do so without them: a lossless variant with no
+  `bd` follows the depth, and a normalized render with no `sr` resamples back to
+  the rate. Omitting either keeps the documented fallback (16-bit, 48 kHz).
 
   This does not weaken the round-trip invariant, but it is worth stating the
   invariant precisely. The cache key hashes the normalized options *and* the
@@ -146,7 +159,11 @@ defmodule AudioProxy.Ffmpeg.Command do
   set changes a single output byte, so two deployments still render identical
   variants for identical keys.
   """
-  @type source :: [type: source_type(), bit_depth: Options.bit_depth()]
+  @type source :: [
+          type: source_type(),
+          bit_depth: Options.bit_depth(),
+          sample_rate: pos_integer()
+        ]
 
   @typedoc "A resolved source's type tag, as its module reports it."
   @type source_type :: :local | :s3 | :http
@@ -252,7 +269,9 @@ defmodule AudioProxy.Ffmpeg.Command do
 
   @peaks_content_types %{json: "application/json", dat: "application/octet-stream"}
 
-  # loudnorm's output rate; see the moduledoc's filter-order note.
+  # Where a normalized render lands when no probe said what the source's rate
+  # was. The lossy ceiling, which is also universally supported. See
+  # `resample/2` and the moduledoc's filter-order note.
   @loudnorm_output_rate 48_000
 
   # The pinned preset chains. Each value maps to exactly these characters
@@ -327,6 +346,14 @@ defmodule AudioProxy.Ffmpeg.Command do
       ...>   type: :local, bit_depth: :bd24)
       ...> |> Enum.take(-5)
       ["-c:a", "pcm_s24le", "-f", "wav", "pipe:1"]
+
+  And a normalized render follows the source's sample rate the same way:
+
+      iex> {:ok, opts} = AudioProxy.Options.parse("f:flac/norm:ebu")
+      iex> AudioProxy.Ffmpeg.Command.build(opts, "/srv/audio/k.aif",
+      ...>   type: :local, sample_rate: 96_000)
+      ...> |> Enum.slice(-7, 2)
+      ["-af", "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=96000"]
   """
   @spec build(Options.t(), String.t(), source()) :: [String.t()]
   def build(%Options{} = options, input_url, source) when is_binary(input_url) do
@@ -335,7 +362,7 @@ defmodule AudioProxy.Ffmpeg.Command do
       input_args(options) ++
       ["-i", input_url] ++
       @audio_only ++
-      filter_args(options) ++
+      filter_args(options, source) ++
       channel_args(options) ++
       output_args(options, source) ++
       ["-f", muxer(options), "pipe:1"]
@@ -467,19 +494,19 @@ defmodule AudioProxy.Ffmpeg.Command do
 
   ## Filters
 
-  defp filter_args(%Options{} = options) do
-    case Enum.filter(filters(options), & &1) do
+  defp filter_args(%Options{} = options, source) do
+    case Enum.filter(filters(options, source), & &1) do
       [] -> []
       filters -> ["-af", Enum.join(filters, ",")]
     end
   end
 
-  defp filters(%Options{} = options) do
+  defp filters(%Options{} = options, source) do
     [
       enhance(options.enhance),
       loudnorm(options.norm),
       volume(options.gain),
-      resample(options),
+      resample(options, source),
       fade_in(options.fade_in),
       fade_out(options)
     ]
@@ -497,11 +524,30 @@ defmodule AudioProxy.Ffmpeg.Command do
   defp volume(nil), do: nil
   defp volume(gain), do: "volume=#{number(gain)}dB"
 
-  # An explicit `sr` always resamples. Without one, `norm` still forces a
-  # resample, because single-pass loudnorm hands back 192 kHz.
-  defp resample(%Options{sample_rate: nil, norm: nil}), do: nil
-  defp resample(%Options{sample_rate: nil}), do: "aresample=#{@loudnorm_output_rate}"
-  defp resample(%Options{sample_rate: rate}), do: "aresample=#{rate}"
+  # An explicit `sr` always resamples, to exactly what it asked for. Without
+  # one, `norm` still forces a resample — single-pass loudnorm hands back
+  # 192 kHz — and the target is then the *source's* rate, because that is what
+  # an absent `sr` means (§3.1). A lossy format is clamped to the ceiling §3.1
+  # would have refused an explicit `sr` above; nothing is refused here, since a
+  # 96 kHz master is a perfectly good source for an mp3.
+  #
+  # With no probed rate the fallback is 48 kHz, the same value this emitted
+  # unconditionally before the probe reached it. It is documented rather than
+  # silent, and on the mounted pipeline it is unreachable: the audio-only gate
+  # probes every MISS.
+  defp resample(%Options{sample_rate: nil, norm: nil}, _source), do: nil
+
+  defp resample(%Options{sample_rate: nil} = options, source) do
+    "aresample=#{normalized_rate(options.format, Keyword.get(source, :sample_rate))}"
+  end
+
+  defp resample(%Options{sample_rate: rate}, _source), do: "aresample=#{rate}"
+
+  defp normalized_rate(_format, nil), do: @loudnorm_output_rate
+
+  defp normalized_rate(format, rate) do
+    if Options.lossy?(format), do: min(rate, Options.lossy_sample_rate_cap()), else: rate
+  end
 
   defp fade_in(nil), do: nil
   defp fade_in(+0.0), do: nil
