@@ -15,7 +15,7 @@ defmodule AudioProxy.Semaphore do
   outcomes:
 
     * `:granted` — a slot was free and the caller now holds it
-    * `:queued` — the caller is in the FIFO queue and will receive
+    * `:queued` — the caller is in the wait queue and will receive
       `{AudioProxy.Semaphore, :granted}` when its turn comes
     * `{:error, {:queue_full, retry_after}}` — no slot, no room to wait
 
@@ -28,6 +28,39 @@ defmodule AudioProxy.Semaphore do
   with the caller's own timeout. `AudioProxy.RenderCoordinator` uses `request/1`
   directly, because a coordinator that blocked waiting for a slot could not
   answer the joins that are coalescing onto it.
+
+  ## Admission classes
+
+  The wait queue is ordered rather than flat: `interactive > high > normal >
+  low`. A freed slot goes to the *oldest waiter of the highest non-empty
+  class*, and FIFO holds within a class, so `classes/0` is a tie-breaking order
+  on top of arrival order rather than a replacement for it.
+
+  `interactive` is the default, which is what makes the whole mechanism
+  invisible: a caller that says nothing is in the one class nothing can outrank
+  and nothing can displace, queued behind exactly the callers that were already
+  in front of it. A workload where nobody speaks a class is plain FIFO, and
+  `AudioProxy.SemaphorePropertyTest` compares it against a FIFO model to keep it
+  that way. Nothing in this repository passes `:class` today; the classes exist
+  for callers that have background work to defer — cache warming, batch
+  rendering — and want it to yield to a live listener.
+
+  When the queue is full, an arrival that outranks something queued displaces
+  the *newest* waiter of the lowest non-`interactive` class present: the newest
+  has waited least, so displacing it wastes the least sunk waiting. The victim
+  receives `{AudioProxy.Semaphore, {:displaced, retry_after}}` — a reply
+  distinct from queue-full, and retryable the same way. An arrival that
+  outranks nothing queued is refused with `{:queue_full, retry_after}`, exactly
+  as before.
+
+  **Starvation of the lower classes is the contract, not a defect.** There is
+  no aging: under sustained `interactive` load, `low` waits indefinitely and is
+  displaced first. That is safe because deferred work is not lost — a render
+  that never got its background slot is still rendered lazily the moment
+  someone asks for it directly — and it is visible, because every event carries
+  per-class depth. A scheduler that let batch work overtake a listener would be
+  trading the one latency the proxy is judged on for throughput nobody is
+  waiting on.
 
   ## One slot per process, released by exit if not by hand
 
@@ -83,12 +116,21 @@ defmodule AudioProxy.Semaphore do
   | `[:audio_proxy, :semaphore, :rejected]` | `held`, `queued`, `retry_after` | the queue was full |
   | `[:audio_proxy, :semaphore, :released]` | `held`, `queued`, `duration` | a holder gave its slot back |
   | `[:audio_proxy, :semaphore, :abandoned]` | `held`, `queued` | a waiter left the queue before its turn |
+  | `[:audio_proxy, :semaphore, :displaced]` | `held`, `queued`, `retry_after` | a waiter was displaced by a higher class |
 
   `held` and `queued` are the occupancy and depth *after* the event; `wait` and
   `duration` are native time units. Metadata is always `%{capacity:,
-  queue_size:}`. `:abandoned` is one more event than `design.md` listed, and it
-  is here so that a queue draining by attrition — clients giving up — does not
+  queue_size:, class:}`, where `class` is the class of whoever the event is
+  about — the caller granted, queued, rejected or displaced, or the holder that
+  released. `:abandoned` is one more event than `design.md` listed, and it is
+  here so that a queue draining by attrition — clients giving up — does not
   leave `queued` reading high until the next unrelated event.
+
+  Every event also carries `queued_interactive`, `queued_high`, `queued_normal`
+  and `queued_low`: the depth of *each* class, not just the one the event is
+  about. Reporting only the event's own class would publish a `low` depth that
+  goes stale for as long as `low` is starved — which is precisely the state an
+  operator needs to see, and precisely when no `low` event fires.
 
   `AudioProxy.Metrics` counts `:rejected` from this set and takes its occupancy
   gauges from `stats/2` instead, so the accuracy of what it publishes does not
@@ -102,6 +144,24 @@ defmodule AudioProxy.Semaphore do
   @name __MODULE__
 
   @telemetry [:audio_proxy, :semaphore]
+
+  # Highest first. The list *is* the order — grant scans it front to back,
+  # eviction scans it back to front — so there is no separate rank table to
+  # keep in step with it.
+  @classes [:interactive, :high, :normal, :low]
+
+  # `interactive` is not evictable: a listener's patience budget is not a
+  # batch's to spend.
+  #
+  # Deliberately redundant. `victim/2` only ever considers classes *below* the
+  # arrival, and nothing is below the top class — so with `interactive` first
+  # in `@classes` this subtraction changes no outcome today, and removing
+  # either lock on its own leaves the suite green (measured). It earns its keep
+  # against the day a class is added above `interactive`, which would make a
+  # listener displaceable through the ordering alone.
+  @evictable @classes -- [:interactive]
+
+  @empty_order Map.new(@classes, &{&1, :queue.new()})
 
   # Slot-hold durations kept for the `Retry-After` average. Enough to smooth a
   # single outlier, short enough to track a change in what is being rendered.
@@ -121,7 +181,10 @@ defmodule AudioProxy.Semaphore do
   @typedoc "Seconds a rejected caller is told to wait. Always at least 1."
   @type retry_after :: pos_integer()
 
-  @typedoc "What `request/1` answers. See the moduledoc."
+  @typedoc "An admission class. See *Admission classes* in the moduledoc."
+  @type class :: :interactive | :high | :normal | :low
+
+  @typedoc "What `request/2` answers. See the moduledoc."
   @type outcome ::
           :granted
           | :queued
@@ -141,7 +204,7 @@ defmodule AudioProxy.Semaphore do
     :queue_size,
     held: %{},
     waiters: %{},
-    order: :queue.new(),
+    order: @empty_order,
     samples: []
   ]
 
@@ -172,31 +235,66 @@ defmodule AudioProxy.Semaphore do
   """
   @spec events() :: [:telemetry.event_name()]
   def events do
-    Enum.map([:acquired, :queued, :rejected, :released, :abandoned], &(@telemetry ++ [&1]))
+    Enum.map(
+      [:acquired, :queued, :rejected, :released, :abandoned, :displaced],
+      &(@telemetry ++ [&1])
+    )
   end
+
+  @doc """
+  The admission classes, highest first.
+
+  Public so that a caller choosing a class, or a consumer labelling a metric by
+  one, reads the order off the module that enforces it rather than restating it.
+  """
+  @spec classes() :: [class()]
+  def classes, do: @classes
 
   @doc """
   Asks for a slot for the calling process, answering immediately.
 
   See the moduledoc for the three outcomes. A `:queued` caller receives
   `{AudioProxy.Semaphore, :granted}` when a slot comes free, and must then treat
-  itself as a holder — including releasing it.
+  itself as a holder — including releasing it. It may instead receive
+  `{AudioProxy.Semaphore, {:displaced, retry_after}}`, which means a higher
+  class took its place in a full queue and it is no longer waiting; only a
+  caller that named a class below `interactive` can receive it.
+
+  Options:
+
+    * `:class` — one of `classes/0`, defaulting to `:interactive`. See
+      *Admission classes* in the moduledoc.
   """
-  @spec request(GenServer.server()) :: outcome()
-  def request(server \\ @name) do
-    GenServer.call(server, {:request, self()})
+  @spec request(GenServer.server(), keyword()) :: outcome()
+  def request(server \\ @name, opts \\ []) do
+    GenServer.call(server, {:request, self(), class!(opts)})
+  end
+
+  defp class!(opts) do
+    case Keyword.get(opts, :class, :interactive) do
+      class when class in @classes ->
+        class
+
+      other ->
+        raise ArgumentError,
+              "unknown admission class #{inspect(other)}, expected one of #{inspect(@classes)}"
+    end
   end
 
   @doc """
   Takes a slot for the calling process, waiting for one if the queue has room.
 
   Returns `:ok`, `{:error, {:queue_full, retry_after}}` when there was no room
-  to wait, `{:error, :timeout}` when `:timeout` elapsed first, or
-  `{:error, :already_held}`. Options:
+  to wait, `{:error, {:displaced, retry_after}}` when a higher class took the
+  place this caller was waiting in, `{:error, :timeout}` when `:timeout`
+  elapsed first, or `{:error, :already_held}`. Options:
 
     * `:timeout` — how long to wait for a queued slot. Defaults to `:infinity`,
       because the thing that bounds a render is `AP_RENDER_TIMEOUT` and a
       shorter wait here would only turn a queued request into a failed one.
+    * `:class` — the admission class, defaulting to `:interactive`. A caller
+      that leaves it alone can never be displaced, so it never sees the
+      `:displaced` error above.
     * `:server` — which semaphore, for tests running their own.
 
   A timeout releases whatever the race may have granted, so it does not leak a
@@ -208,7 +306,7 @@ defmodule AudioProxy.Semaphore do
     server = Keyword.get(opts, :server, @name)
     timeout = Keyword.get(opts, :timeout, :infinity)
 
-    case request(server) do
+    case request(server, Keyword.take(opts, [:class])) do
       :granted -> :ok
       :queued -> await_grant(server, timeout)
       {:error, _reason} = error -> error
@@ -218,14 +316,18 @@ defmodule AudioProxy.Semaphore do
   defp await_grant(server, timeout) do
     receive do
       {__MODULE__, :granted} -> :ok
+      {__MODULE__, {:displaced, retry_after}} -> {:error, {:displaced, retry_after}}
     after
       timeout ->
         release(server)
 
         # `release/1` is a call, so the server has already handled it and
-        # anything it sent is in this mailbox. Nothing can arrive later.
+        # anything it sent is in this mailbox. Nothing can arrive later. A
+        # displacement is drained here too: it is the same stray message with
+        # the same claim on the mailbox, and it is now moot either way.
         receive do
           {__MODULE__, :granted} -> :ok
+          {__MODULE__, {:displaced, _retry_after}} -> :ok
         after
           0 -> :ok
         end
@@ -314,7 +416,7 @@ defmodule AudioProxy.Semaphore do
   end
 
   @impl true
-  def handle_call({:request, pid}, _from, state) do
+  def handle_call({:request, pid, class}, _from, state) do
     cond do
       Map.has_key?(state.held, pid) ->
         {:reply, {:error, :already_held}, state}
@@ -325,14 +427,19 @@ defmodule AudioProxy.Semaphore do
         {:reply, {:error, :already_held}, state}
 
       map_size(state.held) < capacity(state) ->
-        {:reply, :granted, hold(state, pid, Process.monitor(pid), 0)}
+        {:reply, :granted, hold(state, pid, Process.monitor(pid), 0, class)}
 
-      map_size(state.waiters) >= queue_size(state) ->
-        {retry_after, state} = reject(state)
-        {:reply, {:error, {:queue_full, retry_after}}, state}
+      map_size(state.waiters) < queue_size(state) ->
+        {:reply, :queued, enqueue(state, pid, class)}
+
+      # Full. Either this arrival outranks something displaceable, or it is
+      # refused exactly as it was before classes existed.
+      victim = victim(state, class) ->
+        {:reply, :queued, state |> displace(victim) |> enqueue(pid, class)}
 
       true ->
-        {:reply, :queued, enqueue(state, pid)}
+        {retry_after, state} = reject(state, class)
+        {:reply, {:error, {:queue_full, retry_after}}, state}
     end
   end
 
@@ -363,31 +470,61 @@ defmodule AudioProxy.Semaphore do
 
   ## Slots
 
-  defp hold(state, pid, monitor, waited) do
-    state = %{
-      state
-      | held: Map.put(state.held, pid, %{monitor: monitor, started_at: System.monotonic_time()})
-    }
+  defp hold(state, pid, monitor, waited, class) do
+    slot = %{monitor: monitor, started_at: System.monotonic_time(), class: class}
 
-    emit(state, :acquired, %{wait: waited})
+    state = %{state | held: Map.put(state.held, pid, slot)}
+
+    emit(state, :acquired, %{wait: waited}, class)
   end
 
-  defp enqueue(state, pid) do
-    waiter = %{monitor: Process.monitor(pid), queued_at: System.monotonic_time()}
+  defp enqueue(state, pid, class) do
+    waiter = %{monitor: Process.monitor(pid), queued_at: System.monotonic_time(), class: class}
 
     state = %{
       state
       | waiters: Map.put(state.waiters, pid, waiter),
-        order: :queue.in(pid, state.order)
+        order: Map.update!(state.order, class, &:queue.in(pid, &1))
     }
 
-    emit(state, :queued, %{})
+    emit(state, :queued, %{}, class)
   end
 
-  defp reject(state) do
+  defp reject(state, class) do
     retry_after = estimate(state)
 
-    {retry_after, emit(state, :rejected, %{retry_after: retry_after})}
+    {retry_after, emit(state, :rejected, %{retry_after: retry_after}, class)}
+  end
+
+  # The lowest-class waiter this arrival outranks, newest first, or `nil` if it
+  # outranks nothing queued. `@evictable` is scanned back to front — lowest
+  # class first — and `interactive` is not in it, so no amount of rank
+  # arithmetic can reach a listener.
+  defp victim(state, class) do
+    @evictable
+    |> Enum.reverse()
+    |> Enum.take_while(&(&1 != class))
+    |> Enum.find_value(fn candidate ->
+      case :queue.out_r(state.order[candidate]) do
+        {{:value, pid}, rest} -> {candidate, pid, rest}
+        {:empty, _rest} -> nil
+      end
+    end)
+  end
+
+  # Drops the displaced waiter and tells it so. The reply is distinct from
+  # queue-full because the two are distinguishable to the caller — it *was*
+  # waiting, and something outranked it — even though both mean "come back".
+  defp displace(state, {class, pid, rest}) do
+    {waiter, waiters} = Map.pop!(state.waiters, pid)
+    Process.demonitor(waiter.monitor, [:flush])
+
+    state = %{state | waiters: waiters, order: Map.put(state.order, class, rest)}
+    retry_after = estimate(state)
+
+    send(pid, {__MODULE__, {:displaced, retry_after}})
+
+    emit(state, :displaced, %{retry_after: retry_after}, class)
   end
 
   # One function for every way a process stops mattering to this module —
@@ -402,7 +539,7 @@ defmodule AudioProxy.Semaphore do
         duration = System.monotonic_time() - slot.started_at
 
         %{state | held: held, samples: sample(state.samples, duration)}
-        |> emit(:released, %{duration: duration})
+        |> emit(:released, %{duration: duration}, slot.class)
         |> grant_next()
 
       waiter = Map.get(state.waiters, pid) ->
@@ -418,9 +555,9 @@ defmodule AudioProxy.Semaphore do
         %{
           state
           | waiters: Map.delete(state.waiters, pid),
-            order: :queue.delete(pid, state.order)
+            order: Map.update!(state.order, waiter.class, &:queue.delete(pid, &1))
         }
-        |> emit(:abandoned, %{})
+        |> emit(:abandoned, %{}, waiter.class)
 
       true ->
         state
@@ -441,7 +578,7 @@ defmodule AudioProxy.Semaphore do
           send(pid, {__MODULE__, :granted})
 
           state
-          |> hold(pid, waiter.monitor, System.monotonic_time() - waiter.queued_at)
+          |> hold(pid, waiter.monitor, System.monotonic_time() - waiter.queued_at, waiter.class)
           |> grant_next()
       end
     else
@@ -449,19 +586,24 @@ defmodule AudioProxy.Semaphore do
     end
   end
 
-  # Pops the oldest waiter. `order` and `waiters` hold exactly the same pids —
-  # `enqueue/2` adds to both and `forget/2` removes from both — so a pid in the
-  # queue is always still waiting, and `Map.pop!/2` asserts that rather than
-  # papering over a drift between the two.
-  defp next_waiter(state) do
-    case :queue.out(state.order) do
-      {:empty, order} ->
-        {nil, %{state | order: order}}
+  # Pops the oldest waiter of the highest non-empty class. `order` and
+  # `waiters` hold exactly the same pids — `enqueue/3` adds to both, `forget/2`
+  # and `displace/2` remove from both — so a pid in a queue is always still
+  # waiting, and `Map.pop!/2` asserts that rather than papering over a drift
+  # between the two.
+  defp next_waiter(state), do: next_waiter(state, @classes)
 
-      {{:value, pid}, order} ->
+  defp next_waiter(state, []), do: {nil, state}
+
+  defp next_waiter(state, [class | lower]) do
+    case :queue.out(state.order[class]) do
+      {:empty, _rest} ->
+        next_waiter(state, lower)
+
+      {{:value, pid}, rest} ->
         {waiter, waiters} = Map.pop!(state.waiters, pid)
 
-        {{pid, waiter}, %{state | order: order, waiters: waiters}}
+        {{pid, waiter}, %{state | order: Map.put(state.order, class, rest), waiters: waiters}}
     end
   end
 
@@ -490,14 +632,28 @@ defmodule AudioProxy.Semaphore do
 
   ## Telemetry
 
-  defp emit(state, event, measurements) do
+  defp emit(state, event, measurements, class) do
+    occupancy =
+      Map.merge(depths(state), %{
+        held: map_size(state.held),
+        queued: map_size(state.waiters)
+      })
+
     :telemetry.execute(
       @telemetry ++ [event],
-      Map.merge(measurements, %{held: map_size(state.held), queued: map_size(state.waiters)}),
-      %{capacity: capacity(state), queue_size: queue_size(state)}
+      Map.merge(measurements, occupancy),
+      %{capacity: capacity(state), queue_size: queue_size(state), class: class}
     )
 
     state
+  end
+
+  # `:queue.len/1` is O(length) and this runs on every event, but every queue is
+  # bounded by `AP_QUEUE_SIZE` and their lengths sum to `map_size(waiters)` —
+  # so this is the same walk the module already pays for an abandonment, once
+  # per event rather than once per waiter.
+  defp depths(state) do
+    Map.new(@classes, fn class -> {:"queued_#{class}", :queue.len(state.order[class])} end)
   end
 
   ## Limits

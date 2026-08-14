@@ -60,6 +60,137 @@ defmodule AudioProxy.SemaphorePropertyTest do
     end
   end
 
+  @model_capacity 2
+  @model_queue_size 3
+
+  property "classless traffic is indistinguishable from plain FIFO" do
+    # Admission classes are only invisible if nothing about a classless
+    # workload changed, and "nothing changed" is a claim about *every*
+    # interleaving of arrivals and releases rather than about the handful this
+    # suite writes out. So the FIFO the semaphore had before classes existed is
+    # written here as a model — a list, a queue, and no notion of a class — and
+    # a generated script is run against both.
+    #
+    # The script is executed one operation at a time, each fully answered
+    # before the next is issued, which is what makes a deterministic model the
+    # right oracle: the concurrency this module has to survive is the other
+    # property's subject, and mixing the two would make disagreement mean
+    # either.
+    check all(script <- list_of(operation(), min_length: 1, max_length: 40), max_runs: 25) do
+      semaphore =
+        start_semaphore(capacity: @model_capacity, queue_size: @model_queue_size)
+
+      Enum.reduce(script, {new_model(), %{}}, fn operation, {model, pids} ->
+        step(semaphore, operation, model, pids)
+      end)
+    end
+  end
+
+  defp operation, do: one_of([constant(:request), tuple({constant(:release), integer(0..9)})])
+
+  defp step(semaphore, :request, model, pids) do
+    id = map_size(pids)
+    {expected, model} = model_request(model, id)
+
+    {pid, outcome} = start_holder(semaphore)
+
+    case {expected, outcome} do
+      {:granted, :granted} -> :ok
+      {:queued, :queued} -> :ok
+      {:queue_full, {:error, {:queue_full, _retry_after}}} -> :ok
+      {expected, actual} -> flunk("model said #{inspect(expected)}, semaphore said #{inspect(actual)}")
+    end
+
+    # A rejected caller is not part of the run's identity space — the model
+    # forgot it too — so it is not recorded, and its id is reused by the next
+    # arrival. Nothing downstream can address it.
+    if expected == :queue_full, do: {model, pids}, else: {model, Map.put(pids, id, pid)}
+  end
+
+  defp step(_semaphore, {:release, nth}, model, pids) do
+    case model_release(model, nth) do
+      :none ->
+        {model, pids}
+
+      {released, granted, model} ->
+        release(pids[released])
+
+        case granted do
+          nil ->
+            refute_receive {:granted, _pid}, 50
+
+          id ->
+            pid = pids[id]
+            assert_receive {:granted, ^pid}, @deadline
+        end
+
+        {model, pids}
+    end
+  end
+
+  ## The model: the semaphore as it was before classes, in three lines of state
+
+  defp new_model, do: %{held: [], queue: []}
+
+  defp model_request(model, id) do
+    cond do
+      length(model.held) < @model_capacity -> {:granted, %{model | held: model.held ++ [id]}}
+      length(model.queue) < @model_queue_size -> {:queued, %{model | queue: model.queue ++ [id]}}
+      true -> {:queue_full, model}
+    end
+  end
+
+  # `nth` indexes the holders rather than naming one, so a shrunk script stays
+  # meaningful: the generator cannot know which ids are held by the time this
+  # operation runs.
+  defp model_release(%{held: []}, _nth), do: :none
+
+  defp model_release(model, nth) do
+    released = Enum.at(model.held, rem(nth, length(model.held)))
+    held = List.delete(model.held, released)
+
+    case model.queue do
+      [] -> {released, nil, %{model | held: held}}
+      [next | rest] -> {released, next, %{model | held: held ++ [next], queue: rest}}
+    end
+  end
+
+  # A holder for the model comparison: the same shape as the one in
+  # `AudioProxy.SemaphoreTest`, and classless on purpose — that is the whole
+  # subject.
+  defp start_holder(semaphore) do
+    test = self()
+
+    pid =
+      spawn(fn ->
+        outcome = Semaphore.request(semaphore)
+        send(test, {:requested, self(), outcome})
+
+        if outcome == :queued do
+          receive do
+            {Semaphore, :granted} -> send(test, {:granted, self()})
+          end
+        end
+
+        receive do
+          :release ->
+            Semaphore.release(semaphore)
+            send(test, {:released, self()})
+        end
+      end)
+
+    on_exit(fn -> Process.exit(pid, :kill) end)
+
+    assert_receive {:requested, ^pid, outcome}, @deadline
+
+    {pid, outcome}
+  end
+
+  defp release(holder) do
+    send(holder, :release)
+    assert_receive {:released, ^holder}, @deadline
+  end
+
   # Three ways a holder stops mattering, which are the three the module has to
   # survive: it says so, it dies, or it never waited long enough to be granted.
   defp exit_style, do: member_of([:release, :crash, :give_up])
@@ -103,10 +234,10 @@ defmodule AudioProxy.SemaphorePropertyTest do
     end
   end
 
-  defp start_semaphore do
+  defp start_semaphore(opts \\ [capacity: @capacity, queue_size: 64]) do
     name = :"semaphore_property_#{System.unique_integer([:positive, :monotonic])}"
 
-    start_supervised!({Semaphore, name: name, capacity: @capacity, queue_size: 64}, id: name)
+    start_supervised!({Semaphore, Keyword.put(opts, :name, name)}, id: name)
 
     name
   end
