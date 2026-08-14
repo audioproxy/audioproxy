@@ -253,8 +253,8 @@ equivalent for anyone who needs one, and it is an image.
 
 The two artifacts cannot disagree about what they contain. The publish job
 asserts `mix.exs` matches the tag before it does anything, and both are built
-from that same commit — so `ghcr.io/audioproxy/audioproxy:0.6.0` and
-`audio_proxy 0.6.0` are the same code by construction, not by discipline.
+from that same commit — so `ghcr.io/audioproxy/audioproxy:0.7.0` and
+`audio_proxy 0.7.0` are the same code by construction, not by discipline.
 
 **The image is published first, then the package, then the docs** — three
 steps, and the order is what makes a partial failure recoverable:
@@ -371,21 +371,7 @@ what they serve until the old objects age out. This section is where such a
 line waits between merging and being cut, and an entry is deleted by the
 release that carries it — an empty section is the normal state.
 
-- **`norm` without an explicit `sr` now renders at the source's sample rate**
-  rather than at a flat 48 kHz (`peaks-follow-the-variant`). A normalized
-  variant of a 44.1 kHz source, or of a 96 kHz master, is different bytes under
-  the same key than the release before it. Say so in the notes. Nothing has to
-  be purged: the playground has no volume and no variant store attached, so it
-  renders every request and cannot hold a stale 48 kHz variant. The change was
-  taken deliberately while no third-party deployment exists — see that change's
-  proposal for the argument, and for why the same fix after the first real
-  deployment would have needed a cache-busting story instead.
-- **`f:wav` without a `bd` now follows the source's bit depth**, from the same
-  change and in the same class: a 24-bit master requested as `f:wav` returns
-  24-bit where it returned 16-bit, under an unchanged key. It is the behaviour
-  §3.1 always documented — the probe that supplies the depth is what was
-  missing — but an operator reading the notes should not have to infer it from
-  the `norm` line above.
+*Empty — both entries were carried by `v0.7.0`'s notes.*
 
 **Release notes are claims, and claims name their checks.** Before publishing
 notes, every Highlight must point at the automated check that demonstrates it —
