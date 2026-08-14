@@ -153,6 +153,6 @@ The system SHALL mount the checks every signed request passes before its action 
 - **THEN** the existing suite fails, because the tests exercise the same mounting the deployment runs
 
 #### Scenario: Behaviour is unchanged
-- **WHEN** the refactor lands
-- **THEN** the request path is observably identical — the suite passes with no test edits, which is what demonstrates it
+- **WHEN** the shared unit is mounted with an action behind it
+- **THEN** the request path is observably identical to the flat plug list it replaces — same checks, same order, same halting
 
