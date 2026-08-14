@@ -10,11 +10,13 @@ defmodule AudioProxy.Ffprobe do
   what makes it testable against canned output per container rather than
   against a binary.
 
-  `has_video?/1` is the third, and it is the audio-only policy rather than part
-  of §4: both callers run it on the probe they already paid for and refuse a
-  source carrying video — the render action before it takes a render slot, the
-  info action before it describes anything. It reads the same JSON `contract/2`
-  does, pure and canned-output-testable for the same reason.
+  `has_video?/1` is the third, and it serves the audio-only policy rather than
+  §4: both callers run it on the probe they already paid for — the render
+  action before it takes a render slot, the info action before it describes
+  anything — through `AudioProxy.VideoPolicy`, which holds the *verdict* on a
+  `true`. This function answers only the question, identically under either
+  verdict. It reads the same JSON `contract/2` does, pure and
+  canned-output-testable for the same reason.
 
   ## Collect, not stream
 
@@ -139,8 +141,9 @@ defmodule AudioProxy.Ffprobe do
   @doc """
   Whether a probe found a genuine video stream.
 
-  The question the audio-only policy turns on, and it is not simply "is there a
-  stream whose `codec_type` is video". Virtually every tagged mp3, flac and m4a
+  The question the audio-only policy turns on — `AudioProxy.VideoPolicy` holds
+  what is done about a `true` — and it is not simply "is there a stream whose
+  `codec_type` is video". Virtually every tagged mp3, flac and m4a
   carries its cover art as exactly such a stream, and refusing those would
   refuse most of a real catalogue. Two exemptions, in the order they are
   checked:

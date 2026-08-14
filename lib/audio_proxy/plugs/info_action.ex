@@ -72,14 +72,15 @@ defmodule AudioProxy.Plugs.InfoAction do
   answer the render endpoint gives it, so the policy has no endpoint-shaped
   exception. It costs nothing extra — the probe has already run, and this is one
   pass over the streams it returned. Cover art is not video; see
-  `AudioProxy.Ffprobe.has_video?/1`.
+  `AudioProxy.Ffprobe.has_video?/1` for the question and
+  `AudioProxy.VideoPolicy` for the verdict on it.
   """
 
   @behaviour Plug
 
   import Plug.Conn
 
-  alias AudioProxy.{ErrorJSON, Ffprobe, ProbeCoordinator, Source}
+  alias AudioProxy.{ErrorJSON, Ffprobe, ProbeCoordinator, Source, VideoPolicy}
   alias AudioProxy.Ffmpeg.Command
 
   # An hour, then revalidate. See the moduledoc for why not `immutable`.
@@ -176,9 +177,13 @@ defmodule AudioProxy.Plugs.InfoAction do
   # describing arbitrary video is metadata extraction as a service, which is not
   # what /info is for. A video-only source answers `:undecodable_source` a line
   # later anyway; this is what catches the ones that also carry audio.
-  defp audio_only(probe) do
-    if Ffprobe.has_video?(probe), do: {:error, :video_source}, else: :ok
-  end
+  #
+  # The same `AudioProxy.VideoPolicy` the render endpoint asks, for that same
+  # reason: an endpoint that admitted what the other refused would be the
+  # endpoint-shaped exception, one configuration removed. Under `:extract` this
+  # falls through to `Ffprobe.contract/2`, which describes the *audio* stream —
+  # §4 has no vocabulary for any other kind and gains none here.
+  defp audio_only(probe), do: VideoPolicy.admit(probe)
 
   ## The validator
 

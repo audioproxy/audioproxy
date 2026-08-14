@@ -94,6 +94,21 @@ video file, which is what the gate exists to refuse, and not a video transcode,
 which is what would actually cost the operator. Layer one is the policy; layer
 two is what makes forging layer one uninteresting.
 
+The two layers are independent by construction, and one of them is a seam.
+`AudioProxy.VideoPolicy` holds the *verdict* on a source `ffprobe` called
+video, as a closed two-valued enum: `:reject`, which is the `415` above and the
+default, or `:extract`, which admits the source and renders its audio track.
+`AudioProxy.Ffprobe.has_video?/1` still answers the question identically under
+either. What cannot move is the row in the table above: `Command.build/3` takes
+the options, the input and the source type, and no policy is among its
+arguments, so `-vn -sn -dn` is not conditional on a verdict it never sees and
+the format vocabulary contains no video encoder to reach. An ingest policy can
+change what is admitted; it has no argument through which to change what is
+emitted. The knob is `Application.get_env(:audio_proxy, :video_policy)` and
+deliberately not an `AP_` variable: the intended consumer is an embedding
+release that owns its own application env, not an operator holding the
+published image, which is why the configuration surface has no entry for it.
+
 The gate that actually refuses a video source with `415` is an `ffprobe` run in
 `AudioProxy.Plugs.RenderAction`, before the semaphore; the flags above are what
 still holds if that gate is bypassed, reordered, or handed a source it cannot
