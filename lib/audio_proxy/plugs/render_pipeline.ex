@@ -7,6 +7,12 @@ defmodule AudioProxy.Plugs.RenderPipeline do
   too — this module is that unit plus the production action options, and the
   test mountings differ from it only in theirs.
 
+  **A new check goes in `SignedChain`, never here.** A plug added between the
+  two below runs in production and in neither test mounting, which is the
+  divergence the extraction removed, reinstated in one line. Nothing prevents
+  it structurally: the seam is "everything ahead of the action", and moving it
+  would mean making the action mountable through the unit.
+
   Mounted by the router for `GET /:sig/*rest`; `/health` stays outside it, so
   an unsigned liveness check never touches signature verification.
 

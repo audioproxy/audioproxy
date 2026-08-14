@@ -127,12 +127,17 @@ defmodule AudioProxy.ExpiringUrlsTest do
     end
 
     test "the production router refuses it, not merely the test mounting" do
-      # Every other test here drives `AudioProxy.FakeFfmpeg.Router`, whose
-      # pipeline is a hand-copy of the production chain — so on its own the
-      # suite proves the *copy* checks expiry and says nothing about the
-      # deployment. Removing `AudioProxy.Plugs.CheckExpiry` from
-      # `AudioProxy.Plugs.RenderPipeline` left all 1051 tests green; this is the
-      # one that turns red.
+      # Every other test here drives `AudioProxy.FakeFfmpeg.Router`, which once
+      # hand-copied the production chain — so on its own the suite proved the
+      # *copy* checked expiry and said nothing about the deployment. Removing
+      # `AudioProxy.Plugs.CheckExpiry` from `AudioProxy.Plugs.RenderPipeline`
+      # left all 1051 tests green, and this was the one that turned red.
+      #
+      # `extract-signed-chain` closed that: both routers mount
+      # `AudioProxy.Plugs.SignedChain` now, so the other five turn red with it.
+      # This one stays because it is the only test driving `AudioProxy.Router`
+      # end to end — it covers the router's own wiring to the pipeline, which
+      # a shared chain says nothing about.
       #
       # It needs no encoder precisely because of what it asserts: the check
       # halts before the action, so the production router is drivable for it.
