@@ -44,12 +44,15 @@ defmodule AudioProxy.OptionsGenerators do
           fade <- fade(duration_ms),
           gain <- maybe(gain(format)),
           norm <- maybe(norm(format)),
+          enhance <- maybe(enhance(format)),
           peaks <- peaks(format),
           delivery <- delivery(),
           segments <-
             shuffle(
               ["f:#{format}"] ++
-                rate ++ channels ++ depth ++ trim ++ fade ++ gain ++ norm ++ peaks ++ delivery
+                rate ++
+                channels ++
+                depth ++ trim ++ fade ++ gain ++ norm ++ enhance ++ peaks ++ delivery
             )
         ) do
       segments
@@ -187,6 +190,16 @@ defmodule AudioProxy.OptionsGenerators do
         3 -> ["norm:ebu:#{i}:#{tp}:#{lra}"]
       end
     end
+  end
+
+  # Refused under `f:peaks` alongside the loudness options, so generated
+  # nowhere near one. The vocabulary comes from `AudioProxy.Options` rather
+  # than a copy of it: a preset added there is generated here the same day,
+  # which is what keeps every round-trip property covering the whole surface.
+  defp enhance("peaks"), do: constant([])
+
+  defp enhance(_format) do
+    map(member_of(AudioProxy.Options.enhance_presets()), &["enhance:#{&1}"])
   end
 
   defp peaks("peaks") do

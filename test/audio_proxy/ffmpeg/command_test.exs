@@ -156,10 +156,96 @@ defmodule AudioProxy.Ffmpeg.CommandTest do
                  "afade=t=in:st=0:d=1,afade=t=out:st=9:d=1"
     end
 
+    test "the enhance preset runs first, ahead of every loudness stage" do
+      assert filtergraph("enhance:voice") == Command.enhance_chain(:voice)
+
+      assert filtergraph("enhance:voice/norm:ebu") ==
+               Command.enhance_chain(:voice) <> ",loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000"
+
+      assert filtergraph("t:0:10/enhance:voice/norm:ebu/gain:-3/sr:44100/fade:1:1") ==
+               Command.enhance_chain(:voice) <>
+                 ",loudnorm=I=-16:TP=-1.5:LRA=11,volume=-3dB,aresample=44100," <>
+                 "afade=t=in:st=0:d=1,afade=t=out:st=9:d=1"
+    end
+
+    test "no enhance, no preset filters" do
+      refute filtergraph("f:mp3/norm:ebu") =~ "highpass"
+    end
+
     test "a downmix is an output option, not a filter" do
       assert filtergraph("ch:1") == nil
       assert "-ac" in argv("ch:1")
       assert Enum.slice(argv("ch:1"), -7..-6) == ["-ac", "1"]
+    end
+  end
+
+  # The guard behind the pinning rule, and the reason it is written as two
+  # literals rather than as anything derived: a preset value maps to an exact
+  # chain forever, because variants are served immutable under a key derived
+  # from the *name*. Improving the chain means adding a value (`voice2`) and
+  # leaving this one alone.
+  #
+  # So a failure here is never "update the expectation". It is one of two
+  # things: an improvement that has to become a new preset, or a chain edit
+  # that would have silently re-rendered every cached `enhance:voice` variant
+  # under its old key. Both want a decision, which is what a literal forces and
+  # a comparison against the module's own map would not.
+  describe "enhance_chain/1 — the chain is pinned" do
+    test "voice is exactly this chain, and changing it means minting voice2" do
+      assert Command.enhance_chain(:voice) ==
+               "highpass=f=80," <>
+                 "afftdn=nr=12:nf=-30," <>
+                 "deesser=i=0.4:m=0.5:f=0.5:s=o," <>
+                 "acompressor=threshold=0.125:ratio=3:attack=20:release=250:makeup=2"
+    end
+
+    test "the vocabulary is exactly the presets that have a chain" do
+      assert Options.enhance_presets() == [:voice]
+
+      for preset <- Options.enhance_presets() do
+        assert is_binary(Command.enhance_chain(preset))
+      end
+    end
+
+    test "a name the options layer never accepts has no chain to render" do
+      assert_raise KeyError, fn -> Command.enhance_chain(:studio) end
+    end
+
+    test "the preset's argv is the chain, once, in the filtergraph" do
+      assert argv("enhance:voice/f:mp3/br:64") == [
+               "-nostdin",
+               "-hide_banner",
+               "-loglevel",
+               "error",
+               "-protocol_whitelist",
+               "https,tls,tcp",
+               "-i",
+               @source,
+               "-vn",
+               "-sn",
+               "-dn",
+               "-af",
+               "highpass=f=80,afftdn=nr=12:nf=-30,deesser=i=0.4:m=0.5:f=0.5:s=o," <>
+                 "acompressor=threshold=0.125:ratio=3:attack=20:release=250:makeup=2",
+               "-c:a",
+               "libmp3lame",
+               "-b:a",
+               "64k",
+               "-f",
+               "mp3",
+               "pipe:1"
+             ]
+    end
+
+    # Two spellings of one variant must not be two renders — and the chain must
+    # not accumulate, which is the failure mode of assembling a filtergraph by
+    # appending.
+    test "differently spelled requests for one variant build one identical argv" do
+      assert argv("enhance:voice/f:opus/br:96") == argv("br:96/enhance:voice/f:opus")
+
+      assert argv("enhance:voice")
+             |> Enum.filter(&(&1 =~ "highpass"))
+             |> length() == 1
     end
   end
 

@@ -51,6 +51,23 @@ defmodule AudioProxy.Options do
       iex> AudioProxy.Options.normalize(a) == AudioProxy.Options.normalize(b)
       true
 
+  ## Presets are pinned
+
+  `enhance` names a curated chain rather than describing one. That makes the
+  value a promise about bytes: `enhance:voice` maps to an exact filter chain
+  *forever*, and improving the chain mints a new value (`voice2`) rather than
+  mutating this one.
+
+  The alternative is not tenable. Variants are served under
+  `Cache-Control: immutable` and addressed by a key derived from the options
+  string, so a preset whose chain changed would hand two different renders the
+  same key: an operator's CDN would keep serving the old bytes, a cold cache
+  would produce the new ones, and nothing in the URL would distinguish them.
+  Pinning is what keeps the key honest, and it is asserted rather than
+  remembered — `AudioProxy.Ffmpeg.Command.enhance_chain/1` is compared against
+  a literal in the suite, so changing the chain fails a test that names this
+  rule.
+
   ## Known limits
 
   Semantic no-ops keep their own identity: `t:0` (a trim from zero to the end),
@@ -65,6 +82,10 @@ defmodule AudioProxy.Options do
   @formats ~w(mp3 opus ogg aac m4a flac wav peaks)a
   @lossy ~w(mp3 opus ogg aac m4a)a
   @lossless ~w(flac wav)a
+
+  # The preset vocabulary. One entry today, and a new entry is how the chain is
+  # ever allowed to change — see "Presets are pinned".
+  @enhance_presets ~w(voice)a
 
   # Formats whose encoder exposes a quality scale for `q` to mean something,
   # mapped to that scale's domain. PCM has neither scale, so `f:wav` is absent
@@ -130,14 +151,23 @@ defmodule AudioProxy.Options do
 
   # The two classes, as the lists everything else derives from: `normalize/1`
   # walks the variant list, `parse_segment/3` checks membership in the union.
-  @variant_keys ~w(bd br cb ch dl f fade gain norm pk_fmt pts q sr t)
+  @variant_keys ~w(bd br cb ch dl enhance f fade gain norm pk_fmt pts q sr t)
   @request_keys ~w(exp)
   @keys Enum.sort(@variant_keys ++ @request_keys)
 
   # Encoding options (§3.1) plus the loudness stages: peaks are computed from
   # the decoded source and ignore all of them (§3.3), so carrying them would
   # mean distinct cache keys for byte-identical peaks output. Rejected instead.
-  @peaks_unsupported ~w(br q sr bd gain norm)
+  #
+  # `enhance` joins them for a different reason, and it is a judgement rather
+  # than an identity: the preset *would* change a waveform, because its
+  # compressor reshapes the envelope the picture is drawn from. But §3.3 pins
+  # peaks to the source's own shape, and a waveform whose dynamics had been
+  # squashed to match a preview would misdescribe the master it is drawn under.
+  # Refusing is also the reversible direction — `f:peaks/enhance:voice` can
+  # become meaningful in a later slice without invalidating a single cached
+  # variant, whereas accepting it now and refusing it later would break URLs.
+  @peaks_unsupported ~w(br q sr bd gain norm enhance)
 
   # `dl` and `cb` are opaque, but not arbitrary: a control byte in `dl` reaches
   # a `Content-Disposition` header, and any control byte would break the
@@ -153,6 +183,9 @@ defmodule AudioProxy.Options do
   @type format :: :mp3 | :opus | :ogg | :aac | :m4a | :flac | :wav | :peaks
   @type bit_depth :: :bd16 | :bd24 | :bd32f
   @type peak_format :: :json | :dat
+
+  @typedoc "An enhancement preset: a name for a pinned filter chain."
+  @type enhance :: :voice
 
   @typedoc "loudnorm targets: integrated LUFS, true peak dBTP, loudness range LU."
   @type norm :: {float(), float(), float()}
@@ -182,6 +215,7 @@ defmodule AudioProxy.Options do
           fade_out: float() | nil,
           gain: float() | nil,
           norm: norm() | nil,
+          enhance: enhance() | nil,
           peak_count: pos_integer() | nil,
           peak_format: peak_format() | nil,
           download: String.t() | nil,
@@ -201,6 +235,7 @@ defmodule AudioProxy.Options do
             fade_out: nil,
             gain: nil,
             norm: nil,
+            enhance: nil,
             peak_count: nil,
             peak_format: nil,
             download: nil,
@@ -241,8 +276,8 @@ defmodule AudioProxy.Options do
   the order they are reported: `br` excludes `q`; `bd` needs a lossless format;
   `br` needs a lossy format, and `q` needs a format with a quality scale and a
   value inside that codec's range; `bd` needs
-  a lossless format, and `bd:32f` needs `f:wav`; `f:peaks` refuses encoding and
-  loudness options; `pts`/`pk_fmt` need `f:peaks`; `sr` is capped at 48 kHz for
+  a lossless format, and `bd:32f` needs `f:wav`; `f:peaks` refuses encoding,
+  loudness and enhancement options; `pts`/`pk_fmt` need `f:peaks`; `sr` is capped at 48 kHz for
   lossy formats; a fade must fit inside a bounded trim, and a fade-out needs
   that trim to be bounded at all.
   """
@@ -353,6 +388,20 @@ defmodule AudioProxy.Options do
   """
   @spec variant_keys() :: [String.t()]
   def variant_keys, do: @variant_keys
+
+  @doc """
+  Every `enhance` preset name, as atoms.
+
+  Published for the pinning guard: the suite asserts this list *and* each
+  value's chain, so widening the vocabulary is a deliberate edit in two places
+  rather than a chain quietly acquiring a new spelling. See "Presets are
+  pinned".
+
+      iex> AudioProxy.Options.enhance_presets()
+      [:voice]
+  """
+  @spec enhance_presets() :: [enhance()]
+  def enhance_presets, do: @enhance_presets
 
   @doc """
   The keys that describe the request rather than the variant.
@@ -486,6 +535,12 @@ defmodule AudioProxy.Options do
       _ ->
         {:error, :invalid_value}
     end
+  end
+
+  # A preset name, not a description of one: the value vocabulary is closed, so
+  # an unknown name is a 422 here rather than a chain assembled from a URL.
+  defp parse_value("enhance", value) do
+    with {:ok, preset} <- enum(value, @enhance_presets), do: {:ok, enhance: preset}
   end
 
   defp parse_value("pts", value) do
@@ -790,6 +845,11 @@ defmodule AudioProxy.Options do
 
   defp render_key("gain", %{gain: nil}), do: nil
   defp render_key("gain", opts), do: "gain:" <> render_number(opts.gain)
+
+  # No default materialization: absent means "no enhancement", which is a
+  # distinct variant from any preset, so there is nothing to spell out.
+  defp render_key("enhance", %{enhance: nil}), do: nil
+  defp render_key("enhance", opts), do: "enhance:" <> Atom.to_string(opts.enhance)
 
   defp render_key("norm", %{norm: nil}), do: nil
 

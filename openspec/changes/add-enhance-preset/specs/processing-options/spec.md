@@ -14,3 +14,11 @@ The system SHALL accept `enhance:voice`, applying a pinned conventional enhancem
 #### Scenario: Pinning survives improvement
 - **WHEN** the chain is improved in a later release
 - **THEN** it ships as a new preset value and `enhance:voice` output is byte-stable
+
+#### Scenario: An unrecognized preset name is refused
+- **WHEN** `enhance:` names anything outside the published vocabulary, including a name a future release might mint
+- **THEN** the request is refused with `422` naming the segment, so publishing a preset is additive rather than a change of meaning
+
+#### Scenario: Peaks refuse the preset
+- **WHEN** `enhance` is combined with `f:peaks`
+- **THEN** the request is refused with `422`, as the loudness options are: a waveform describes the source's own shape, and the preset's compression would reshape the envelope the picture is drawn from

@@ -418,6 +418,51 @@ defmodule AudioProxy.OptionsTest do
     end
   end
 
+  # The preset is a closed vocabulary standing in for a pinned chain, so the
+  # parser's job is narrower here than for any other key: accept the names that
+  # have a chain, refuse every other spelling, and carry the accepted name into
+  # the cache key exactly as given.
+  describe "parse/1 — enhance presets" do
+    test "every published preset parses to its atom" do
+      for preset <- Options.enhance_presets() do
+        assert {:ok, %Options{enhance: parsed}} = Options.parse("enhance:#{preset}")
+        assert parsed == preset
+      end
+    end
+
+    # `voice2` is the name a future improved chain would take, and refusing it
+    # today is what makes minting it a safe, additive change.
+    test "an unknown preset is refused rather than passed through" do
+      assert {:error, %OptionError{segment: "enhance:studio", reason: :invalid_value}} =
+               Options.parse("enhance:studio")
+
+      assert {:error, %OptionError{reason: :invalid_value}} = Options.parse("enhance:voice2")
+      assert {:error, %OptionError{reason: :invalid_value}} = Options.parse("enhance:")
+    end
+
+    test "the preset composes with the loudness stage rather than replacing it" do
+      assert {:ok, %Options{enhance: :voice, norm: {-16.0, -1.5, 11.0}}} =
+               Options.parse("enhance:voice/norm:ebu")
+    end
+  end
+
+  describe "normalize/1 — enhance" do
+    test "the preset name is the cache key, and absence is not spelled out" do
+      assert Options.normalize_string("enhance:voice") == {:ok, "enhance:voice/f:mp3"}
+      assert Options.normalize_string("f:mp3") == {:ok, "f:mp3"}
+    end
+
+    test "an enhanced variant is a different key from an unenhanced one" do
+      assert Options.normalize_string("enhance:voice/f:opus") !=
+               Options.normalize_string("f:opus")
+    end
+
+    test "enhance and norm are independent keys, in sorted order" do
+      assert Options.normalize_string("norm:ebu/enhance:voice") ==
+               {:ok, "enhance:voice/f:mp3/norm:ebu:-16:-1.5:11"}
+    end
+  end
+
   describe "validate/1 — peaks ignore encoding and loudness options" do
     test "every encoding and loudness option is refused under f:peaks" do
       for {options, segment} <- [
@@ -426,7 +471,8 @@ defmodule AudioProxy.OptionsTest do
             {"f:peaks/sr:48000", "sr:48000"},
             {"f:peaks/bd:16", "bd:16"},
             {"f:peaks/gain:-3", "gain:-3"},
-            {"f:peaks/norm:ebu", "norm:ebu:-16:-1.5:11"}
+            {"f:peaks/norm:ebu", "norm:ebu:-16:-1.5:11"},
+            {"f:peaks/enhance:voice", "enhance:voice"}
           ] do
         assert {:error, %OptionError{segment: ^segment, reason: :unsupported_for_peaks}} =
                  Options.parse(options)

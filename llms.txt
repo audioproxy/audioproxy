@@ -1,6 +1,6 @@
 # audio_proxy
 
-> An on-the-fly audio transcoding proxy. A signed URL names a source and the variant you want from it — format, bitrate, trim, fades, loudness, waveform peaks — and the proxy renders it with ffmpeg, streams it while it encodes, and caches it for later requests. URLs are the entire API: no request bodies, no server-side state, and the normalized options string is the cache key.
+> An on-the-fly audio transcoding proxy. A signed URL names a source and the variant you want from it — format, bitrate, trim, fades, loudness, speech enhancement, waveform peaks — and the proxy renders it with ffmpeg, streams it while it encodes, and caches it for later requests. URLs are the entire API: no request bodies, no server-side state, and the normalized options string is the cache key.
 
 The path is `/{signature}/{options}/{source}`. The signature is `base64url(HMAC-SHA256(key, salt ‖ rest-of-path))` over the raw bytes after the signature segment, leading `/` included. Options are `/`-separated `key:value` segments. The source is `plain/{scheme-url}` or `enc/{base64url(scheme-url)}`, naming a file under a configured root (`local://`), an S3 object (`s3://`), or an HTTPS URL.
 
