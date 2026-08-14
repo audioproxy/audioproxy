@@ -4,7 +4,7 @@ Ingest pipelines want variants rendered before anyone asks — "on upload, produ
 
 ## What Changes
 
-- New signed endpoint `GET /{sig}/warm/enc:{payload}` where the payload is a base64url JSON list of `{options}/{source}` entries. The outer signature covers the whole path — inner entries need no individual signatures.
+- New signed endpoint `GET /{sig}/warm/enc:{payload}` where the payload is a base64url JSON list of `{options}/{source}` entries, using the shared envelope from `pro-request-payloads` (encoding, canonicalization, bounds, and error mapping are defined there; a warm payload is a *request* payload, never cache-keyed). The outer signature covers the whole path — inner entries need no individual signatures.
 - Each valid entry is checked against the variant store (HIT → nothing to do) and otherwise kicked into the coalescing registry; the response returns immediately with per-entry state (`hit` | `started` | `invalid` + reason) — the connection does not wait for renders.
 - Statelessness preserved: there is no job store and no status API. "Queued" *is* the coalescing registry; progress *is* GETting the variant URL. A dropped warm render costs nothing — the variant renders lazily on first request, exactly as without this endpoint.
 - Bounded: a maximum entry count per request (default 100); invalid entries are reported per-entry, never fatal to the batch.
@@ -22,6 +22,6 @@ Ingest pipelines want variants rendered before anyone asks — "on upload, produ
 
 ## Impact
 
-- New: warm action + route, payload decoder.
+- New: warm action + route, consuming the `pro-request-payloads` codec (dependency; that change lands first).
 - Depends on (implementation order, no artifact amendments): `add-render-coalescing` (the registry it kicks into), `add-variant-cache` (the HIT check and the point of warming), `add-render-semaphore` (pacing).
 - Position: PRO track, after `pro-loudness-measurement` or alongside; unscheduled relative to the OSS board. Future PRO slices (upload policies) trigger this machinery from events.
