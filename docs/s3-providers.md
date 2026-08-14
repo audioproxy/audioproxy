@@ -8,7 +8,7 @@ virtual-hosted (`bucket.s3.region.amazonaws.com`). Either default can be
 overridden with `AP_S3_ADDRESSING`.
 
 This page collects working configurations. For what the variables mean, see
-[S3 credentials](../README.md#s3-credentials) in the README.
+[configuration](audio-proxy-api-v1.md#6-configuration-env) in the API doc.
 
 ## What is tested and what is not
 

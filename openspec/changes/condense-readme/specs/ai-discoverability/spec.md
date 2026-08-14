@@ -27,4 +27,4 @@ Variable *names* are compared, not their default values: several defaults are de
 
 #### Scenario: The README carries no configuration table to guard
 - **WHEN** the drift-guard suite runs
-- **THEN** it reads the configuration surface from `llms-full.txt` only, and no test parses `README.md`
+- **THEN** it reads the configuration surface from `llms-full.txt` only, and no test parses a configuration table out of `README.md`

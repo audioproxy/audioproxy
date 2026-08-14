@@ -2,13 +2,15 @@
 
 [![CI](https://github.com/audioproxy/audioproxy/actions/workflows/ci.yml/badge.svg)](https://github.com/audioproxy/audioproxy/actions/workflows/ci.yml)
 [![Hex.pm](https://img.shields.io/hexpm/v/audio_proxy.svg)](https://hex.pm/packages/audio_proxy)
-[![Documentation](https://img.shields.io/badge/hexdocs-docs-purple.svg)](https://hexdocs.pm/audio_proxy)
+[![Documentation](https://img.shields.io/badge/docs-audioproxy.dev-purple.svg)](https://docs.audioproxy.dev)
 
 Transcode audio on demand, from a URL.
 
 Point it at your audio and ask for a variant by URL: a 30-second preview, a mono file for speech-to-text, a normalised podcast MP3, a 24-bit FLAC excerpt. The options are in the path, so one master can serve all of them and you generate none of them in advance. If you know [imgproxy](https://imgproxy.net), this is that, for audio.
 
-> **Status: early, `v0.6.0`.** Transcoding works end to end and you can try it in about a minute. Sources live on a mounted directory or in S3-compatible object storage (see [docs/s3-providers.md](docs/s3-providers.md) for which providers are covered); with a [variant store](#variant-store) configured — local or `s3://` — completed renders are kept and served back with `Range` support, so a variant is encoded once rather than per request. See the [Roadmap](#roadmap).
+**Full documentation: [docs.audioproxy.dev](https://docs.audioproxy.dev)**, covering how to render, sign, configure, deploy and observe.
+
+> **Status: early, `v0.6.0`.** Transcoding works end to end and you can try it in about a minute. Sources live on a mounted directory or in S3-compatible object storage; HTTPS sources are designed but not yet rendering, per the roadmap below. With a variant store configured, local or `s3://`, completed renders are kept and served back with `Range` support, so a variant is encoded once rather than per request. See the [Roadmap](#roadmap).
 
 ## Quick start
 
@@ -30,115 +32,24 @@ Now ask for a variant, from another shell. `SRC` names a file *relative to the d
 BASE=localhost:4000
 SRC='plain/local://track.wav'
 
-curl -s "$BASE/health"
-# {"status":"ok","version":"0.6.0"}
-
 # A 30-second preview: Opus at 96 kbps, fading in and out.
 curl -o preview.opus "$BASE/insecure/f:opus/br:96/t:0:30/fade:1:1/$SRC"
 
 # The same source as a small mono MP3, the shape speech wants.
 curl -o speech.mp3 "$BASE/insecure/f:mp3/br:64/ch:1/sr:22050/$SRC"
-```
-
-Both start arriving while ffmpeg is still encoding: the response is chunked, not buffered to disk first. Change any option and you have a different variant, with no server-side configuration to add: the URL is the whole request.
-
-To hear it rather than download it, save this as `player.html` and open it in a browser:
-
-```html
-<audio controls src="http://localhost:4000/insecure/f:mp3/br:128/plain/local://track.wav"></audio>
-```
-
-Playback starts before the render finishes, which is the point. `f:mp3` because every browser plays it; Safari will not play Ogg or Opus. For something to poke at rather than a single tag, [`examples/player.html`](https://github.com/audioproxy/audioproxy/blob/main/examples/player.html) has presets for every format and shows what the browser makes of the response.
-
-**While it renders, the duration reads as unknown and you cannot seek**, because a render in progress has no length and nothing to seek into: it is delivered chunked, with no `Content-Length` and no `Accept-Ranges`. Once the whole thing has arrived the browser can scrub within what it holds, so on a short file this is barely visible. What you cannot do, at any point, is jump to a position that has not been received — without `Accept-Ranges` the browser has to fetch everything up to that point first, which on a long file is the difference between seeking and waiting. Range requests need a *cached* variant with a known size, so with a [variant store](#variant-store) configured this describes the first play only: every request after it declares a length and seeks normally. See [Cache semantics](#cache-semantics).
-
-Two things that matter beyond a first try:
-
-- **`AP_ALLOW_INSECURE` is development only.** It is what lets the literal `insecure` stand in for a signature, so while it is on, anyone who can reach the port can render anything under `AP_LOCAL_ROOT`. [Signing URLs](#signing-urls) is the real thing.
-- **Mount the directory read-only** (`:ro`, above). Write access to `AP_LOCAL_ROOT` is write access to what the proxy will serve.
-
-[Running it](#running-it) has the shape you would actually deploy.
-
-## What you can do with it
-
-The path is `/{signature}/{options}/{source}`. These examples show the range, using the literal `insecure` in place of a signature as the Quick start did.
-
-```bash
-BASE=localhost:4000
-SRC='plain/local://piece.wav'    # AP_LOCAL_ROOT/piece.wav
-# A 30-second preview: Opus at 96 kbps, starting 12.5 s in,
-# half-second fade in and one-second fade out.
-curl "$BASE/insecure/f:opus/br:96/t:12.5:30/fade:0.5:1/$SRC"
 
 # Waveform peaks to draw a player UI, 800 min/max pairs as JSON.
 curl "$BASE/insecure/f:peaks/pts:800/$SRC"
-
-# The same peaks in the compact binary form, which is what you want
-# once the pair count gets large.
-curl -o peaks.dat "$BASE/insecure/f:peaks/pts:4000/pk_fmt:dat/$SRC"
-
-# Speech, small: 64 kbps mono MP3 at 22.05 kHz.
-curl "$BASE/insecure/f:mp3/br:64/ch:1/sr:22050/$SRC"
-
-# Normalised to −16 LUFS for podcast delivery.
-curl "$BASE/insecure/f:mp3/br:128/norm:ebu/$SRC"
-
-# Two minutes of 24-bit FLAC, offered to the browser as a download.
-curl -OJ "$BASE/insecure/f:flac/bd:24/t:60:120/dl:excerpt.flac/$SRC"
-
-# Mono 16 kHz WAV, the shape a speech-to-text pipeline wants.
-curl "$BASE/insecure/f:wav/ch:1/sr:16000/$SRC"
-
-# What is this file? (ffprobe metadata, as JSON)
-curl "$BASE/insecure/info/$SRC"
 ```
 
-Each URL describes its output completely, so the same URL always means the same bytes. The first request for a variant renders it and streams it while it encodes; later requests are served from the variant bucket with `Range` support.
+Each response starts arriving while ffmpeg is still encoding: it is chunked, not buffered to disk first. Change any option and you have a different variant, with no server-side configuration to add. The URL is the whole request.
 
-> **Which of these work today?** All of them, in the `0.6.0` image above. Every option string here is checked against the parser by the test suite, so none of them are aspirational spellings.
+Two things that matter beyond a first try:
 
-## Roadmap
+- **`AP_ALLOW_INSECURE` is development only.** It is what lets the literal `insecure` stand in for a signature, so while it is on, anyone who can reach the port can render anything under `AP_LOCAL_ROOT`. Real deployments sign every URL.
+- **Mount the directory read-only** (`:ro`, above). Write access to `AP_LOCAL_ROOT` is write access to what the proxy will serve.
 
-No dates. It is built in small releases, each one usable, in roughly this order.
-
-**Working now (`v0.6.0`)**
-
-- Signed URLs, the full processing-options grammar, and the cache-key rules
-- Expiring URLs: `exp:<unix-seconds>` time-boxes one URL without rotating the key, and because it is not part of the cache key, minting a fresh short-lived URL per page view still resolves to one render. See [Expiring URLs](#expiring-urls)
-- Transcoding to MP3, AAC/M4A, Opus, Vorbis, FLAC and WAV, with trimming, fades, loudness normalisation, channel and sample-rate control
-- Renders stream while they encode
-- Concurrent requests for the same variant share one render, with mid-render joiners catching up from the start
-- Sources on a mounted directory **or in S3**: ffmpeg reads the object through a presigned URL, so a trim fetches only the bytes it needs, and an unreachable store answers `502` rather than a `404` that would report a deletion that did not happen
-- A variant store on a local directory **or in S3**, so the cache survives a restart and is shared between nodes — and with it `AP_SERVE_MODE=redirect`, where a hit answers `302` to a short-lived storage URL and the proxy leaves the hot path entirely. The store can carry its own `AP_VARIANT_S3_*` credentials and endpoint, so sources and variants may live with different providers or under different principals; unset, each falls back to the shared value
-- `f:peaks`, waveform min/max data in audiowaveform's JSON and binary formats, cached like any other variant
-- A cap on simultaneous renders with a bounded wait queue, so a burst queues (and then sheds, with `Retry-After`) instead of thrashing the machine; `ffprobe` runs under a bound of its own
-- `GET /info`, giving duration, sample rate, channels and tags, so clients can size their variant URLs to the source
-- `GET /ready`, reporting queue depth with hysteresis, so a busy node leaves the pool without being restarted
-- A Prometheus `GET /metrics` endpoint on a bind-restricted listener of its own, reporting queue depth, render durations, cache hit ratio and error rates. See [Metrics](#metrics)
-- Video input refused rather than transcoded, enforced rather than intended
-- Optional CORS (`AP_ALLOW_ORIGIN`), so a page on another origin can `fetch()` peaks or `/info` instead of only playing the audio. Off by default; see [Fetching from a browser](#fetching-from-a-browser)
-- A single container, published per release — and the package on hex, for embedding it in a release of your own
-
-**After that**
-
-- HTTPS sources, for stores that are not S3
-- arm64 images, so Graviton/Ampere and Apple Silicon run natively
-
-**Under consideration**
-
-- **Seeking on a first play.** The cache makes every request after the first one range-capable; the first still streams, so it can only be scrubbed within what has already arrived. A `/sync/{signature}/{options}/{source}` URL would render fully before responding and hand back something seekable — trading time-to-first-byte for a working scrubber, and chosen by whoever writes the `src` rather than by the browser. That last point is what makes it possible at all: a browser cannot signal the intent itself, since it sends `Range: bytes=0-` on *every* first media request, so keying off `Range` would make all playback wait for a full render.
-
-  Whether it gets built is still open, because warming the cache does the same job for nothing: fetch the URL once, discard it, then set `src`, and the second request seeks normally.
-
-**Deliberately not planned**
-
-- **Video.** This is an audio proxy and refuses video input rather than becoming a general ffmpeg gateway; video transcoding is far more expensive and carries most of ffmpeg's CVE history. Refusing it is now enforced rather than intended — see [The source must be audio](#the-source-must-be-audio).
-
-**Wanted, but not designed yet**
-
-- **HLS and segmented streaming.** A v2 goal rather than a rejected one: the URL space is reserved, and segmented output is the honest answer to mid-stream render failure, which plain chunked HTTP cannot signal. A segment is close to a variant with a trim, so signing, cache keys and deduplication carry over unchanged. The unsolved part is gapless boundaries, since encoding each segment independently gives each one its own encoder priming.
-
-`0.x` means the URL contract can still change. It will settle at `1.0`, after which a change to what an existing URL means, or to how cache keys are derived, is a major version. The per-slice detail, including rationale and trade-offs, lives in [`openspec/changes/`](https://github.com/audioproxy/audioproxy/tree/main/openspec/changes).
+The [quickstart guide](https://docs.audioproxy.dev/start/quickstart/) has the same thing at more length, plus a browser player. [Transforms](https://docs.audioproxy.dev/guides/transforms/) is every option the URL accepts, arranged by what you are trying to do.
 
 ## Design
 
@@ -150,15 +61,11 @@ URLs are the entire API: no request bodies, no server-side state. Every variant 
 GET /{signature}/{options}/{source}
 ```
 
-That is the design. The [Roadmap](#roadmap) says which parts of it exist today.
-
-**[`docs/audio-proxy-api-v1.md`](docs/audio-proxy-api-v1.md) is the source of truth** for the URL grammar, processing options, cache-key rules, response headers, and error codes. What follows here is the working subset; reach for the spec when you need the exact contract.
+**[`docs/audio-proxy-api-v1.md`](docs/audio-proxy-api-v1.md) is the source of truth** for the URL grammar, processing options, cache-key rules, response headers and error codes. The [Roadmap](#roadmap) says which parts of it exist today.
 
 ## Running it
 
-The container is the way to run this. It carries the release with its own Erlang runtime and the ffmpeg the renders are tested against, so there is nothing to install and nothing to keep in step.
-
-The [Quick start](#quick-start) above runs it unsigned, for a first look. The difference in a real deployment is that `AP_ALLOW_INSECURE` is gone and a key and salt take its place:
+The container is the way to run this. It carries the release with its own Erlang runtime and the ffmpeg the renders are tested against, so there is nothing to install and nothing to keep in step. A real deployment drops `AP_ALLOW_INSECURE` and gives the proxy a key and salt instead:
 
 ```bash
 docker run --rm -p 4000:4000 \
@@ -171,9 +78,7 @@ docker run --rm -p 4000:4000 \
   ghcr.io/audioproxy/audioproxy:0.6.0
 ```
 
-That is the whole configuration for serving files off a mounted directory, with completed renders cached on a named volume: no credentials, no bucket, no database. Drop the two `AP_VARIANT_*` lines and it still works — every request just renders. The store is [unbounded](#variant-store); the volume is yours to watch.
-
-**Pin a version.** `:0.6.0` and `:sha-<commit>` name an exact image; `:0.6` follows patch releases; `:latest` and `:edge` move under you, and `:edge` is whatever last landed on `main`. Pinning matters more here than for most services, because a different ffmpeg encodes the same URL to different bytes, which is also why a pin bump always cuts a release. The pinned versions are in [VERSIONS.md](VERSIONS.md).
+**Pin a version.** `:0.6.0` and `:sha-<commit>` name an exact image; `:0.6` follows patch releases; `:latest` and `:edge` move under you. Pinning matters more here than for most services, because a different ffmpeg encodes the same URL to different bytes, which is also why a pin bump always cuts a release. The pinned versions are in [VERSIONS.md](VERSIONS.md).
 
 To run it from a checkout instead, for development or to build your own image:
 
@@ -183,725 +88,63 @@ mix deps.get
 PORT=4000 mix run --no-halt
 ```
 
-That path needs `ffmpeg` and `ffprobe` on `PATH`. For a development container that already has them, and for the test suite, see [docs/development.md](https://github.com/audioproxy/audioproxy/blob/main/docs/development.md).
+That path needs `ffmpeg` and `ffprobe` on `PATH`. See [docs/development.md](https://github.com/audioproxy/audioproxy/blob/main/docs/development.md) for a development container that already has them, and for the test suite.
 
-### Embedding it in your own release
+The proxy is also published to hex as an OTP application (`{:audio_proxy, "~> 0.6"}`), so it can run inside a BEAM node you already deploy. It is an application rather than a library: adding the dependency is the whole integration, and starting it reads the `AP_*` environment, binds two listeners, and expects ffmpeg on `PATH`. [Configuration](https://docs.audioproxy.dev/guides/configuration/) covers what that commits you to.
 
-The proxy is also published to hex as an OTP application, so it can run inside a BEAM node you already deploy rather than as a container of its own:
+## Roadmap
 
-```elixir
-# mix.exs
-{:audio_proxy, "~> 0.5"}
-```
+No dates. It is built in small releases, each one usable, in roughly this order.
 
-**Know what starting it does before you add it.** `audio_proxy` is an application, not a library: it has no API you call, and adding the dependency is the whole integration. When your release starts it, it
+**Working now (`v0.6.0`)**
 
-- **reads and validates the `AP_*` environment** and refuses to boot on an invalid value, so a bad `AP_KEY` or an unreadable `AP_LOCAL_ROOT` fails the node's start-up rather than the first request. See [Configuration](#configuration); there is nothing to put in `config/*.exs`, because none of it is read from there.
-- **binds two listeners**: the proxy on `AP_PORT` (falling back to `PORT`, so it will contend with whatever else in the node reads that), and `/metrics` on `AP_METRICS_PORT`, bound to loopback. Ports are yours to keep distinct from the rest of the node's.
-- **expects `ffmpeg` and `ffprobe` on `PATH`**, in the image *your* release ships. The proxy's own container carries a pinned pair ([VERSIONS.md](VERSIONS.md)); an embedding one has to, too, and a different ffmpeg encodes the same URL to different bytes.
+- Signed URLs, the full processing-options grammar, and the cache-key rules
+- Expiring URLs: `exp:<unix-seconds>` time-boxes one URL without rotating the key, and because it is not part of the cache key, minting a fresh short-lived URL per page view still resolves to one render
+- Transcoding to MP3, AAC/M4A, Opus, Vorbis, FLAC and WAV, with trimming, fades, loudness normalisation, channel and sample-rate control
+- Renders stream while they encode, and concurrent requests for the same variant share one render
+- Sources on a mounted directory or in S3, read by ffmpeg through a presigned URL, so a trim fetches only the bytes it needs
+- A variant store on a local directory or in S3, so the cache survives a restart and is shared between nodes, and with it `AP_SERVE_MODE=redirect`. The store can carry its own `AP_VARIANT_S3_*` credentials and endpoint, so sources and variants may live with different providers or under different principals
+- `f:peaks`, waveform min/max data in audiowaveform's JSON and binary formats
+- A cap on simultaneous renders with a bounded wait queue, so a burst queues and then sheds rather than thrashing the machine
+- `GET /info` for source metadata, `GET /ready` for queue-aware readiness, and a Prometheus `GET /metrics` on a bind-restricted listener of its own
+- Video input refused rather than transcoded, enforced rather than intended
+- Optional CORS (`AP_ALLOW_ORIGIN`), off by default
+- A single container, published per release, and the package on hex
 
-That is the contract, and it is the intended one: an embedder wants the proxy serving, not a set of functions. If you need the code without the listener, the honest answer today is to run the container.
+**After that:** HTTPS sources, for stores that are not S3; arm64 images, so Graviton/Ampere and Apple Silicon run natively.
 
-API documentation is on [hexdocs](https://hexdocs.pm/audio_proxy), and the package carries [`llms.txt` and `llms-full.txt`](#for-ai-agents) so the full URL contract is in `deps/audio_proxy/` at the version you depend on.
+**Under consideration:** a `/sync/` URL that renders fully before responding, trading time-to-first-byte for a seekable first play. Still open, because warming the cache does the same job for nothing: fetch the URL once, discard it, then set `src`.
 
-## Signing URLs
+**Deliberately not planned:** video. This is an audio proxy and refuses video input rather than becoming a general ffmpeg gateway; video transcoding is far more expensive and carries most of ffmpeg's CVE history.
 
-Every URL is signed: the first path segment is `base64url(HMAC-SHA256(key, salt ‖ rest-of-path))`, computed over the exact bytes after the signature segment, leading `/` included, taken from the raw (still percent-encoded) request path. Key and salt are the hex-decoded values of `AP_KEY`/`AP_SALT`. Signatures are emitted unpadded; the canonical padded form is accepted on verification, but non-canonical spellings (over-padding, variant final characters) are rejected, so a signature cannot be respelled.
+**Wanted, but not designed yet:** HLS and segmented streaming. A v2 goal rather than a rejected one, and the URL space is reserved. The unsolved part is gapless boundaries, since encoding each segment independently gives each one its own encoder priming.
 
-`AudioProxy.Signature.sign/3` is the reference signer:
+`0.x` means the URL contract can still change. It will settle at `1.0`, after which a change to what an existing URL means, or to how cache keys are derived, is a major version. The per-slice detail, including rationale and trade-offs, lives in [`openspec/changes/`](https://github.com/audioproxy/audioproxy/tree/main/openspec/changes).
 
-```elixir
-key  = Base.decode16!("00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF")  # AP_KEY
-salt = Base.decode16!("FFEEDDCCBBAA99887766554433221100")  # AP_SALT
-rest = "/f:opus/br:96/plain/s3://masters/2026/piece-final.wav"
+## Documentation
 
-AudioProxy.Signature.sign(rest, key, salt)
-# => "zfLTfPPhQ8kdeYYJOdagqPfog2nFk7KzDFUjtRAf_Ns"
-```
+Start at **[docs.audioproxy.dev](https://docs.audioproxy.dev)**. It is the goal-first documentation: how to render a variant, sign a URL, configure the proxy, choose a provider, run more than one node, and read a running one.
 
-→ the URL is `/<signature><rest>`, i.e. `/zfLTfPPhQ8kdeYYJOdagqPfog2nFk7KzDFUjtRAf_Ns/f:opus/br:96/plain/s3://masters/2026/piece-final.wav`.
-
-Sign the URL-escaped path exactly as it will be requested. Verification runs over the raw request path, so re-encoding anything breaks the signature: a key with a space must appear as `a%20track.wav` in both the signature input and the request (or use the `enc/` source form, which exists precisely to avoid escaping headaches). For non-Elixir clients, the same three lines in Ruby:
-
-```ruby
-require "openssl"
-require "base64"
-
-key  = "00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF"  # AP_KEY (hex)
-salt = "FFEEDDCCBBAA99887766554433221100"  # AP_SALT (hex)
-path = "/f:opus/br:96/plain/s3://masters/2026/piece-final.wav"
-
-sig = Base64.urlsafe_encode64(
-  OpenSSL::HMAC.digest("SHA256", [key].pack("H*"), [salt].pack("H*") + path),
-  padding: false
-)
-# => "zfLTfPPhQ8kdeYYJOdagqPfog2nFk7KzDFUjtRAf_Ns"
-```
-
-Generate a real key with `openssl rand -hex 32`. `AP_KEY` must decode to at least 32 bytes or the proxy refuses to boot. **The key above is a published test vector** used throughout the test suite; never use it as a real key.
-
-> **Dev mode, never enable in production.** Setting `AP_ALLOW_INSECURE=true` makes the literal segment `insecure` pass as a signature (`/insecure/f:opus/…/plain/…`). It exists for local development and smoke tests; with it on, anyone who can reach the proxy can render anything.
-
-## Expiring URLs
-
-A signed URL is otherwise permanent: the signature covers the path and nothing else, so a leaked URL works forever and the only way to revoke it is to rotate the key — which revokes every URL you ever issued. Add `exp:<unix-seconds>` to time-box one URL:
-
-```elixir
-rest = "/f:opus/br:96/exp:#{System.system_time(:second) + 300}/plain/s3://masters/piece.wav"
-
-AudioProxy.Signature.sign(rest, key, salt)
-```
-
-Requested before that second, it renders exactly as the same URL without `exp` would. From that second on, it is a `410`:
-
-```json
-{"error": "expired", "message": "URL has expired"}
-```
-
-`exp` needs no mechanism of its own to be tamper-proof — it is part of the path, so it is inside the signature, and changing or removing it is the same `401` as changing anything else.
-
-**It does not participate in the cache key.** That is the whole reason it is worth having as an option rather than a query parameter: mint a fresh five-minute URL on every page view and all of them still resolve to *one* rendered variant. Two requests differing only in `exp` coalesce into a single render, and the one already in the store answers both.
-
-**Expiry caps everything the response hands out.** A `200`'s `Cache-Control: max-age` is clamped to at most `exp − now`, so a CDN cannot keep serving the body after the URL is dead, and a cache-hit redirect's presigned storage URL is clamped to the same bound, so the `302` cannot trade a short-lived URL for a long-lived one. Without both, enforcement at the proxy would be theater.
-
-Three things worth knowing before you generate them:
-
-- **There is no clock-skew leeway.** If you want a margin, add it to your own timestamp. A margin here would be one every deployment pays.
-- **A timestamp in the past is a valid URL** — it signs, it parses, and it answers `410`. It is not a `422`, which is what lets the `410` be a permanent verdict a CDN can cache and serve on your behalf.
-- **`/info` cannot carry it**: that endpoint has no options segment. Info URLs are meant for your own services rather than for end users.
-
-## Rendering a variant
-
-End to end, with a directory of your own audio and a real signature:
-
-```bash
-export AP_KEY=$(openssl rand -hex 32)
-export AP_SALT=$(openssl rand -hex 16)
-export AP_LOCAL_ROOT=/path/to/your/audio
-PORT=4000 mix run --no-halt &
-```
-
-Sign the path (everything after the signature segment, leading `/` included) and request it:
-
-```bash
-REST='/f:mp3/br:128/t:0:30/plain/local://piece.wav'
-
-SIG=$(ruby -ropenssl -rbase64 -e '
-  print Base64.urlsafe_encode64(
-    OpenSSL::HMAC.digest("SHA256", [ENV["AP_KEY"]].pack("H*"),
-                         [ENV["AP_SALT"]].pack("H*") + ARGV[0]),
-    padding: false)' "$REST")
-
-curl -D - -o preview.mp3 "localhost:4000/$SIG$REST"
-```
-
-```
-HTTP/1.1 200 OK
-transfer-encoding: chunked
-content-type: audio/mpeg
-cache-control: public, max-age=31536000, immutable, no-transform
-etag: "6f1c…"
-x-audio-proxy: MISS
-```
-
-The first bytes leave before ffmpeg has finished, so a long transcode starts playing immediately rather than after it completes. There is no `Content-Length` and no `Accept-Ranges` on this response: the length is not known when the head goes out. A request for the same variant once it is cached is framed differently, and that difference is worth reading before you write a client against either shape ([Cache semantics](#cache-semantics)).
-
-`x-audio-proxy` says where the bytes came from. `MISS` is this request's own render. `COALESCED` means another request was already rendering exactly this variant and this one attached to it: the same bytes, no second ffmpeg. `HIT` means it came from the variant store and nothing was rendered at all. `etag` is the variant's cache key, which is a pure function of the normalized options and the source, so the same variant requested with its options in a different order carries the same one.
-
-Requests for the same variant share a render, so a burst — a page that loads the same preview for fifty visitors at once — costs one encode rather than fifty. A request arriving mid-render is sent everything encoded so far, then the rest as it comes, so it gets the whole file and not the tail. A shared render is held in memory for as long as it runs, and output past `AP_MAX_VARIANT_BYTES` fails rather than growing without limit.
-
-If the client goes away mid-stream, the render goes with it, unless someone else is still listening to the same one: closing the last connection kills the ffmpeg process rather than leaving it encoding into a socket nobody is reading. A render that fails *before* any bytes are sent is one of the JSON errors below; one that fails after them can only be signalled by cutting the connection short, so treat a chunked response that ends without its terminating chunk as a failed download.
-
-At most `AP_MAX_CONCURRENCY` renders run at once. A request that needs one when they are all busy waits its turn, up to `AP_QUEUE_SIZE` of them; past that, the answer is a `429` with `Retry-After` rather than a machine with more encoders on it than cores. Waiting is invisible from the client's side — the response simply starts later — and requests that share a render share its slot, so the cap counts encodes rather than connections. A request that waits longer than `AP_RENDER_TIMEOUT` for a slot gets the same `429`: the queue could not reach it in time, which is the client's cue to come back, not a failed render.
-
-For what happens behind that (the subprocess, coalescing, slots, buffering, the timeout and the kill discipline) see [docs/rendering.md](docs/rendering.md).
-
-## Asking what a source is
-
-`info` sits where the options go and answers with the source's own metadata, so a client can size a request to the file before making it — a preview URL that trims past the end of a track is an easy mistake to make blind.
-
-```bash
-REST='/info/plain/local://piece.wav'
-curl -D - "localhost:4000/$SIG$REST"
-```
-
-```
-HTTP/1.1 200 OK
-content-type: application/json
-cache-control: public, max-age=3600
-etag: "a1f3…"
-
-{"format":"wav","duration":184.32,"sample_rate":48000,"channels":2,
- "bit_depth":16,"bitrate":1536000,"size":35389532,
- "tags":{"title":"Sea Change","artist":"…"}}
-```
-
-| Field | Meaning |
+| Document | What it covers |
 |---|---|
-| `format` | The `f:` token this source would be, not the container's internal name: an MP4 is `m4a`, and Ogg is `opus` or `ogg` depending on what is inside it. A source in a container the proxy cannot itself produce is named plainly (`matroska`) rather than forced into a token |
-| `duration` | Seconds, as a float |
-| `sample_rate`, `channels` | The source's own, which is what a variant inherits when you leave `sr` or `ch` off |
-| `bit_depth` | Lossless sources only |
-| `bitrate` | Bits per second |
-| `size` | Bytes, from storage |
-| `tags` | Whatever the file carries — title, artist and the rest — as strings |
-
-**A field the source cannot answer is left out, never `null`.** A lossy source has no `bit_depth`, so the key is simply absent; an untagged file has no `tags`. Test for the key, not for a value.
-
-`info` takes no processing options: it describes the source, not a variant, so `/info/br:128/…` is a `422`. A source with no audio in it at all — a video-only MP4, a text file — is a `415`, and so is one that has both audio and video: the [audio-only rule](#the-source-must-be-audio) applies here too, so `/info` will not describe a video file for you. Cover art is not video.
-
-Responses carry an `ETag` derived from the source object, so a client or CDN that has seen this metadata before revalidates for the price of a `304`. `Cache-Control` is one hour rather than the year a rendered variant gets, and deliberately not `immutable`: a variant's URL describes its bytes exactly and can never go stale, while this describes a file somebody may re-upload tomorrow.
-
-Probing is cheap — it reads the file's header and stops — so it does not queue behind renders and has its own, shorter, `AP_PROBE_TIMEOUT`. For the same reason `AP_MAX_SRC_BYTES` does not apply here: a source too large to render can still be described, which is what you want, since the long file is exactly the one you were going to ask for a trimmed preview of.
-
-Cheap is not free, though, so probes have a ceiling of their own: `AP_MAX_PROBE_CONCURRENCY`, separate from `AP_MAX_CONCURRENCY` so that neither pool can starve the other. Requests reading the same source share one probe — several `/info` calls, several renditions, or an `/info` alongside a render — so the ceiling is reached by traffic naming many *different* sources at once. When it is, the answer is a `429` with `Retry-After`, the same as a full render queue; come back and there will almost certainly be room, since a probe lasts milliseconds.
-
-## Processing options
-
-The options segments describe the variant completely, and their normalized form *is* the cache key — with one exception, `exp`, which describes the *request* instead and is covered under [Expiring URLs](#expiring-urls). `AudioProxy.Options` parses, validates, and normalizes them; `AudioProxy.CacheKey` hashes the result. Invalid or conflicting options are rejected with an `AudioProxy.OptionError` naming the offending segment, which the HTTP layer will render as a `422`.
-
-```elixir
-{:ok, opts} = AudioProxy.Options.parse("f:opus/br:96/t:12.5:30/fade:0.5:1")
-AudioProxy.Options.normalize(opts)
-# => "br:96/f:opus/fade:0.5:1/t:12.5:30"
-
-AudioProxy.CacheKey.derive!("br:96/f:opus", "s3://masters/piece.wav")
-# => "00d89ba1cbfecacd4450ae5ca912f7153f4740bb5e81d96609f6bfdfbfde4099"
-```
-
-### Supported options
-
-| Key | Value | Notes |
-|---|---|---|
-| `f` | `mp3` `opus` `ogg` `aac` `m4a` `flac` `wav` `peaks` | Output format; default `mp3` |
-| `br` | positive integer, kbps | CBR/ABR bitrate; excludes `q` |
-| `q` | number | VBR quality; excludes `br` |
-| `sr` | positive integer, Hz | Resample; default is the source rate. An explicit `sr` above 48 kHz is rejected for lossy formats; capping the *default* for lossy sources is the renderer's job (§3.1) |
-| `ch` | `1` \| `2` | Downmix |
-| `bd` | `16` \| `24` \| `32f` | Bit depth, lossless formats only |
-| `t` | `start[:duration]`, seconds | Trim. `t:30` runs to the end; `t:30:15` is 15 s from 30 s |
-| `fade` | `in[:out]`, seconds | Applied inside the trimmed region; an omitted out-fade is `0` |
-| `gain` | signed number, dB | Static gain |
-| `norm` | `ebu[:I[:TP[:LRA]]]` | Loudness normalization; targets default to `-16:-1.5:11`. v1 runs `loudnorm` single-pass, good enough for previews but not for masters (§3.2) |
-| `pts` | positive integer | Peaks: number of min/max pairs; default `800` |
-| `pk_fmt` | `json` \| `dat` | Peaks: output encoding; default `json` |
-| `ch` under `f:peaks` | `1` \| `2` | Peaks default to **mono** rather than following the source; `ch:2` gives per-channel pairs |
-| `dl` | filename | Sets `Content-Disposition: attachment` |
-| `cb` | opaque string | Cache-buster; participates in the cache key |
-| `exp` | positive integer, Unix seconds | Expires the URL — a `410` from this second on. The one key that does **not** participate in the cache key; see [Expiring URLs](#expiring-urls) |
-
-Decimals are accepted to three places (millisecond precision) and rejected beyond that rather than silently rounded, so float formatting can never destabilize a cache key. `-0` is collapsed to `0` at parse time: it renders as `0`, so it cannot be told apart in a cache key, and letting it into the struct would let it be told apart in the ffmpeg arguments. `dl` and `cb` values stay percent-encoded and are treated as opaque bytes.
-
-### Validation rules
-
-Beyond each key's own value domain, these cross-key rules are enforced:
-
-- `br` and `q` are mutually exclusive.
-- `br` requires a lossy format; `q` requires a format whose encoder has a quality scale (everything but `wav`).
-- `bd` requires a lossless format (`flac`, `wav`), and `bd:32f` requires `f:wav`, since flac encodes integer samples only.
-- `q` must sit inside its codec's scale: mp3 0–9, ogg −1–10, aac/m4a 0.1–2, opus 0–10, flac 0–12. `f:flac/q:13` is refused by ffmpeg itself ("invalid compression level"), so refusing it here turns a 500 into a 422.
-- `pts` and `pk_fmt` require `f:peaks`.
-- `sr` is capped at 48 kHz for lossy formats.
-- A fade must fit inside the trimmed region when the trim is bounded, and a fade-out requires a bounded trim at all: its start is `duration - out`, and without a duration there is nothing to count back from. A fade-in needs no trim, since it starts at zero.
-
-Peaks add one more: `f:peaks` refuses `br`, `q`, `sr`, `bd`, `gain` and `norm`. Peaks are computed from the decoded source and respect only `t`, `ch` and `fade` (§3.3), so accepting an option that cannot change the output would hand byte-identical peaks two different cache keys. `f:peaks/br:96` is a 422.
-
-`f:peaks` is also the one format whose `ch` default is not "follow the source": with no `ch` it downmixes to mono, because a waveform UI draws one shape. That default is materialized into the cache key, so `f:peaks` and `f:peaks/ch:1` are one variant rather than two.
-
-### Waveform peaks
-
-`f:peaks` returns [audiowaveform](https://github.com/bbc/audiowaveform)-compatible data, so it drops straight into [peaks.js](https://github.com/bbc/peaks.js) and the rest of that ecosystem. There was no reason to invent a schema.
-
-`pk_fmt:json` (the default) is `Content-Type: application/json`:
-
-```json
-{
-  "version": 2,
-  "channels": 1,
-  "sample_rate": 44100,
-  "samples_per_pixel": 5513,
-  "bits": 16,
-  "length": 800,
-  "data": [-31904, 31810, -32210, 32026, "…1596 more"]
-}
-```
-
-`data` holds `length × 2 × channels` signed 16-bit integers: a minimum and a maximum per pixel, per channel, interleaved. `pk_fmt:dat` is the same numbers as `application/octet-stream` — audiowaveform's binary layout, a little-endian header of version, flags, sample rate, samples-per-pixel, length and channel count, then the pairs as `int16`. It is roughly a fifth the size of the JSON, which starts to matter past a few thousand pairs.
-
-Drawing them with peaks.js is the URL and nothing else:
-
-```js
-Peaks.init({
-  container: document.querySelector('#waveform'),
-  mediaElement: document.querySelector('audio'),
-  dataUri: {
-    json: `${BASE}/${sig}/f:peaks/pts:800/plain/local://piece.wav`,
-    // or, for the binary form:
-    // arraybuffer: `${BASE}/${sig}/f:peaks/pts:800/pk_fmt:dat/plain/local://piece.wav`
-  },
-})
-```
-
-Pick `pts` to match the pixel width you will draw at. `t` narrows the region the peaks span, so `f:peaks/t:30:15` describes the same fifteen seconds a `f:mp3/t:30:15` preview does, and peaks are cached and range-served exactly like audio variants are.
-
-The rules about `br`, `q` and `bd:32f` come from the same principle applied one layer down: ffmpeg accepts `-b:a` on a flac encode and ignores it, so `f:flac/br:320` would be two cache keys for one file. Rejecting is cheaper than storing the duplicate.
-
-Unknown keys, repeated keys, empty segments, and valueless segments are rejected too. There is no last-write-wins and no silent ignoring, because either would let two different URLs mean the same variant. Values are also bounded above (`br` ≤ 10000, `sr` ≤ 384000, `pts` ≤ 100000, `|gain|` ≤ 100, `exp` ≤ 253402300799) so a mistyped URL fails here as a 422 rather than downstream as a render error, and `dl`/`cb` reject control characters. That last rule is what makes the cache key's separator sound (see below).
-
-### Cache-key semantics
-
-```
-lowercase-hex(SHA-256(normalized-options ‖ "\n" ‖ canonical-source))
-```
-
-Normalization is what makes this deterministic: keys are sorted lexicographically, applicable defaults are materialized (`f`, the `norm` targets when `norm` is present, `pts`/`pk_fmt` under `f:peaks`), and every number is rendered minimally (`30`, never `30.0`). So `f:opus/br:96` and `br:96/f:opus` are one variant with one key, while any genuine difference, `cb` included, yields a different one. `exp` is the deliberate exception: it never reaches the normalized string, so it cannot reach the key ([Expiring URLs](#expiring-urls)). The `"\n"` is load-bearing: without it, `("", "/gain:3")` and `("gain:3", "")` would hash identical bytes, which is why control characters are refused in the only two options whose values are opaque.
-
-Normalization is syntactic, not semantic: `t:0`, `fade:0:0` and `gain:0` are identity renders but keep their own keys, so those spellings cost duplicate cache objects. Collapsing them is tracked as follow-up work. The property suite (`test/audio_proxy/options_property_test.exs`) holds this line: normalization is idempotent, order-insensitive, and always re-parses.
-
-## Sources
-
-The last portion of the path names what to render, in one of two forms:
-
-| Form | Example |
-|---|---|
-| `plain/{source}` | `plain/s3://masters/2026/piece-final.wav` |
-| `enc/{base64url(source)}` | `enc/czM6Ly9tYXN0ZXJzLzIwMjYvcGllY2UtZmluYWwud2F2` |
-
-Both name the same thing and produce the same cache key. `enc/` exists because escaping a URL inside a URL is easy to get wrong: base64url the source as written and you are done.
-
-In the `plain/` form the source is percent-escaped, and it is unescaped exactly once. A space is `%20`, a literal percent is `%25`, and `+` is a literal plus. One consequence to watch: a source that already carries escapes has to be escaped *again*, so a URL ending in `a%20b.wav` is written `plain/https://h/a%2520b.wav`. Sign the source in the same spelling you request it in, because the signature covers the raw path.
-
-### The source must be audio
-
-A source containing video is refused with a `415` (`video_source`), whatever variant was asked for. The audio track is not extracted: this is an audio proxy, and pointing it at a video library gets you an error rather than a slow, expensive render. Embedded cover art is not video — the tagged mp3s, flacs and m4a files in a normal catalogue render exactly as they always did.
-
-The rule covers `/info` as well, so there is no endpoint that will describe a video file for you either. One consequence worth knowing while you are building URLs: a video source answers `415` on a `GET` but `200` on a `HEAD` of the same URL, because deciding costs a probe and `HEAD` does not run one (see [Caching and CDNs](#caching-and-cdns)).
-
-**Upgrading onto this rule:** the check runs before a render, not before a cache hit — a hit is immutable bytes that were already rendered. So a variant store populated *before* this rule existed keeps serving whatever it holds, including audio that was extracted from a video source back when that was allowed, for the full year its `Cache-Control` claims. If that matters to you, purge the variant store (and the CDN in front of it); nothing else reaches those bytes.
-
-### `local://`: files under a configured root
-
-`local://{path}` serves a path relative to `AP_LOCAL_ROOT`. Mount the directory you want served, read-only, and point the proxy at it:
-
-```bash
-docker run -p 4000:4000 \
-  -e AP_ALLOW_INSECURE=true \
-  -e AP_LOCAL_ROOT=/srv/audio \
-  -v /path/to/your/audio:/srv/audio:ro \
-  ghcr.io/audioproxy/audioproxy:0.6.0
-
-# …renders /srv/audio/previews/track.wav
-curl "$BASE/insecure/f:mp3/br:128/plain/local://previews/track.wav"
-```
-
-Unset `AP_LOCAL_ROOT` and local sources are refused outright: the root is the whole access-control story for disk. **Mount it read-only.** Write access to the root is equivalent to choosing what the proxy will serve.
-
-[docs/sources.md](docs/sources.md#local-sources) has the confinement rules, the path limits, and why the root never appears in a cache key.
-
-### `s3://` and `https://`: remote sources
-
-`s3://{bucket}/{key}` names an object in a bucket; `https://{host}/{path}` names a URL at an origin. Both need `AP_SOURCE_ALLOWLIST` to say which namespaces you serve:
-
-| Entry | Matches |
-|---|---|
-| `masters` | Exactly that bucket (case-sensitive) or host (case-folded) |
-| `previews-*` | Buckets beginning `previews-` |
-| `*.media.example` | `media.example` and any subdomain of it |
-| `*` | Everything |
-
-The wildcards are asymmetric on purpose. A bucket namespace is yours, so a prefix glob gives nothing away; a host namespace is anyone's, so hosts take the mirror image, anchored to a label boundary — `*.media.example` accepts `cdn.media.example` and refuses `media.example.evil.com`. There is deliberately no host *prefix* glob: `cdn.*` reads as "our CDN" but would mean any host starting `cdn.`, `cdn.evil.com` included, so it matches nothing at all.
-
-**Leave `AP_SOURCE_ALLOWLIST` unset and HTTPS sources are refused outright**, while S3 sources are accepted — your bucket credentials are already the gate there, and a URL has no such backstop. An allowlisted host is trusted by definition: the proxy will fetch what it is pointed at, so point it at origins you control.
-
-`http://` and URLs carrying credentials (`https://user:pass@…`) are refused whatever the allowlist says.
-
-**`s3://` renders and describes; `https://` does not yet.** An `s3://` source is HEADed for its size and ETag and then handed to ffmpeg as a presigned URL, so ffmpeg ranges the object directly and no source bytes pass through the proxy — which is what makes `t:0:30` on a two-hour master read only the seconds it needs. It needs the `AWS_*` credentials under [Configuration](#configuration). An `https://` source still parses, canonicalizes and authorizes but answers the same blind `404` as a missing one, until `add-https-source-backend` lands.
-
-`AP_PRESIGN_TTL` bounds the *URL*, not the read: ffmpeg has to open the object within the TTL, and the connection it opens outlives it. A long transcode does not need a long TTL.
-
-A store that is unreachable answers [`502`](#errors), not `404` — an outage says nothing about whether your object is there. A bucket policy that refuses the proxy's credentials *does* answer `404`, deliberately indistinguishable from a missing object; the log line names `access_denied`, so that is where an operator debugging a policy should look.
-
-See [docs/sources.md](docs/sources.md#remote-sources) for the URL normalization rules, the limits, and the full allowlist grammar.
-
-## Errors
-
-Failures are JSON, one shape everywhere: `{"error": "…", "message": "…"}`.
-
-| Status | `error` | When |
-|---|---|---|
-| `401` | `invalid_signature` | Missing or invalid signature |
-| `404` | `not_found` | The source is missing, unreadable, unparseable, or not one this proxy may serve, deliberately indistinguishable, so a `404` tells you nothing about what exists on disk |
-| `413` | `source_too_large` | The source exceeds `AP_MAX_SRC_BYTES`. Renders only — `/info` describes a source of any size |
-| `415` | `undecodable_source` | The source format is not decodable, or — on `/info` — carries no audio at all |
-| `415` | `video_source` | The source contains a video stream, and this proxy serves audio only. Cover art is not video. See [Sources](#sources) |
-| `410` | `expired` | The URL's `exp` has passed. The signature was fine — see [Expiring URLs](#expiring-urls) |
-| `422` | `invalid_options` | Invalid or conflicting options; the message names the offending segment |
-| `429` | `queue_full` | A pool is full: either the render queue (or this request waited longer than `AP_RENDER_TIMEOUT` for a render slot), or `AP_MAX_PROBE_CONCURRENCY` probes are already running. `Retry-After` is set either way, and the two are deliberately indistinguishable to a client |
-| `500` | `render_failed` | The render failed for a reason that is not yours: no encoder on the host, no disk space, a failure the proxy could not classify. Worth retrying |
-| `500` | `probe_failed` | A probe failed for a reason that is not yours. Worth retrying. Both endpoints probe — `/info` is a probe, and a render runs one first to check the source is audio |
-| `500` | `not_configured` | The storage backend the source names is misconfigured — no credentials, or a region/endpoint that is not the object's, which the store answers with a redirect. An operator has to fix it; retrying will not |
-| `502` | `upstream_unavailable` | The storage backend could not be reached — it answered `5xx`, or nothing at all. Says nothing about whether your object exists, and is `no-store` for that reason. Worth retrying |
-| `504` | `render_timeout` | A render started and then exceeded `AP_RENDER_TIMEOUT`. Time spent waiting for a slot is a `429`, not this |
-| `504` | `probe_timeout` | A probe exceeded `AP_PROBE_TIMEOUT`. On a render URL this means the audio-only check ran out of time before any encoding started — raise `AP_PROBE_TIMEOUT`, not `AP_RENDER_TIMEOUT` |
-
-A failure *after* the response has begun is not in this table and cannot be: see [Rendering a variant](#rendering-a-variant).
-
-## Configuration
-
-All configuration comes from `AP_`-prefixed environment variables. See `docs/audio-proxy-api-v1.md` §6 for intent and `AudioProxy.Config` for parsing. Values are read, typed, and validated once at boot; a malformed value aborts startup with an error naming the variable.
-
-Note that the variables below are the full configuration surface for the design, so several of them are parsed and validated but not yet consumed by anything.
-
-<!-- config-table:start -->
-| Variable | Type | Default | Purpose |
-|---|---|---|---|
-| `AP_PORT` | positive integer | `4000` | Port the proxy listens on. `PORT` is read when it is unset, so a host that sets `PORT` for something else will be followed |
-| `AP_KEY` | hex, ≥ 32 bytes decoded | unset | HMAC key for URL signatures |
-| `AP_SALT` | hex | unset | HMAC salt |
-| `AP_ALLOW_INSECURE` | boolean | `false` | Accept unsigned URLs (dev only) |
-| `AP_SOURCE_ALLOWLIST` | comma-separated | empty | Permitted buckets and hosts for `s3://` and `https://` sources. Empty accepts every bucket and refuses every host — see [Sources](#s3-and-https-remote-sources) |
-| `AP_LOCAL_ROOT` | existing directory | unset | Root for `local://` sources; unset disables them. Must exist at boot, and may not be `/` |
-| `AP_VARIANT_STORE` | URL (`file:///path`, `s3://bucket`) | unset | Where rendered variants are written back; unset = no cache, always render. Probed for writability at boot. See [Variant store](#variant-store) |
-| `AP_MAX_CONCURRENCY` | positive integer | schedulers online | Max simultaneous ffmpeg processes. Requests that share a render share its slot, so this counts encodes, not connections |
-| `AP_MAX_PROBE_CONCURRENCY` | positive integer | `4 × AP_MAX_CONCURRENCY` | Max simultaneous ffprobe processes. A ceiling of its own so a probe never queues behind a render; requests for the same source share a probe, so this counts probes, not connections. Raise it if you serve many distinct sources at once and see `429`s while ffmpeg is idle |
-| `AP_QUEUE_SIZE` | non-negative integer | `32` | Requests that may wait for a render slot before the next one is answered `429` with `Retry-After`. `0` means no waiting at all |
-| `AP_READY_QUEUE_THRESHOLD` | non-negative integer, ≤ `AP_QUEUE_SIZE` | half `AP_QUEUE_SIZE`, rounded down (min 1) | Queue depth at which `/ready` answers `503`; it recovers again at half the threshold, rounded down. `0` disables the check, which is what a single node wants. See [Health and readiness](#health-and-readiness) |
-| `AP_MAX_SRC_BYTES` | positive integer | `2000000000` | Reject larger sources with `413`, before any render starts. Does not apply to `/info`, which only reads headers |
-| `AP_MAX_VARIANT_BYTES` | positive integer | the effective `AP_MAX_SRC_BYTES` | Cap the bytes one render may hold in memory; output past it kills the render and fails the request mid-stream. Set it below `AP_MAX_SRC_BYTES` to accept large sources while producing small outputs. Raising it does **not** buy capacity — it bounds one render, so every concurrent slot may reach it; the lever for the total is `AP_MAX_CONCURRENCY`. See [docs/capacity.md](docs/capacity.md) |
-| `AP_RENDER_TIMEOUT` | positive integer | `300` | Seconds a render may take before ffmpeg is killed and the request answered `504`. Raise it for full-length transcodes of long masters; the default suits previews. See [docs/rendering.md](docs/rendering.md) |
-| `AP_PROBE_TIMEOUT` | positive integer | `10` | Seconds an `/info` probe may take before ffprobe is killed and the request answered `504`. Separate from `AP_RENDER_TIMEOUT`, and much shorter: a probe reads the file's header rather than decoding it. See [Asking what a source is](#asking-what-a-source-is) |
-| `AP_SERVE_MODE` | `redirect` \| `proxy` | `redirect` | Serve cache hits by redirect or proxied. See [Choosing a serve mode](#choosing-a-serve-mode) |
-| `AP_PRESIGN_TTL` | positive integer | `300` | Seconds a cache hit's presigned URL stays valid. Redirect mode only |
-| `AP_LOG_LEVEL` | `debug` \| `info` \| `warning` \| `error` | `info` | Lowest level written to stdout. See [Logs](#logs) |
-| `AP_METRICS_BIND` | IP address literal | `127.0.0.1` | Interface the `/metrics` listener binds. The endpoint is unsigned, so this *is* its access control — widen it deliberately. A hostname is refused. See [Metrics](#metrics) |
-| `AP_METRICS_PORT` | positive integer | `9568` | Port for the `/metrics` listener. Must differ from the listener port (`AP_PORT`, or `PORT`) — two listeners cannot share one, and the clash is refused at boot rather than left to an `:eaddrinuse` naming neither |
-| `AP_ALLOW_ORIGIN` | `*` or an origin | unset | Send CORS headers, so a page on another origin can `fetch()` from the proxy. Unset, no CORS header is sent anywhere. See [Fetching from a browser](#fetching-from-a-browser) |
-| `AP_S3_ENDPOINT` | origin URL | unset | Talk to an S3-compatible store instead of AWS. See [S3 credentials](#s3-credentials) and [docs/s3-providers.md](docs/s3-providers.md) |
-| `AP_S3_ADDRESSING` | `virtual` \| `path` | `virtual` with no `AP_S3_ENDPOINT`, `path` with one | Whether a request names its bucket in the host (`bucket.host/key`) or in the path (`host/bucket/key`). Tigris requires `virtual`; see [docs/s3-providers.md](docs/s3-providers.md) |
-| `AP_S3_CA_BUNDLE` | path to a PEM file | unset | Verify the store's certificate against this bundle instead of the system trust store, for a store behind a private CA. Must be readable at boot |
-| `AP_VARIANT_S3_ENDPOINT` | origin URL | `AP_S3_ENDPOINT` | Variant store only. See [A separate store for variants](#a-separate-store-for-variants) — every variable in this group falls back to its `AP_S3_`/`AWS_` counterpart, so setting none of them keeps one configuration for both jobs |
-| `AP_VARIANT_S3_ADDRESSING` | `virtual` \| `path` | derived from `AP_VARIANT_S3_ENDPOINT` when that is set, otherwise the effective `AP_S3_ADDRESSING` | Variant store only |
-| `AP_VARIANT_S3_CA_BUNDLE` | path to a PEM file | `AP_S3_CA_BUNDLE` | Variant store only |
-| `AP_VARIANT_S3_ACCESS_KEY_ID` | string | `AWS_ACCESS_KEY_ID` | Variant store only. All-or-nothing with the two below |
-| `AP_VARIANT_S3_SECRET_ACCESS_KEY` | string | `AWS_SECRET_ACCESS_KEY` | Variant store only |
-| `AP_VARIANT_S3_REGION` | string | `AWS_REGION` | Variant store only |
-| `AP_VARIANT_S3_SESSION_TOKEN` | string | `AWS_SESSION_TOKEN` while the whole identity is inherited; unset once the store has one of its own | Variant store only. The token follows the identity rather than the variable: set any of the three credentials above and this is read from here alone, since a token belongs to the principal that minted it |
-<!-- config-table:end -->
-
-Booleans accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`, case-insensitively. An empty value counts as unset.
-
-**Sizing the container.** `AP_MAX_CONCURRENCY` and `AP_MAX_VARIANT_BYTES` are the two variables that decide how much memory a container needs, and the answer is a lookup rather than a guess: a render's output is held in memory until the render ends, so a full-length transcode costs its own size while a source of any length costs nothing. [docs/capacity.md](docs/capacity.md) opens with a matrix — find your output length and format in a row and your memory limit in a column, and read the largest safe `AP_MAX_CONCURRENCY` — plus the reverse table, for a concurrency you have already fixed. The formula, the measured per-format costs and the worked examples follow it as the derivation, including why full-length lossless output is refused by design. Read it before serving anything longer than a preview.
-
-### Fetching from a browser
-
-An `<audio src="…">` pointed at the proxy plays from any page, with nothing configured. Anything that *reads* the bytes instead of playing them needs CORS: `fetch()`ing `f:peaks` to draw a waveform, reading `/info`, or reading `Retry-After` off a `429` to back off politely. Without it the browser refuses the response and the page sees an opaque failure.
-
-Name the origin your page is served from:
-
-```bash
-AP_ALLOW_ORIGIN=https://app.example.com …
-```
-
-An origin and nothing else — scheme, host, optional port — **spelled the way a browser spells it**, since the browser compares your value to its own `Origin` byte for byte. Anything that means the right origin to a person but matches nothing in a browser is refused at boot, with the canonical spelling in the error:
-
-| Refused | Write instead |
-|---|---|
-| `https://app.example.com/` | `https://app.example.com` |
-| `HTTPS://App.Example.com` | `https://app.example.com` |
-| `https://app.example.com.` | `https://app.example.com` |
-| `https://app.example.com:443` | `https://app.example.com` |
-
-A non-default port stays, of course: `http://localhost:5173` is exactly what a dev server sends. `AP_ALLOW_ORIGIN=*` allows every origin, which suits a public catalogue and nothing that a signed URL is meant to keep scoped.
-
-Setting it also makes `OPTIONS` answer the browser's preflight; unset, `OPTIONS` is a `404` like every other non-GET method. Either way the URL signature is still what authorizes a request: CORS decides which page may *read* a response, never which requests are valid.
-
-One origin, not a list. If you need several, put a CDN or reverse proxy in front — or open an issue, since the single value is a starting point rather than a limit of the design.
-
-### S3 credentials
-
-S3 access is the one thing configured with **standard AWS variables** rather than `AP_`-prefixed ones, because every tool that produces credentials already writes those names:
-
-| Variable | Required | Purpose |
-|---|---|---|
-| `AWS_ACCESS_KEY_ID` | with the others | Access key |
-| `AWS_SECRET_ACCESS_KEY` | with the others | Secret key |
-| `AWS_REGION` (or `AWS_DEFAULT_REGION`) | with the others | Signing region — part of every signature, so there is nothing safe to guess |
-| `AWS_SESSION_TOKEN` | no | For temporary credentials |
-
-They are validated as a group at boot: all three, or none. Half a credential signs nothing, and a container that starts and then fails its first S3 request is worse than one that does not start.
-
-**Credentials come from the environment only.** There is no IMDS or STS lookup, so an EC2/EKS instance role does not work — supply keys. That is a known limitation, not an oversight.
-
-```bash
-AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=… AWS_REGION=eu-central-1 …
-```
-
-`AP_S3_ENDPOINT` points at something other than AWS — MinIO, localstack, or any S3-compatible store:
-
-```bash
-AP_S3_ENDPOINT=http://minio:9000 …
-```
-
-It takes an origin and nothing else: a path, query, fragment, or embedded credentials (`http://key:secret@minio:9000`) are all refused at boot. Credentials especially — they belong in the `AWS_*` variables, and accepting them here would ignore them silently.
-
-Setting it also switches the **addressing** default from virtual-hosted (`bucket.s3.region.amazonaws.com`, what AWS requires) to path-style (`endpoint/bucket/key`, what most S3-compatible stores expect). Override either default with `AP_S3_ADDRESSING`, which some providers need — Tigris accepts only virtual-hosted:
-
-```bash
-AP_S3_ENDPOINT=https://fly.storage.tigris.dev AP_S3_ADDRESSING=virtual AWS_REGION=auto …
-```
-
-Set `AP_S3_ADDRESSING=path` if your bucket name is not a valid DNS label — one containing dots breaks certificate matching against `*.s3.region.amazonaws.com`, and underscores or capitals are not resolvable at all. Virtual-hosted addressing puts the bucket name in the hostname, so those names only work path-style.
-
-> **Upgrading from `v0.2.0` against AWS:** requests were path-style before this variable existed and are now virtual-hosted, which is what AWS requires in regions launched after 2019. Buckets predating that, and the names described above, need `AP_S3_ADDRESSING=path`. Nothing changes for a deployment with `AP_S3_ENDPOINT` set.
-
-A store behind a private certificate authority is reached over `https://` by pointing `AP_S3_CA_BUNDLE` at a PEM bundle; it replaces the system trust store rather than adding to it. There is deliberately no way to switch certificate verification off.
-
-#### A separate store for variants
-
-Everything above configures **both** jobs the proxy does with S3: reading sources and keeping variants. Two deployments need to say something that cannot say — sources on one provider with variants on another, or a read-only credential for the source buckets and a writing one for the cache. The `AP_VARIANT_S3_*` group overrides the store side alone:
-
-```bash
-# Sources stay on R2, variants go to AWS, each with its own key.
-AP_S3_ENDPOINT=https://ACCOUNT.r2.cloudflarestorage.com AWS_REGION=auto \
-AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=… \
-AP_VARIANT_S3_ENDPOINT=https://s3.eu-central-1.amazonaws.com AP_VARIANT_S3_ADDRESSING=virtual \
-AP_VARIANT_S3_REGION=eu-central-1 \
-AP_VARIANT_S3_ACCESS_KEY_ID=… AP_VARIANT_S3_SECRET_ACCESS_KEY=… …
-```
-
-Three rules, and they are the whole feature:
-
-- **Unset means inherit.** Each variable that is not set falls back to its shared counterpart, so a deployment that sets none of them behaves exactly as it did before this group existed.
-- **The credentials are all-or-nothing.** Set any of `AP_VARIANT_S3_ACCESS_KEY_ID`, `AP_VARIANT_S3_SECRET_ACCESS_KEY`, `AP_VARIANT_S3_REGION` or `AP_VARIANT_S3_SESSION_TOKEN` and you must set the first three; boot aborts naming the ones missing. Half of one identity and half of another signs nothing. The token stays optional, but once the store has an identity of its own it comes from `AP_VARIANT_S3_SESSION_TOKEN` and nowhere else — a token belongs to the principal that minted it. Set none of the four and the store inherits the source identity whole, token included, which is what makes an un-overridden deployment behave exactly as it did before.
-- **Addressing derives per side.** With `AP_VARIANT_S3_ENDPOINT` set, the store's addressing default is derived from *that* endpoint by the rule above — so a MinIO cache behind AWS sources gets path-style with nothing configured.
-
-There is no way to say "sources have an endpoint, the store is AWS proper" by leaving `AP_VARIANT_S3_ENDPOINT` unset, since unset means inherit. Write AWS's endpoint out instead, as the example above does: `https://s3.<region>.amazonaws.com` with `AP_VARIANT_S3_ADDRESSING=virtual` is the request AWS's own default produces.
-
-**[docs/s3-providers.md](docs/s3-providers.md) has working configurations** for Backblaze B2, DigitalOcean Spaces, Hetzner, Scaleway and Tigris: each one's endpoint, region and addressing conventions, which kind of credential to create, and the limitations to weigh before committing to a provider. It is also the honest account of what is tested — MinIO is, and nothing else is, AWS included.
-
-### Variant store
-
-Point `AP_VARIANT_STORE` at where completed renders should be kept:
-
-```bash
-AP_VARIANT_STORE=s3://variants …                                # object storage
-AP_VARIANT_STORE=file:///var/cache/audio_proxy AP_SERVE_MODE=proxy …   # a directory
-```
-
-The scheme picks the backend, and each is validated at boot by the operation it needs — a write, and taking it back — so a store this deployment cannot write fails the container instead of discarding every write-back in silence. `file://` names a directory that must exist and be writable. `s3://` names a bucket and nothing else: no key prefix, and the credentials are the same `AWS_*` variables [S3 credentials](#s3-credentials) covers. Unset means no cache: every request renders.
-
-With a store configured, every successful render is written back under its cache key, together with the headers it was served with — atomically, so a failed or cancelled render leaves nothing behind. It also changes what a disconnect means: the render of a variant nobody is waiting for anymore is completed into the store rather than cancelled, so the next request for it is a hit.
-
-**Prefer `s3://` if you have object storage.** The cache outlives the container, every node reads what any node rendered, and it is the only backend that can presign — which is what makes `AP_SERVE_MODE=redirect`, the default, work at all. See [Choosing a serve mode](#choosing-a-serve-mode).
-
-Two things about a `file://` store are yours to own:
-
-- **It is unbounded.** Nothing evicts, expires, or size-caps it; it grows until the disk is full. Manage it like any cache directory you operate — a dedicated volume, disk alerts, a sweep of your choosing.
-- **It should live on a volume.** A store on the container's writable layer disappears with the container, taking every cached variant with it.
-
-A `file://` store is also per-node: two nodes with separate directories each render a variant once. That is the intended trade — shared caches are what `s3://` is for.
-
-An `s3://` store is unbounded in the same way, and there the lever is the bucket's own lifecycle rules rather than anything this proxy does. Worth setting one for incomplete multipart uploads too: a write-back aborts its own, but a hard kill of the container is not something it can clean up after.
-
-### Cache semantics
-
-A request for a variant that is not stored renders it (`MISS`), or attaches to a render already running for it (`COALESCED`). A request for one that is renders nothing (`HIT`), and the two answer in different shapes:
-
-| | `MISS` / `COALESCED` | `HIT` |
-|---|---|---|
-| Status | `200` | `200`, or `302` in redirect mode |
-| Framing | `transfer-encoding: chunked` | `content-length` |
-| `accept-ranges` | absent | `bytes` |
-| A `Range` request | ignored, answered in full | `206` with the slice |
-
-`content-type`, `cache-control` and `etag` are the same either way; so are the bytes. Both shapes start delivering before the variant is complete or fully read, so neither makes a client wait.
-
-The one thing to take from this table: **the same URL can answer in either shape**, because which one you get depends on whether the variant happens to be cached at that moment. A client that assumes a length, or assumes a range will be honored, will be wrong on a cold cache; one that assumes chunked framing will be wrong on a warm one. Browsers handle both natively, which is why this is a note for anything else you write against the endpoint.
-
-Two ways to make a first play seekable, if you need one: request the URL once and discard the response before setting `src`, or warm the cache after upload. Both leave the player facing a hit.
-
-### Choosing a serve mode
-
-`AP_SERVE_MODE=proxy` serves hits from the store through the proxy. It works with every backend, keeps one hostname in front of clients, and means the proxy stays in the path for the bytes.
-
-`AP_SERVE_MODE=redirect` (the default) answers a hit with a `302` to a presigned URL valid for `AP_PRESIGN_TTL` seconds, and storage serves the bytes. The proxy leaves the hot path entirely, which is the point of it, and the client cannot tell the difference: the variant arrives under the same `Content-Type` and `Cache-Control` a proxied hit would have sent, because the store holds the ones the write-back saved. `Range` is the store's to answer, natively.
-
-Presigning is a capability of the store's backend, so `redirect` needs an `s3://` store. Against a `file://` one — which has no URLs to sign — it is refused at boot naming both variables; use `proxy` there.
-
-Behind a CDN, prefer `proxy`. It is the mode that collaborates with an edge: one origin, cacheable immutable responses, `Range` served through the same URL the CDN already holds. `redirect` routes the media bytes around the edge to storage, so the CDN caches a `302` it must not keep (the response says `no-store` for exactly that reason: a stored redirect hands out expired URLs) and none of the audio.
-
-## Caching and CDNs
-
-The proxy is built to sit behind a CDN without special configuration on either side: the URL names the variant completely, the `ETag` is the cache key, there are no cookies and no `Vary`, and changing `cb` busts every tier at once. Every response states how long it may be held rather than inheriting a framework default:
-
-| Response | `Cache-Control` | Why |
-|---|---|---|
-| `200` media / peaks | `public, max-age=31536000, immutable, no-transform` | The URL encodes the variant, so it *is* immutable; `no-transform` keeps edge features from recompressing or mangling the bytes |
-| `404` | `max-age=10` | Sources appear — a file uploaded moments after the miss is served within seconds |
-| `413`, `415` | `max-age=10` | Verdicts about the current source bytes, which a re-upload changes |
-| `401`, `422` | `max-age=60` | Pure functions of the URL: a bad signature never becomes good, invalid options never become valid — only a deploy changes that |
-| `302` (cache hit, redirect mode) | `no-store` | The `Location` is a credential with an expiry; a cached redirect hands out URLs that no longer work |
-| `416` | `no-store` | The only response whose body depends on a request header, and nothing here sends `Vary: Range` |
-| `429`, `500`, `502`, `504` | `no-store` | Transient — caching a transient failure amplifies it (`429` carries `Retry-After`, and a cached `502` would suppress the retry that would have worked) |
-| `200` from `/info` | `public, max-age=3600` | Not `immutable`, and not a year: the metadata describes a source somebody may re-upload, so caches must be able to revalidate it. See [Asking what a source is](#asking-what-a-source-is) |
-| `/health`, `/ready`, `/metrics` | `no-store` | Liveness is only worth anything fresh, a stored readiness verdict is advice about a load level that has since moved, and a cached scrape is a measurement of a moment that has passed |
-
-The error rows are a deliberate relaxation, worth knowing if you operate a shared cache: without them every response would carry Plug's `max-age=0, private, must-revalidate`, so errors were previously not cacheable at all and never shareable. Dropping `private` is safe here because an error body is a pure function of the URL — no cookies, no auth headers, nothing per-user in it. The practical effect is that a hot 404 or a bad-signature storm is absorbed at the edge instead of reaching the origin every time. If you need the old behavior for a specific deployment, an edge rule overriding `Cache-Control` on 4xx is the place to do it; the proxy has no knob for it by design.
-
-Three behaviors round out the CDN-facing surface:
-
-- **Revalidation costs no render.** A request whose `If-None-Match` matches the variant's `ETag` answers `304` before the proxy touches storage or spawns anything — the ETag derives from the URL alone. The signature still gates: an unsigned request is `401`, matching validator or not. On `/info` the validator comes from the source object rather than the URL, so revalidating there costs one `stat` and still no probe.
-- **HEAD works.** `HEAD` on a signed URL runs every check a `GET` runs — signature, options, source authorization and stat — with an empty body and no render. Errors answer as `GET` does, bodiless. `HEAD /health` works too. Two caveats if you use it to validate URLs. Because it neither decodes nor probes, it cannot report a source ffmpeg would reject or one that turns out to be video, so a `HEAD` can answer `200` where the `GET` answers either `415`; everything decidable without a subprocess (`401`, `404`, `413`, `422`) matches the `GET` exactly. And it does not consult the variant cache, so it reports the render path's framing, never a hit's `content-length` or its `302`.
-- **`Range` on an uncached variant is ignored.** A `Range` header on a variant that has to be rendered gets the full `200` chunked stream (RFC 9110 permits this), with no `Accept-Ranges` and no `206`. Range serving belongs to cached variants: a hit answers `206` in proxy mode, or redirects to storage that serves it natively. A range no byte of a cached variant can satisfy is a `416`; one this proxy does not implement (several ranges at once, a unit other than `bytes`) is ignored, and answers the whole variant rather than failing. See [Cache semantics](#cache-semantics).
-
-## Health and readiness
-
-Two unsigned endpoints, and they are not interchangeable:
-
-| | Question it answers | What a failure means |
-|---|---|---|
-| `GET /health` | Is this running? | Restart it |
-| `GET /ready` | Should this node be sent new work? | Route elsewhere; do **not** restart |
-
-`/health` is pure liveness and is unaffected by load: a node with a full queue still answers `200`, because a busy proxy is a working proxy.
-
-`/ready` reports how deep the render queue is:
-
-```console
-$ curl -s localhost:4000/ready
-{"status":"ready","queued":0,"threshold":16}
-```
-
-It answers `503` once queue depth reaches `AP_READY_QUEUE_THRESHOLD`, and `200` again once depth has fallen to half of it, rounded down. The gap between those two marks is deliberate — it means one busy period produces one not-ready period, rather than a node flipping in and out of the pool on every poll. Both endpoints support `HEAD`, and both are `no-store`.
-
-On Kubernetes, point `livenessProbe` at `/health` and `readinessProbe` at `/ready`. Pointing a liveness probe at `/ready` restarts containers for being busy, which is the one mistake this pair exists to let you avoid.
-
-Set `AP_READY_QUEUE_THRESHOLD=0` on a single node: there is nowhere to route to, so shedding buys nothing. The default, half of `AP_QUEUE_SIZE`, is for fleets.
-
-Running more than one node — the shared variant store it requires, load balancer recipes, Kubernetes and Fly.io wiring — is [docs/scaling.md](docs/scaling.md).
-
-## Logs
-
-Everything goes to stdout, one line per completed request:
-
-```
-12:31:07.442 request_id=GMf5ECU8WG_tDMEAAAJC [info] render 200 opts=br:96/f:opus src=local://piece.wav cache=MISS 27141 bytes in 63.4ms
-12:31:07.981 request_id=GMf5ECU9xK2sPQ1AAAJD [info] render 200 opts=br:96/f:opus src=local://piece.wav cache=COALESCED 27141 bytes in 2.8ms
-12:31:09.118 request_id=GMf5EGolMMyBOD4AAA7B [info] render 422 invalid_options 74 bytes in 0.3ms
-12:31:11.006 request_id=GMf5ECRh8raItPUAAAOl [warning] render 504 render_timeout opts=f:mp3 src=local://long.wav cache=MISS 72 bytes in 300004.7ms
-```
-
-Reading one left to right: the endpoint (`render`, `health`, or `unknown` for a path that matched no route), the status, the error code from the [Errors](#errors) table when the request failed, the normalized options string and the canonical source once the proxy has got far enough to know them (a `401` knows neither and omits both), whether the request rendered or shared one, the bytes sent, and how long it took.
-
-`cache=` is the field to read before drawing conclusions from a duration. The second line above delivered the same 27 kB as the first in a fortieth of the time because it attached to the render already running for that variant — not because ffmpeg was fast.
-
-`request_id` is on every line, and the same id comes back to the client in the `x-request-id` response header — so a report of "this URL was slow at 12:31" can be traced to the render behind it. Send your own `x-request-id` and it is used instead, which is what makes the log line up with a proxy or gateway in front.
-
-Levels:
-
-| Level | What appears |
-|---|---|
-| `error` | Nothing routine: a render the host could not start at all (no encoder on `PATH`), a subprocess that survived `SIGKILL`, and crashes |
-| `warning` | `5xx` and `504` responses, and the ffmpeg diagnostic behind a failed render |
-| `info` | **Default.** The above, plus one line per request, `4xx` included: a `401` is a normal outcome for a public endpoint, not an incident |
-| `debug` | The above, plus `/health`, `/ready` and `/metrics` (silent otherwise, so a liveness probe every second and a scrape every fifteen do not become the log), the render lifecycle, and client disconnects |
-
-Set the floor with `AP_LOG_LEVEL`; `warning` is the setting for a busy production instance that wants failures only.
-
-Presigned URLs and credentials never appear. Sources are logged by their canonical identity (`local://piece.wav`), never by what ffmpeg was handed to read, and diagnostics quoted back from ffmpeg have their query strings stripped.
-
-Structured JSON output is not implemented yet — it arrives with its own slice.
-
-## Metrics
-
-`GET /metrics` answers in Prometheus text format. It is unsigned, and it is served on **its own listener**, bound by default to `127.0.0.1:9568` — a sidecar scraper and a `kubectl port-forward` reach it, and nothing off-host does. The bind is the access control, so widening it is a deliberate act:
-
-```console
-$ curl -s localhost:9568/metrics | head -3
-# HELP audio_proxy_renders_total Renders that finished, by output format and outcome.
-# TYPE audio_proxy_renders_total counter
-audio_proxy_renders_total{format="mp3",outcome="success"} 412
-```
-
-`AP_PORT` does not serve it — a request for `/metrics` there is a `404`.
-
-### What is exported
-
-| Metric | Type | Labels |
-|---|---|---|
-| `audio_proxy_renders_total` | counter | `format`, `outcome` |
-| `audio_proxy_render_duration_seconds` | histogram | `format`, `outcome` |
-| `audio_proxy_renders_running` | gauge | — |
-| `audio_proxy_render_slots_held` | gauge | — |
-| `audio_proxy_render_slots_capacity` | gauge | — |
-| `audio_proxy_render_queue_depth` | gauge | — |
-| `audio_proxy_render_queue_capacity` | gauge | — |
-| `audio_proxy_render_queue_rejections_total` | counter | — |
-| `audio_proxy_cache_lookups_total` | counter | `format`, `outcome` |
-| `audio_proxy_variant_store_write_failures_total` | counter | — |
-| `audio_proxy_http_requests_total` | counter | `endpoint`, `status` |
-
-`format` is the output format (`mp3`, `opus`, `peaks`, …). `outcome` on a render is `success`, `cancelled` (the client went away mid-stream), or the failure class from the [Errors](#errors) table (`timeout`, `undecodable`, `not_found`, …); on a cache lookup it is `hit`, `miss` or `coalesced`, the same three values the `X-Audio-Proxy` header carries. `endpoint` is the route class (`render`, `info`, `health`, `ready`, `metrics`, `unknown`) and `status` a code family (`2xx`, `4xx`, …).
-
-Every label is a fixed, bounded set. Nothing derived from a request — not the source, not the options, not the cache key — becomes a label, so no client can grow your scraper's series count.
-
-`renders_running` counts *renders*, not requests: twenty clients coalesced onto one encode are one running render, which is what `AP_MAX_CONCURRENCY` counts too.
-
-Duration buckets are fixed at 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120 and 300 seconds. They are not configurable, so the histogram stays aggregatable across nodes and across releases.
-
-### Scrape config
-
-```yaml
-scrape_configs:
-  - job_name: audio_proxy
-    static_configs:
-      - targets: ["127.0.0.1:9568"]
-```
-
-In a container, `127.0.0.1` is the pod, not the host — so a sidecar scraper in the same pod works unchanged, and a scraper elsewhere needs `AP_METRICS_BIND=0.0.0.0` plus a network policy that keeps the port to your monitoring namespace. On Kubernetes, declare the port on the pod and point a `PodMonitor` at it rather than exposing it through the Service that serves audio.
-
-### The four signals
-
-```promql
-# Saturation: how much of this node's render budget is in use. The leading
-# signal is the queue behind it — the slots are full long before it grows.
-sum(audio_proxy_render_slots_held) / sum(audio_proxy_render_slots_capacity)
-sum(audio_proxy_render_queue_depth)
-
-# Latency: the 95th percentile render, by format. Split by format because a
-# full-length FLAC and a 30-second Opus preview are not the same workload.
-histogram_quantile(
-  0.95,
-  sum by (format, le) (rate(audio_proxy_render_duration_seconds_bucket[5m]))
-)
-
-# Cache efficiency: the share of requests that cost no encode at all. This is
-# the number the proxy exists to move.
-sum(rate(audio_proxy_cache_lookups_total{outcome=~"hit|coalesced"}[5m]))
-  / sum(rate(audio_proxy_cache_lookups_total[5m]))
-
-# Errors: the share of renders that did not deliver, and the load being shed.
-sum(rate(audio_proxy_renders_total{outcome!~"success|cancelled"}[5m]))
-  / sum(rate(audio_proxy_renders_total[5m]))
-rate(audio_proxy_render_queue_rejections_total[5m])
-```
-
-Two more worth an alert. `audio_proxy_variant_store_write_failures_total` moving at all means the cache has silently stopped filling — clients are being served, so nothing else reports it, and the hit ratio decays over hours. And `audio_proxy_render_queue_depth` is the leading signal for autoscaling: target it well below `AP_READY_QUEUE_THRESHOLD` so the fleet grows before nodes start shedding. See [docs/scaling.md](docs/scaling.md).
+| [docs.audioproxy.dev](https://docs.audioproxy.dev) | **Start here.** Quickstart, transforms, signing, sources, rendering, configuration, variant store, caching, operations, S3 providers, scaling, capacity, Rails |
+| [docs/audio-proxy-api-v1.md](docs/audio-proxy-api-v1.md) | **The source of truth.** URL grammar, every processing option, cache-key rules, response headers, error codes |
+| [llms.txt](llms.txt), [llms-full.txt](llms-full.txt) | The same contract as markdown, in one file, checked against the code. See [For AI agents](#for-ai-agents) |
+| [docs/development.md](https://github.com/audioproxy/audioproxy/blob/main/docs/development.md) | Toolchain, per-slice worktrees and devcontainers, the test suite and its tags, CI, how a release is cut |
+| [docs/ffmpeg-arguments.md](docs/ffmpeg-arguments.md) | How options become ffmpeg arguments: filter order, per-format flags, known gaps |
+| [docs/operations.md](docs/operations.md) | Reading a running proxy: the request log and its levels, every exported metric, scrape config, the four signals to alert on |
+| [docs/](https://github.com/audioproxy/audioproxy/tree/main/docs) | The authored-from upstream for the site's guide pages: sources, rendering, scaling, capacity, s3-providers |
+| [VERSIONS.md](VERSIONS.md) | What the image is built from: Debian, Elixir/OTP and ffmpeg pins, why not Alpine, and how to bump one |
+| [examples/](https://github.com/audioproxy/audioproxy/tree/main/examples) | A one-file browser player for trying variants, and why it has to be served rather than opened |
+| `openspec/` | `specs/` holds the capabilities that are built; `changes/` holds what is planned |
 
 ## For AI agents
 
-Two files at the repository root carry the API reference as markdown, per the [llms.txt](https://llmstxt.org) convention:
-
-| File | What it is |
-|---|---|
-| [`llms.txt`](llms.txt) | The index: what the proxy is, the URL shape, and links to everything else |
-| [`llms-full.txt`](llms-full.txt) | The whole reference in one document — URL grammar, every option and its value domain, the validation rules, cache-key derivation, response and caching semantics, the full error table, a worked signing example |
-
-Point an agent at `llms-full.txt` and it has everything it needs to construct correct signed URLs; nothing else has to be fetched. They also ride in the hex package, so an embedder finds them in the dependency tree.
+Two files at the repository root carry the API reference as markdown, per the [llms.txt](https://llmstxt.org) convention: [`llms.txt`](llms.txt) is the index, and [`llms-full.txt`](llms-full.txt) is the whole reference in one document. Point an agent at `llms-full.txt` and it has everything it needs to construct correct signed URLs; nothing else has to be fetched. They also ride in the hex package, so an embedder finds them in the dependency tree.
 
 **Read them at the tag you are running.** `GET /health` reports the version, so `curl -s $BASE/health` and then reading these files at that tag gives you documentation matched to the deployment in front of you. That matters while the URL contract is still `0.x`.
 
-Four things in `llms-full.txt` are machine-checked rather than trusted: the set of option keys, against the parser; the set of error codes, against the error mapping; the set of environment variables, against the ones `AudioProxy.Config` reads — a check the [configuration table](#configuration) above gets too, since it is the same list written twice; and the worked signing example, recomputed from the signer on every run. A new option, error code or variable that goes undocumented fails CI. The rest — value ranges, the defaults themselves, the prose — is reviewed the way the README is, so treat the guards as covering the part that is easiest to forget rather than the whole document.
+Four things in `llms-full.txt` are machine-checked rather than trusted: the set of option keys, against the parser; the set of error codes, against the error mapping; the set of environment variables, against the ones `AudioProxy.Config` reads; and the worked signing example, recomputed from the signer on every run. A new option, error code or variable that goes undocumented fails CI. The rest, meaning value ranges, the defaults themselves and the prose, is reviewed rather than enforced.
 
 ## Stack
 
@@ -914,7 +157,7 @@ Elixir with Plug and [Bandit](https://github.com/mtrudel/bandit), and no Phoenix
 The published image is a separate question, because it is a distribution. It ships Debian's packages, ffmpeg among them, and Debian builds ffmpeg with `--enable-gpl`; handing those binaries to someone carries the GPL's obligations. Two things ride in the image to meet them:
 
 - **The license notices**, at `/usr/share/doc/<package>/copyright`, exactly as Debian ships them.
-- **The corresponding source**, listed in `/usr/share/audioproxy/SOURCES.txt`: every Debian package the image installs, at its exact version, with the [snapshot.debian.org](https://snapshot.debian.org) URL for the source that binary was built from. That archive is version-exact and long-lived, so a link still resolves to the source behind *this* image after the suite has moved on. (The manifest covers what apt installed. The release alongside it, the bundled ERTS and the Elixir dependencies, is Apache-2.0 and MIT throughout and its source is this repository.)
+- **The corresponding source**, listed in `/usr/share/audioproxy/SOURCES.txt`: every Debian package the image installs, at its exact version, with the [snapshot.debian.org](https://snapshot.debian.org) URL for the source that binary was built from. That archive is version-exact and long-lived, so a link still resolves to the source behind *this* image after the suite has moved on. (The manifest covers what apt installed. The release alongside it, the bundled ERTS and the Elixir dependencies, is Apache-2.0 and MIT throughout, and its source is this repository.)
 
 Read either straight out of the image:
 
@@ -927,22 +170,4 @@ Both are checked in CI on every build (present, complete, and resolving), so an 
 
 Should a listed source ever become unreachable, the offer stands: open an issue at [github.com/audioproxy/audioproxy](https://github.com/audioproxy/audioproxy/issues) and the corresponding source for that image will be provided, for three years from the date it was published.
 
-Redistributing your own image built from this one inherits all of the above; keep `/usr/share/doc` and the manifest intact and it travels with the layers. Patents are a separate axis from licensing, and AAC in particular is still encumbered; if you offer `f:aac` or `f:m4a` commercially, that is worth its own opinion.
-
-## Documentation
-
-
-| Document | What it covers |
-|---|---|
-| [docs/audio-proxy-api-v1.md](docs/audio-proxy-api-v1.md) | **The source of truth.** URL grammar, every processing option, cache-key rules, response headers, error codes |
-| [llms.txt](llms.txt), [llms-full.txt](llms-full.txt) | The same contract as markdown, in one file, checked against the code — for agents, and for anyone who wants it in one page. See [For AI agents](#for-ai-agents) |
-| [docs/sources.md](docs/sources.md) | Source encodings and escaping, what is refused, the source-type contract and canonical identity |
-| [docs/s3-providers.md](docs/s3-providers.md) | Working configurations for Backblaze B2, DigitalOcean Spaces, Hetzner and Scaleway, and the limitations to know before committing to one |
-| [docs/development.md](https://github.com/audioproxy/audioproxy/blob/main/docs/development.md) | Toolchain, per-slice worktrees and devcontainers, the test suite and its tags, CI, how a release is cut |
-| [examples/](https://github.com/audioproxy/audioproxy/tree/main/examples) | A one-file browser player for trying variants, and why it has to be served rather than opened |
-| [VERSIONS.md](VERSIONS.md) | What the image is built from: Debian, Elixir/OTP and ffmpeg pins, why not Alpine, and how to bump one |
-| [docs/ffmpeg-arguments.md](docs/ffmpeg-arguments.md) | How options become ffmpeg arguments: filter order, per-format flags, known gaps |
-| [docs/rendering.md](docs/rendering.md) | How a render runs: the subprocess, the chunk stream, coalescing, buffering and lifecycle guarantees |
-| [docs/scaling.md](docs/scaling.md) | Running more than one node: the shared variant store it requires, what duplicate renders cost, load balancer recipes, Kubernetes probes and queue-depth autoscaling, Fly.io, Docker Swarm |
-| [docs/capacity.md](docs/capacity.md) | How much memory a container needs: a concurrency-per-memory-limit matrix, then the formula behind it, measured per-format costs, long-form worked examples, and what the CI guard asserts |
-| `openspec/specs/` | Capability specs for what is built; `openspec/changes/` holds what is planned |
+Redistributing your own image built from this one inherits all of the above; keep `/usr/share/doc` and the manifest intact and it travels with the layers. Patents are a separate axis from licensing, and AAC in particular is still encumbered. If you offer `f:aac` or `f:m4a` commercially, that is worth its own opinion.

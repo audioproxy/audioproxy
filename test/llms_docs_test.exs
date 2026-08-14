@@ -220,8 +220,9 @@ defmodule AudioProxy.LlmsDocsTest do
   end
 
   # Rows of a marked table, as lists of their backticked cell tokens.
-  # `AudioProxy.MarkedTable` owns the shape; `AudioProxy.ReadmeExamplesTest`
-  # reads the README's configuration table through the same function.
+  # `AudioProxy.MarkedTable` owns the shape. This file is now its only caller:
+  # `condense-readme` removed the README's configuration table, so the `AP_`
+  # surface is published once and the guard below is the one that holds it.
   defp table(name), do: MarkedTable.rows(full(), name)
 
   defp signing_example do

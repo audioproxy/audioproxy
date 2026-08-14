@@ -20,7 +20,8 @@ Besides the signed URL space there are three unsigned endpoints — `GET /health
 
 ## Operating it
 
-- [README](https://github.com/audioproxy/audioproxy/blob/main/README.md): What the proxy is, how to run it, how to sign a URL, every option and every environment variable.
+- [README](https://github.com/audioproxy/audioproxy/blob/main/README.md): What the proxy is, its status and roadmap, how to start a container, and where the rest of the documentation lives. Options, configuration and signing are in the full reference above, not here.
+- [Operations](https://github.com/audioproxy/audioproxy/blob/main/docs/operations.md): Reading a running proxy — the request log and its levels, every exported Prometheus metric, scrape config, and the four signals worth alerting on.
 - [Rendering](https://github.com/audioproxy/audioproxy/blob/main/docs/rendering.md): How a render runs — the subprocess, the chunk stream, coalescing, buffering, timeouts and the kill discipline.
 - [Capacity](https://github.com/audioproxy/audioproxy/blob/main/docs/capacity.md): How much memory a container needs, as a concurrency-per-memory-limit matrix and the formula behind it.
 - [Scaling](https://github.com/audioproxy/audioproxy/blob/main/docs/scaling.md): Running more than one node — the shared variant store it requires, load balancers, Kubernetes probes, queue-depth autoscaling.

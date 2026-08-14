@@ -109,6 +109,7 @@ defmodule AudioProxy.MixProject do
         "docs/ffmpeg-arguments.md",
         "docs/scaling.md",
         "docs/capacity.md",
+        "docs/operations.md",
         "llms.txt",
         "llms-full.txt",
         "VERSIONS.md",
