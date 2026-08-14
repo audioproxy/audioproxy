@@ -24,9 +24,7 @@ kind of mistake — it stores identical output under two names.
 Failures are data, not HTTP concerns. This capability knows nothing about
 status codes; it names what was wrong and lets the delivery layer render that
 as 422.
-
 ## Requirements
-
 ### Requirement: Options string parses into a typed struct
 The system SHALL parse `/`-separated `key:value` segments into typed option values per API doc §3: `f`, `br`, `q`, `sr`, `ch`, `bd`, `t`, `fade`, `gain`, `norm`, `pts`, `pk_fmt`, `dl`, `cb`.
 
@@ -154,3 +152,28 @@ The system SHALL accept `exp:<unix-seconds>` as a request option — a bounded p
 #### Scenario: Malformed exp rejected
 - **WHEN** `exp` carries a non-integer, a negative value, or exceeds the numeric bounds
 - **THEN** the response is the invalid-option error, exactly as for a malformed variant option
+
+### Requirement: enhance preset option
+The system SHALL accept `enhance:voice`, applying a pinned conventional enhancement chain (high-pass, denoise, de-ess, compression, peak limiting) with a fixed position in the filter order, orthogonal to `norm:`, and SHALL treat preset values as immutable: a changed chain is a new value, never a mutation of an existing one.
+
+#### Scenario: Preset renders and caches as one variant
+- **WHEN** a source renders with `enhance:voice` twice with different option spellings around it
+- **THEN** both hit one cache key and the chain's filters appear once in the argv
+
+#### Scenario: Composes with norm
+- **WHEN** `enhance:voice/norm:ebu` is requested
+- **THEN** both apply, enhancement before loudness normalization
+
+#### Scenario: Pinning survives improvement
+- **WHEN** a better chain is found for the job a preset value already names
+- **THEN** it is published as a new preset value, and every existing value keeps producing the bytes it always produced
+
+#### Scenario: An unrecognized preset name is refused
+- **WHEN** `enhance:` names anything outside the published vocabulary, including a name a future release might mint
+- **THEN** the request is refused with `422` naming the segment, so publishing a preset is additive rather than a change of meaning
+
+#### Scenario: Peaks are drawn from the enhanced samples
+- **WHEN** `enhance` is combined with `f:peaks`
+- **THEN** the preset applies to the decode the waveform is reduced from, as `fade` already does, so the picture describes the audio a listener would hear rather than the unprocessed source
+- **AND** the bucket boundaries stay correct, because every filter in the chain preserves the frame count the reducer budgets from the source probe
+
