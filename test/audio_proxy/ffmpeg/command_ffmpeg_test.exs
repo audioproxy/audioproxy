@@ -180,15 +180,25 @@ defmodule AudioProxy.Ffmpeg.CommandFfmpegTest do
     # frames against a 220500-frame budget and the overrun folded into the final
     # bucket as a spike. Equality rather than a tolerance, because it is exact:
     # the resample returns the decode to the rate the budget was computed from.
+    # `ch:2` is here rather than implied: the reducer reads the interleaving the
+    # argv sets, so a stereo budget is a different arithmetic (frames × 2
+    # channels × 2 bytes) and a regression in how `-ac` and `aresample` compose
+    # would be invisible to the mono case alone.
     test "a normalized peaks decode emits exactly the frames the reducer budgeted",
          %{source: source} do
       budget = 5 * @sample_rate
 
-      for options <- ["f:peaks/t:0:5/ch:1/norm:ebu", "f:peaks/t:0:5/ch:1/gain:-6"] do
+      for {options, channels} <- [
+            {"f:peaks/t:0:5/ch:1/norm:ebu", 1},
+            {"f:peaks/t:0:5/ch:1/gain:-6", 1},
+            {"f:peaks/t:0:5/ch:2/norm:ebu", 2},
+            {"f:peaks/t:0:5/ch:2/enhance:voice/norm:ebu/gain:-6", 2}
+          ] do
         output = assert_renders(options, source, 1_000, sample_rate: @sample_rate)
+        frames = div(byte_size(output), 2 * channels)
 
-        assert byte_size(output) == budget * 2,
-               "#{options} decoded #{div(byte_size(output), 2)} frames against a #{budget}-frame budget"
+        assert frames == budget,
+               "#{options} decoded #{frames} frames against a #{budget}-frame budget"
       end
     end
 

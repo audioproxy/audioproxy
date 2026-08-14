@@ -334,6 +334,20 @@ duplicate cache object rather than a wrong render, and it is tracked alongside
 the semantic no-ops described under
 [cache-key semantics](audio-proxy-api-v1.md#3-processing-options).
 
+The same negotiation has a second, quieter cost now that `norm` follows the
+source: `f:opus/norm:ebu` on a 44.1 kHz source emits `aresample=44100` and
+libopus then converts 44100 → 48000 itself, so the signal is resampled twice
+where the old fixed 48 kHz target converted once. Nothing is wrong with the
+output — it is the same path an explicit `sr:44100` has always taken — and
+special-casing opus here would mean the builder knowing each encoder's
+supported rates, which is a larger contract than the one option it would fix.
+Pass `sr:48000` on that path if the extra conversion matters.
+
+The ceiling `norm` clamps to is worth stating precisely, because it is easy to
+read as more than it is: it bounds the rate *this builder targets*, and nothing
+else. A plain lossy render emits no `aresample` at all, so `f:aac` on a 96 kHz
+master encodes at 96 kHz. See §3.1.
+
 Two fallbacks remain, and both are reachable only when the probe could not
 answer: with no `bd`, `f:wav` encodes 16-bit when the source's depth is unknown
 — which includes a 32-bit source, since the depth alone cannot distinguish

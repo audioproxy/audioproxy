@@ -214,6 +214,12 @@ defmodule AudioProxy.RenderEndpointFfmpegTest do
       assert stream["sample_rate"] == "96000"
     end
 
+    # Belt-and-braces, and it says so rather than pretending otherwise: no lossy
+    # encoder accepts a rate above the ceiling — that is why the ceiling exists —
+    # so libmp3lame would negotiate 96 kHz down to 48 kHz even with the clamp
+    # deleted, and this assertion stays green either way (mutation-checked). The
+    # clamp's actual guard is `AudioProxy.Ffmpeg.CommandTest`; what this pins is
+    # the observable contract, end to end.
     test "a normalized lossy variant is still held to the §3.1 ceiling",
          %{port: port, tmp_dir: tmp_dir} do
       response = render("/f:mp3/norm:ebu/t:0:1/plain/local://master.wav", port)

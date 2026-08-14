@@ -68,6 +68,15 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
     # boundary, and ~20 ms of slop there is not what this test is about.
     sine(root, "gap.wav", ["-af", "volume=enable='between(t,0.5,2.5)':volume=0"])
 
+    # Loud, then silent for the last 0.4 s — the one fixture shape that can see
+    # a decode outrunning the reducer's budget. A steady tone cannot: a final
+    # bucket that has absorbed the overrun is drawn from the same signal as
+    # every other bucket, so it reads identically. With the tail silent, the
+    # last bucket is silent only if the decode ended where the budget said it
+    # would. Measured at 32 buckets over this fixture: 0 at the source's rate,
+    # 5411 when the decode runs at 48 kHz against a 44.1 kHz budget.
+    sine(root, "tail.wav", ["-af", "volume=enable='gte(t,3.6)':volume=0"])
+
     # Loud 40 Hz rumble, an octave below the preset's 80 Hz high-pass corner,
     # so `enhance:voice` has something unambiguous to remove from the picture.
     Fixtures.sine(Path.join(root, "rumble.wav"),
@@ -207,15 +216,32 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
       assert loudest > @silence_ceiling
 
       assert_same_buckets(normalized, plain)
+    end
 
-      # And no final-bucket spike: the last pair is drawn from a full bucket of
-      # the same steady sine as every other, which is exactly what an overrun
-      # folded into it would break.
+    # The scenario the rate fix is *for*, and the only assertion in this file
+    # that can see it fail. `loudnorm` emits 192 kHz; without the resample back
+    # to the source's rate the decode runs 8.8 % long against a budget computed
+    # before it started, and the surplus folds into the final bucket — audio
+    # from a region the last pixel does not cover, drawn as if it did.
+    #
+    # `tail.wav` is silent for its last 0.4 s, so the final bucket is silent
+    # exactly when the decode ended where the budget said. Deliberately not the
+    # steady sine: that fixture reads identically either way, which is how this
+    # guarantee went unguarded end to end in the first place.
+    test "a normalized decode ends where the reducer budgeted, not past it",
+         %{port: port} do
+      normalized = json("/f:peaks/pts:32/norm:ebu/plain/local://tail.wav", port)
+      plain = json("/f:peaks/pts:32/plain/local://tail.wav", port)
+
       {last_min, last_max} = normalized |> pairs() |> List.last()
-      {first_min, first_max} = normalized |> pairs() |> hd()
 
-      assert_in_delta last_min, first_min, @signal_tolerance
-      assert_in_delta last_max, first_max, @signal_tolerance
+      assert abs(last_min) < @silence_ceiling
+      assert abs(last_max) < @silence_ceiling
+
+      # And the fixture is loud where it should be, so the assertion above is
+      # about the budget rather than about a silent file.
+      assert Enum.any?(pairs(normalized), fn {_min, max} -> max > @silence_ceiling * 10 end)
+      assert_same_buckets(normalized, plain)
     end
 
     test "samples_per_pixel spans the trimmed region, not the whole source", %{port: port} do

@@ -380,6 +380,12 @@ release that carries it — an empty section is the normal state.
   taken deliberately while no third-party deployment exists — see that change's
   proposal for the argument, and for why the same fix after the first real
   deployment would have needed a cache-busting story instead.
+- **`f:wav` without a `bd` now follows the source's bit depth**, from the same
+  change and in the same class: a 24-bit master requested as `f:wav` returns
+  24-bit where it returned 16-bit, under an unchanged key. It is the behaviour
+  §3.1 always documented — the probe that supplies the depth is what was
+  missing — but an operator reading the notes should not have to infer it from
+  the `norm` line above.
 
 **Release notes are claims, and claims name their checks.** Before publishing
 notes, every Highlight must point at the automated check that demonstrates it —
