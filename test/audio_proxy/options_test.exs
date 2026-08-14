@@ -286,7 +286,7 @@ defmodule AudioProxy.OptionsTest do
     test "peaks report the peaks rule, whichever option is at fault" do
       # Every sibling rule defers to validate_peaks_only/1 so that the 422 names
       # the reason that actually explains the refusal.
-      for segment <- ~w(br:96 q:5 sr:48000 bd:16 bd:32f gain:-3 norm:ebu) do
+      for segment <- ~w(br:96 q:5 sr:48000 bd:16 bd:32f) do
         assert {:error, %OptionError{reason: :unsupported_for_peaks}} =
                  Options.parse("f:peaks/#{segment}")
       end
@@ -463,15 +463,13 @@ defmodule AudioProxy.OptionsTest do
     end
   end
 
-  describe "validate/1 — peaks ignore encoding and loudness options" do
-    test "every encoding and loudness option is refused under f:peaks" do
+  describe "validate/1 — peaks refuse what cannot change the picture" do
+    test "every option that cannot move a pixel is refused under f:peaks" do
       for {options, segment} <- [
             {"f:peaks/br:96", "br:96"},
             {"f:peaks/q:5", "q:5"},
             {"f:peaks/sr:48000", "sr:48000"},
-            {"f:peaks/bd:16", "bd:16"},
-            {"f:peaks/gain:-3", "gain:-3"},
-            {"f:peaks/norm:ebu", "norm:ebu:-16:-1.5:11"}
+            {"f:peaks/bd:16", "bd:16"}
           ] do
         assert {:error, %OptionError{segment: ^segment, reason: :unsupported_for_peaks}} =
                  Options.parse(options)
@@ -492,6 +490,23 @@ defmodule AudioProxy.OptionsTest do
 
       assert {:ok, "ch:1/enhance:voice/f:peaks/pk_fmt:json/pts:800"} =
                Options.normalize_string("f:peaks/enhance:voice")
+    end
+
+    # The two that used to be refused with the encoders, and were the whole
+    # subject of `peaks-follow-the-variant`: both change the samples, so both
+    # change the picture. A player that normalizes over a waveform that does
+    # not was the defect.
+    test "gain and norm apply to peaks, and reach the normalized key" do
+      assert {:ok, %Options{format: :peaks, gain: -6.0}} = Options.parse("f:peaks/gain:-6")
+
+      assert {:ok, %Options{format: :peaks, norm: {-16.0, -1.5, 11.0}}} =
+               Options.parse("f:peaks/norm:ebu")
+
+      assert {:ok, "ch:1/f:peaks/gain:-6/pk_fmt:json/pts:800"} =
+               Options.normalize_string("f:peaks/gain:-6")
+
+      assert {:ok, "ch:1/f:peaks/norm:ebu:-16:-1.5:11/pk_fmt:json/pts:800"} =
+               Options.normalize_string("f:peaks/norm:ebu")
     end
   end
 

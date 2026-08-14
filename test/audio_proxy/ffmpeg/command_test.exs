@@ -102,8 +102,11 @@ defmodule AudioProxy.Ffmpeg.CommandTest do
   end
 
   describe "build/3 — filters" do
-    defp filtergraph(options) do
-      built = argv(options)
+    # `source` is the probe's contribution to `t:AudioProxy.Ffmpeg.Command.source/0`
+    # — omitted here means "no probe ran", which is the fallback path.
+    defp filtergraph(options, source \\ []) do
+      {:ok, opts} = Options.parse(options)
+      built = Command.build(opts, @source, [type: :http] ++ source)
 
       case Enum.find_index(built, &(&1 == "-af")) do
         nil -> nil
@@ -143,11 +146,60 @@ defmodule AudioProxy.Ffmpeg.CommandTest do
     end
 
     # loudnorm hands back 192 kHz; an explicit `sr` already resamples, so only
-    # the implicit case needs the 48 kHz backstop.
+    # the implicit case needs a target of its own.
     test "norm forces a resample only when sr does not already" do
       assert filtergraph("norm:ebu/sr:44100") =~ "aresample=44100"
       refute filtergraph("norm:ebu/sr:44100") =~ "48000"
       assert filtergraph("sr:44100") == "aresample=44100"
+    end
+
+    # §3.1: an absent `sr` means "follow the source", and a normalized render
+    # is not an exception. Before `peaks-follow-the-variant` this was a flat
+    # 48000, which downsampled a 96 kHz master and upsampled a CD rate — under
+    # a cache key that said neither.
+    test "a normalized render resamples back to the source's own rate" do
+      assert filtergraph("f:flac/norm:ebu", sample_rate: 44_100) ==
+               "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=44100"
+
+      assert filtergraph("f:flac/norm:ebu", sample_rate: 96_000) ==
+               "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=96000"
+    end
+
+    # The §3.1 ceiling is a rule about the *request* — `sr:96000` with a lossy
+    # format is a 422, asserted in `AudioProxy.OptionsTest` — and not about the
+    # source. Clamping here would mean `f:aac/norm:ebu` downsampling a master
+    # that plain `f:aac` returns at 96 kHz, i.e. a loudness option changing the
+    # rate. Every format follows the source, and that is the point.
+    test "every format follows the source's rate, lossy included" do
+      for format <- ~w(flac wav mp3 opus ogg aac m4a peaks) do
+        assert filtergraph("f:#{format}/norm:ebu", sample_rate: 96_000) ==
+                 "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=96000",
+               "f:#{format} did not follow the source's 96 kHz"
+
+        assert filtergraph("f:#{format}/norm:ebu", sample_rate: 44_100) ==
+                 "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=44100",
+               "f:#{format} did not follow the source's 44.1 kHz"
+      end
+    end
+
+    test "an unprobed source falls back to 48 kHz, as it always did" do
+      assert filtergraph("f:flac/norm:ebu") == "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000"
+    end
+
+    # The source's rate is what an *absent* `sr` follows. An explicit one is a
+    # request, and outranks it.
+    test "an explicit sr still wins over the source's rate" do
+      assert filtergraph("f:flac/norm:ebu/sr:22050", sample_rate: 96_000) ==
+               "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=22050"
+
+      assert filtergraph("f:flac/sr:22050", sample_rate: 96_000) == "aresample=22050"
+    end
+
+    # No `norm`, no resample: the encoder keeps the source's rate on its own,
+    # and emitting an identity `aresample` would be a filter that does nothing.
+    test "the source's rate alone does not add a resample" do
+      assert filtergraph("f:flac", sample_rate: 96_000) == nil
+      assert filtergraph("f:flac/gain:-6", sample_rate: 96_000) == "volume=-6dB"
     end
 
     test "loudnorm runs before gain, and the fade runs last" do
@@ -174,15 +226,20 @@ defmodule AudioProxy.Ffmpeg.CommandTest do
 
     # A waveform is drawn under audio the listener hears, so an option that
     # changes the samples has to change the picture too — `fade` is the
-    # precedent. It is only safe because every filter in the chain preserves the
-    # frame count the peaks reducer budgeted from the probe; `norm`, which
-    # re-rates the decode, is refused for that reason and not this one.
-    test "peaks are drawn from the enhanced samples" do
+    # precedent. What keeps it safe is frame count: every filter here preserves
+    # the count the peaks reducer budgeted from the probe, and the one that does
+    # not (`loudnorm`) is followed by a resample back to the source's rate.
+    test "peaks are drawn from the enhanced, levelled samples" do
       assert filtergraph("f:peaks/enhance:voice") == Command.enhance_chain(:voice)
 
       assert filtergraph("f:peaks/enhance:voice/t:0:10/fade:1:1") ==
                Command.enhance_chain(:voice) <>
                  ",afade=t=in:st=0:d=1,afade=t=out:st=9:d=1"
+
+      assert filtergraph("f:peaks/gain:-6") == "volume=-6dB"
+
+      assert filtergraph("f:peaks/norm:ebu", sample_rate: 44_100) ==
+               "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=44100"
     end
 
     test "a downmix is an output option, not a filter" do

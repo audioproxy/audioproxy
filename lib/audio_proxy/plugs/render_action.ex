@@ -166,6 +166,7 @@ defmodule AudioProxy.Plugs.RenderAction do
     Config,
     ErrorJSON,
     Expiry,
+    Ffprobe,
     ProbeCoordinator,
     RenderCoordinator,
     Semaphore,
@@ -286,8 +287,9 @@ defmodule AudioProxy.Plugs.RenderAction do
     with {:ok, stat} <- Source.stat(source),
          :ok <- within_limit(stat.size),
          {:ok, input} <- Source.ffmpeg_input(source),
-         :ok <- audio_only(source, input, type, opts),
-         {:ok, status, render, backlog} <- subscribe(conn, input, type, opts) do
+         {:ok, properties} <- audio_only(source, input, type, opts),
+         {:ok, status, render, backlog} <-
+           subscribe(conn, input, [type: type] ++ properties, opts) do
       # `input` is what ffmpeg reads and can be a presigned URL; the span
       # carries the canonical identity instead, so nothing downstream of here
       # can log a credential. See `AudioProxy.Telemetry`.
@@ -358,6 +360,12 @@ defmodule AudioProxy.Plugs.RenderAction do
   # and the default is the 415 this always gave. What survives either verdict is
   # the placement: the probe is still what runs before a slot is asked for, so
   # `:extract` renders under the same admission control as anything else.
+  #
+  # An admitted probe hands back the source's own properties on its way out —
+  # `AudioProxy.Ffprobe.source_properties/1`, which is what makes `sr` and `bd`
+  # able to follow the source (§3.1). This gate is the only place that already
+  # has them, and paying for a second probe to reach the argv builder would be
+  # absurd.
   defp audio_only(source, input, type, opts) do
     probe_opts =
       [protocols: Command.protocols(type)] ++
@@ -374,15 +382,20 @@ defmodule AudioProxy.Plugs.RenderAction do
     # `{:queue_full, retry_after}` when the probe pool is full, which
     # `AudioProxy.ErrorJSON` renders as the same 429 a full render queue does.
     case ProbeCoordinator.probe(Source.canonical(source), input, probe_opts) do
-      {:ok, probe} -> VideoPolicy.admit(probe)
-      {:error, reason} -> {:error, reason}
+      {:ok, probe} ->
+        with :ok <- VideoPolicy.admit(probe), do: {:ok, Ffprobe.source_properties(probe)}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
   defp probe_executable(nil), do: []
   defp probe_executable(path), do: [executable: path]
 
-  defp subscribe(conn, input, type, opts) do
+  # `source` is `AudioProxy.Ffmpeg.Command`'s keyword — the resolved type, plus
+  # whatever the gate's probe could say about the source itself.
+  defp subscribe(conn, input, source, opts) do
     # What the write-back stores alongside the bytes: the headers `begin/1`
     # sends, so a store-direct fetch serves the variant the way this response
     # would have. Built here because only this module knows them.
@@ -395,9 +408,9 @@ defmodule AudioProxy.Plugs.RenderAction do
     options = conn.assigns.options
 
     spec =
-      [args: Command.build(options, input, type: type), metadata: metadata] ++
+      [args: Command.build(options, input, source), metadata: metadata] ++
         Keyword.take(opts, [:executable]) ++
-        peaks_spec(options, input, type, opts)
+        peaks_spec(options, input, Keyword.fetch!(source, :type), opts)
 
     case RenderCoordinator.subscribe(conn.assigns.cache_key, spec) do
       {:ok, status, render, backlog} ->

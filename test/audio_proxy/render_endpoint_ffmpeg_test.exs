@@ -49,6 +49,15 @@ defmodule AudioProxy.RenderEndpointFfmpegTest do
     Fixtures.tone(Path.join(root, "long.wav"), duration: 600)
     File.write!(Path.join(root, "notaudio.txt"), "definitely not audio")
 
+    # A 24-bit 96 kHz master, for the two behaviours §3.1 documents as
+    # "follow the source": with no `bd` and no `sr`, the variant keeps the
+    # source's depth and rate, and only a real probe can supply either.
+    Fixtures.tone(Path.join(root, "master.wav"),
+      duration: 3,
+      rate: 96_000,
+      extra: ~w(-c:a pcm_s24le)
+    )
+
     # The audio-only gate's two halves, generated rather than committed so the
     # fixtures are what this ffmpeg produces: a real video-plus-audio mp4, and a
     # real mp3 carrying real cover art. Canned ffprobe JSON pins the *mapping*
@@ -164,6 +173,74 @@ defmodule AudioProxy.RenderEndpointFfmpegTest do
 
       assert response.head =~ "http/1.1 415"
       assert JSON.decode!(response.body)["error"] == "undecodable_source"
+    end
+  end
+
+  # Both behaviours were documented and inert: `Command.build/3` had the keys
+  # for them and nothing filled them in, so a lossless variant returned 16-bit
+  # and a normalized one returned 48 kHz whatever the source was. The gate's
+  # probe is what supplies them now, which makes this the only place either can
+  # be shown end to end — the argv suite can pass a rate, but not prove one was
+  # read off the file.
+  describe "a variant follows its source, via the gate's own probe" do
+    test "a lossless variant with no bd keeps the source's 24-bit depth",
+         %{port: port, tmp_dir: tmp_dir} do
+      response = render("/f:wav/t:0:1/plain/local://master.wav", port)
+
+      assert response.head =~ "http/1.1 200 ok"
+
+      stream = probe(RawHttp.dechunk(response.body), "wav", tmp_dir)["streams"] |> hd()
+
+      assert stream["codec_name"] == "pcm_s24le"
+
+      # And an explicit `bd` still outranks the source, which is what says the
+      # assertion above is about the *fallback* rather than about wav.
+      pinned = render("/f:wav/bd:16/t:0:1/plain/local://master.wav", port)
+      pinned_stream = probe(RawHttp.dechunk(pinned.body), "wav", tmp_dir)["streams"] |> hd()
+
+      assert pinned_stream["codec_name"] == "pcm_s16le"
+    end
+
+    test "a normalized lossless variant with no sr keeps the source's 96 kHz",
+         %{port: port, tmp_dir: tmp_dir} do
+      response = render("/f:flac/norm:ebu/t:0:1/plain/local://master.wav", port)
+
+      assert response.head =~ "http/1.1 200 ok"
+
+      stream = probe(RawHttp.dechunk(response.body), "flac", tmp_dir)["streams"] |> hd()
+
+      # 48000 here is the old behaviour: a silent downsample of a master, under
+      # a cache key that named no rate at all.
+      assert stream["sample_rate"] == "96000"
+    end
+
+    # `aac` rather than `mp3`, and that is the whole test: libmp3lame accepts
+    # nothing above 48 kHz, so an mp3 renders at 48 kHz however wrong the argv
+    # is, and the assertion would hold for reasons that have nothing to do with
+    # this proxy. ffmpeg's aac encoder does 96 kHz, so this is the format where
+    # "adding `norm` must not change the rate" is observable at all.
+    test "a normalized lossy variant keeps the source's rate, as a plain one does",
+         %{port: port, tmp_dir: tmp_dir} do
+      plain = render("/f:aac/t:0:1/plain/local://master.wav", port)
+      normalized = render("/f:aac/norm:ebu/t:0:1/plain/local://master.wav", port)
+
+      assert plain.head =~ "http/1.1 200 ok"
+      assert normalized.head =~ "http/1.1 200 ok"
+
+      plain_rate = probe(RawHttp.dechunk(plain.body), "aac", tmp_dir)["streams"] |> hd()
+      normalized_rate = probe(RawHttp.dechunk(normalized.body), "aac", tmp_dir)["streams"] |> hd()
+
+      assert plain_rate["sample_rate"] == "96000"
+      assert normalized_rate["sample_rate"] == "96000"
+    end
+
+    # The other half of the same rule, and the reason dropping the clamp does
+    # not widen the API: the ceiling still refuses the rate as a *request*.
+    test "the §3.1 ceiling still refuses an explicit sr above it", %{port: port} do
+      response = render("/f:aac/sr:96000/t:0:1/plain/local://master.wav", port)
+
+      assert response.head =~ "http/1.1 422"
+      assert JSON.decode!(response.body)["error"] == "invalid_options"
     end
   end
 

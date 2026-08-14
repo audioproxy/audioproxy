@@ -155,24 +155,27 @@ defmodule AudioProxy.Options do
   @request_keys ~w(exp)
   @keys Enum.sort(@variant_keys ++ @request_keys)
 
-  # Encoding options (§3.1): peaks are computed from the decoded source, so an
-  # encoder setting cannot move a pixel, and carrying one would mean distinct
-  # cache keys for byte-identical peaks output. Rejected rather than ignored.
+  # The rule is one question: **can this option change the picture?** An option
+  # that cannot would hand byte-identical peaks output two cache keys, so it is
+  # refused outright rather than silently ignored.
   #
-  # The test is "can this option change the picture", and `enhance` is not in
-  # this list because it plainly can — the preset reshapes the very envelope a
-  # waveform draws. A picture that disagreed with the audio playing under it
-  # would be the defect, and `fade` (already respected here) settles the
-  # principle: an option that changes the samples changes the peaks.
+  # `br`, `q` and `bd` are encoder settings and peaks are never encoded, so
+  # none of them can move a pixel. `sr` cannot either: bucket boundaries are a
+  # fraction of the *total* sample count, so resampling changes how many samples
+  # fall in a bucket without changing the shape drawn from them. It is refused
+  # for that reason and no other — it does change the `sample_rate` and
+  # `samples_per_pixel` a consumer reads, which is an argument for admitting it
+  # one day, and one this list is not making today.
   #
-  # `gain` and `norm` remain listed, and that is a known inconsistency rather
-  # than the rule: both change the samples too. `norm` cannot simply be removed
-  # from this list, because single-pass `loudnorm` re-rates the decode and the
-  # reducer budgets its buckets from the source's probed rate — measured at
-  # 240000 frames against a 220500-frame budget for one 5 s 44.1 kHz source,
-  # which the reducer would absorb into its final bucket as a spike. Tracked in
-  # `peaks-follow-the-variant`, with the rate fix it depends on.
-  @peaks_unsupported ~w(br q sr bd gain norm)
+  # Everything else is respected, because everything else changes the samples:
+  # `t`, `ch`, `fade`, `enhance`, and — since `peaks-follow-the-variant` —
+  # `gain` and `norm`. `norm` waited on the rate fix that change carried: the
+  # reducer budgets its buckets from the source's probed rate, and single-pass
+  # `loudnorm` used to re-rate the decode to 48 kHz behind it (240000 frames
+  # against a 220500-frame budget for one 5 s 44.1 kHz source, absorbed into
+  # the final bucket as a spike). `AudioProxy.Ffmpeg.Command` now resamples back
+  # to the source's own rate, so the budget is correct by construction.
+  @peaks_unsupported ~w(br q sr bd)
 
   # `dl` and `cb` are opaque, but not arbitrary: a control byte in `dl` reaches
   # a `Content-Disposition` header, and any control byte would break the
@@ -719,10 +722,9 @@ defmodule AudioProxy.Options do
 
   defp validate_bit_depth_format(_opts), do: :ok
 
-  # Peaks are computed from the decoded source: they respect `t` and `ch` and
-  # ignore everything about encoding and loudness (§3.3). Carrying an option
-  # that cannot change the output would mean two cache keys for one result, so
-  # those options are refused outright rather than silently ignored.
+  # Peaks are computed from the decoded source, so every option that changes
+  # those samples applies and only those that cannot change the picture are
+  # refused (§3.3). See `@peaks_unsupported` for which is which and why.
   defp validate_peaks_only(%{format: :peaks} = opts) do
     case Enum.find(@peaks_unsupported, &render_key(&1, opts)) do
       nil ->

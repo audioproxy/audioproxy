@@ -36,9 +36,11 @@ defmodule AudioProxy.Ffmpeg.CommandFfmpegTest do
     {:ok, root: root, source: source}
   end
 
-  defp render(options, source) do
+  # `properties` is what a probe would have reported about the source — see
+  # `t:AudioProxy.Ffmpeg.Command.source/0`. Omitted means "no probe ran".
+  defp render(options, source, properties \\ []) do
     {:ok, opts} = Options.parse(options)
-    argv = Command.build(opts, source, type: :local)
+    argv = Command.build(opts, source, [type: :local] ++ properties)
 
     port =
       Port.open({:spawn_executable, System.find_executable("ffmpeg")}, [
@@ -62,8 +64,8 @@ defmodule AudioProxy.Ffmpeg.CommandFfmpegTest do
 
   # `-loglevel error` keeps stderr silent on success, so anything that comes
   # back alongside a zero exit status is a diagnostic worth failing on.
-  defp assert_renders(options, source, minimum_bytes \\ 1_000) do
-    {output, status} = render(options, source)
+  defp assert_renders(options, source, minimum_bytes \\ 1_000, properties \\ []) do
+    {output, status} = render(options, source, properties)
 
     # binary_slice/3, not binary_part/3: ffmpeg's diagnostics are usually well
     # under 400 bytes, and binary_part/3 raises on a short binary — so the one
@@ -169,6 +171,35 @@ defmodule AudioProxy.Ffmpeg.CommandFfmpegTest do
       output = assert_renders("f:peaks/t:0:5/ch:1", source)
 
       assert byte_size(output) == 5 * @sample_rate * 2
+    end
+
+    # The guarantee `AudioProxy.Peaks`' bucket budget rests on, measured rather
+    # than argued. The reducer budgets `duration × the source's probed rate`
+    # frames before a byte is decoded, and single-pass `loudnorm` hands its
+    # output back at 192 kHz — so without the resample this emitted 240000
+    # frames against a 220500-frame budget and the overrun folded into the final
+    # bucket as a spike. Equality rather than a tolerance, because it is exact:
+    # the resample returns the decode to the rate the budget was computed from.
+    # `ch:2` is here rather than implied: the reducer reads the interleaving the
+    # argv sets, so a stereo budget is a different arithmetic (frames × 2
+    # channels × 2 bytes) and a regression in how `-ac` and `aresample` compose
+    # would be invisible to the mono case alone.
+    test "a normalized peaks decode emits exactly the frames the reducer budgeted",
+         %{source: source} do
+      budget = 5 * @sample_rate
+
+      for {options, channels} <- [
+            {"f:peaks/t:0:5/ch:1/norm:ebu", 1},
+            {"f:peaks/t:0:5/ch:1/gain:-6", 1},
+            {"f:peaks/t:0:5/ch:2/norm:ebu", 2},
+            {"f:peaks/t:0:5/ch:2/enhance:voice/norm:ebu/gain:-6", 2}
+          ] do
+        output = assert_renders(options, source, 1_000, sample_rate: @sample_rate)
+        frames = div(byte_size(output), 2 * channels)
+
+        assert frames == budget,
+               "#{options} decoded #{frames} frames against a #{budget}-frame budget"
+      end
     end
 
     test "fragmented mp4 needs no seekable output, and really does fragment",

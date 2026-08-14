@@ -107,13 +107,13 @@ Options are `/`-separated `key:value` segments between the signature and the sou
 | `f` | `mp3` `opus` `ogg` `aac` `m4a` `flac` `wav` `peaks` | Output format. Default `mp3`. `aac` is an ADTS stream, `m4a` a fragmented MP4, `peaks` waveform data rather than audio |
 | `br` | integer kbps, 1–10000 | CBR/ABR bitrate. Lossy formats only; excludes `q` |
 | `q` | number | VBR quality on the codec's own scale. Excludes `br`; needs a format whose encoder has a scale |
-| `sr` | integer Hz, 1–384000 | Resample. Default is the source's rate; an explicit value above 48000 is refused for lossy formats |
+| `sr` | integer Hz, 1–384000 | Resample. Default is the source's own probed rate, for every format — `norm` resamples back to it rather than overriding it. An explicit value above 48000 is refused for lossy formats, which bounds what may be *asked* for and not what a source may be: `f:aac` on a 96 kHz source returns 96 kHz |
 | `ch` | `1` \| `2` | Channel count. Default follows the source — except under `f:peaks`, where it is `1` |
-| `bd` | `16` \| `24` \| `32f` | Bit depth. Lossless formats only; `32f` needs `f:wav` |
+| `bd` | `16` \| `24` \| `32f` | Bit depth. Lossless formats only; `32f` needs `f:wav`. Default is the source's own probed depth, falling back to 16 where it cannot be read |
 | `t` | `start[:duration]` seconds | Trim. `t:30` runs to the end, `t:30:15` is 15 s from 30 s. Duration must be positive |
 | `fade` | `in[:out]` seconds | Fades inside the trimmed region. An omitted out-fade is `0`, not a mirror of the in |
 | `gain` | signed number dB, \|value\| ≤ 100 | Static gain |
-| `norm` | `ebu[:I[:TP[:LRA]]]` | EBU R128 loudness normalization. Targets default to `-16:-1.5:11`; ranges are I −70–−5, TP −9–0, LRA 1–50. Single-pass `loudnorm`: good for previews, not for masters |
+| `norm` | `ebu[:I[:TP[:LRA]]]` | EBU R128 loudness normalization. Targets default to `-16:-1.5:11`; ranges are I −70–−5, TP −9–0, LRA 1–50. Emits a resample back to the source's rate, because single-pass `loudnorm` outputs 192 kHz; the rate of the variant is therefore unchanged. Single-pass: good for previews, not for masters |
 | `enhance` | `voice` | Enhancement preset: high-pass, denoise, de-ess, compress, limit — applied ahead of every other filter, and peak-limited so the preset cannot clip a source that did not. Independent of `norm`, and the two combine. A preset value is pinned to its chain forever — see *Presets are pinned* |
 | `pts` | integer, 1–100000 | Peaks only: number of min/max pairs. Default `800` |
 | `pk_fmt` | `json` \| `dat` | Peaks only: serialization. Default `json` |
@@ -136,7 +136,7 @@ Each is a `422` naming the offending segment:
 - `q` requires a format whose encoder has a quality scale, and a value inside that codec's range.
 - `bd` requires a lossless format (`flac`, `wav`); `bd:32f` requires `f:wav`.
 - `pts` and `pk_fmt` require `f:peaks`.
-- `f:peaks` refuses `br`, `q`, `sr`, `bd`, `gain` and `norm` — peaks are computed from the decoded source, so an option that cannot change the output would hand identical bytes two cache keys. It accepts `enhance`, as it accepts `fade`: both change the samples a waveform is drawn from, and a picture that disagreed with the audio playing under it would be the defect. `gain` and `norm` are a known exception awaiting a resampling fix, not the rule.
+- `f:peaks` refuses `br`, `q`, `bd` and `sr` — peaks are computed from the decoded source, so an option that cannot change the picture would hand identical bytes two cache keys. `br`, `q` and `bd` are encoder settings and peaks are never encoded; `sr` cannot move a pixel either, because bucket boundaries are a fraction of the total sample count rather than a duration. Everything that *does* change the samples applies: `t`, `ch`, `fade`, `enhance`, `gain` and `norm`, so a waveform matches the audio playing under it.
 - `enhance` takes a name from a closed vocabulary (`voice` today). Anything else — including a name a future release might mint, like `voice2` — is refused rather than passed through.
 - `sr` above 48000 is refused for lossy formats.
 - A fade must fit inside a bounded trim, and a fade-out requires the trim to be bounded at all: its start is `duration - out`, and without a duration there is nothing to count back from. A fade-in needs no trim.

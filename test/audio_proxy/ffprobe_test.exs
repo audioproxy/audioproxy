@@ -378,4 +378,49 @@ defmodule AudioProxy.FfprobeTest do
       refute Ffprobe.has_video?(%{"streams" => "nonsense"})
     end
   end
+
+  # What the render path reads off the same probe `contract/2` maps, so that
+  # `sr` and `bd` can follow the source (§3.1). An absent key means "fall back",
+  # which is why nothing here is ever `nil`.
+  describe "source_properties/1 — what the argv builder is given" do
+    test "the rate and the depth, as the tokens bd spells" do
+      assert Ffprobe.source_properties(wav()) == [sample_rate: 48_000, bit_depth: :bd16]
+
+      assert Ffprobe.source_properties(probe(%{"bits_per_raw_sample" => 24}, %{})) ==
+               [sample_rate: 48_000, bit_depth: :bd24]
+
+      assert Ffprobe.source_properties(probe(%{"sample_rate" => 96_000}, %{})) ==
+               [sample_rate: 96_000, bit_depth: :bd16]
+    end
+
+    # A lossy stream answers 0 to both depth fields, which is not a depth. The
+    # rate is still there, and is the half `norm` needs.
+    test "a lossy source has a rate and no depth" do
+      properties =
+        Ffprobe.source_properties(
+          probe(%{"codec_name" => "mp3", "bits_per_sample" => 0, "sample_rate" => "44100"}, %{})
+        )
+
+      assert properties == [sample_rate: 44_100]
+    end
+
+    # 32 is deliberately unmapped: `bd:32f` means float PCM and the depth alone
+    # cannot tell `pcm_s32le` from `pcm_f32le`. Falling back to 16-bit is the
+    # documented behaviour for a source whose depth is unknown, and a source
+    # whose depth is *ambiguous* is treated the same way rather than guessed at.
+    test "a 32-bit source falls back rather than guessing which 32" do
+      assert Ffprobe.source_properties(probe(%{"bits_per_raw_sample" => 32}, %{})) ==
+               [sample_rate: 48_000]
+    end
+
+    test "a probe with nothing to describe contributes nothing" do
+      assert Ffprobe.source_properties(%{}) == []
+      assert Ffprobe.source_properties(%{"streams" => []}) == []
+      assert Ffprobe.source_properties(%{"streams" => "nonsense"}) == []
+
+      assert Ffprobe.source_properties(%{
+               "streams" => [%{"codec_type" => "audio", "sample_rate" => "N/A"}]
+             }) == []
+    end
+  end
 end

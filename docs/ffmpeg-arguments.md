@@ -38,9 +38,9 @@ there is no default.
 | `t:START[:DUR]` | `-ss START [-t DUR]` **before** `-i` | Input seeking, so ffmpeg's HTTP client issues a Range request and never reads the skipped bytes. Everything downstream sees the trimmed region starting at t=0 |
 | `fade:IN[:OUT]` | `afade=t=in:st=0:d=IN`, `afade=t=out:st=DUR-OUT:d=OUT` | Inside the trimmed region, by construction |
 | `gain` | `volume=<dB>dB` | |
-| `norm:ebu:I:TP:LRA` | `loudnorm=I=…:TP=…:LRA=…` | Single-pass (§3.2) |
+| `norm:ebu:I:TP:LRA` | `loudnorm=I=…:TP=…:LRA=…` | Single-pass (§3.2). With no `sr`, followed by an `aresample` to the source's rate — see below |
 | `enhance:voice` | `highpass,afftdn,deesser,acompressor` | The pinned preset chain, first in the filtergraph. Exact parameters below |
-| `sr` | `aresample=<Hz>` | |
+| `sr` | `aresample=<Hz>` | Omitted, no resample — unless `norm` is present, which needs one |
 | `ch` | `-ac 1` \| `-ac 2` | An output option, not a filter. Omitted, the render follows the source — except under `f:peaks`, which emits `-ac 1`; see below |
 | `br` | `-b:a <kbps>k` | Lossy formats only |
 | `q` | `-q:a` (mp3, ogg, aac, m4a) or `-compression_level` (opus, flac) | Whichever knob the codec has, bounded to its range |
@@ -292,13 +292,34 @@ static `gain` would undo it; `aresample` follows it because single-pass
 shape survives the stages above it.
 
 That 192 kHz has one visible consequence: **`norm` without an explicit `sr`
-appends `aresample=48000`.** Without it every normalized render would be a
-192 kHz file. 48 kHz is the API's own lossy ceiling (§3.1) and universally
-supported, but it does mean `norm` on a 96 kHz lossless master downsamples.
-Choosing better would need the source's real sample rate, which the argument
-builder deliberately does not know — it is a pure function of the options, and
-that purity is what the round-trip property rests on. Pass `sr` explicitly to
-override.
+appends an `aresample` of its own.** Without it every normalized render would
+be a 192 kHz file. The rate it targets is the **source's own**, for every
+format, because §3.1's default is the source's rate for every format — so
+`norm` on a 96 kHz master stays at 96 kHz and on a 44.1 kHz source stays at
+44.1. The stage undoes an implementation detail; landing anywhere but where the
+render would have been without it would make `norm` a rate option as well as a
+loudness one. Where no probe supplied a rate the fallback is 48 kHz, which is
+what this emitted unconditionally before the probe reached the builder.
+
+**No lossy ceiling is applied here, deliberately.** §3.1's 48 kHz cap governs
+what a request may ask for — `sr:96000` with `f:aac` is a 422 — not what a
+source may be. Clamping this stage would mean `f:aac/norm:ebu` downsampling a
+96 kHz master that plain `f:aac` returns at 96 kHz, which is a loudness option
+quietly changing the rate.
+
+The builder learns the source's rate the same way it learns its bit depth: the
+render action's audio-only gate probes every miss, and passes both into
+`build/3` beside the source type. That keeps `build/3` a pure function of its
+arguments — which is what the round-trip property rests on — while letting two
+options documented as following the source actually do it.
+
+**This is also what makes `gain` and `norm` safe under `f:peaks`.** The reducer
+budgets its buckets from the source's probed rate before a byte is decoded, so
+a filter chain that re-rated the decode would overrun that budget and fold the
+overrun into the final bucket as a spike — measured at 240000 frames against a
+220500-frame budget for a 5 s 44.1 kHz source. With the resample returning the
+decode to the source's rate, the frame count is exact, and the
+`:ffmpeg`-tagged suite asserts that equality rather than assuming it.
 
 ## ffmpeg version
 
@@ -312,13 +333,31 @@ fails a test rather than a request. Pinning an exact ffmpeg version — and
 whether to build it from source with a trimmed codec set — is decided in
 `add-docker-release`.
 
-Two known gaps. libopus encodes at 48/24/16/12/8 kHz only, so `sr:44100` with
+One known gap. libopus encodes at 48/24/16/12/8 kHz only, so `sr:44100` with
 `f:opus` is resampled to 48 kHz by ffmpeg's own negotiation and produces the
-same bytes as `f:opus` alone, under a different cache key. And with no `bd`,
-`f:wav` falls back to 16-bit whenever the source's depth is unknown — the
-builder takes it as an argument (`build/3`), but the probe that supplies it
-belongs to the `/info` slice, so until then a 24-bit master requested as
-`f:wav` comes back 16-bit unless `bd:24` is given. Both cost a duplicate cache
-object or a documented fallback, not a wrong render, and both are tracked
-alongside the semantic no-ops described under
+same bytes as `f:opus` alone, under a different cache key. That costs a
+duplicate cache object rather than a wrong render, and it is tracked alongside
+the semantic no-ops described under
 [cache-key semantics](audio-proxy-api-v1.md#3-processing-options).
+
+The same negotiation has a second, quieter cost now that `norm` follows the
+source: `f:opus/norm:ebu` on a 44.1 kHz source emits `aresample=44100` and
+libopus then converts 44100 → 48000 itself, so the signal is resampled twice
+where the old fixed 48 kHz target converted once. Nothing is wrong with the
+output — it is the same path an explicit `sr:44100` has always taken — and
+special-casing opus here would mean the builder knowing each encoder's
+supported rates, which is a larger contract than the one option it would fix.
+Pass `sr:48000` on that path if the extra conversion matters.
+
+Worth knowing when reading an argv: a plain render emits no `aresample` at all,
+so the encoder is handed whatever the source had and `f:aac` on a 96 kHz master
+encodes at 96 kHz. `f:mp3` and `f:opus` on that source come back at 48 kHz
+anyway, because libmp3lame and libopus accept nothing higher and ffmpeg
+negotiates it down. See §3.1.
+
+Two fallbacks remain, and both are reachable only when the probe could not
+answer: with no `bd`, `f:wav` encodes 16-bit when the source's depth is unknown
+— which includes a 32-bit source, since the depth alone cannot distinguish
+`pcm_s32le` from the float `pcm_f32le` that `bd:32f` means — and `norm` with no
+`sr` resamples to 48 kHz when the source's rate is unknown. Neither is
+reachable through the mounted pipeline, which probes every miss.
