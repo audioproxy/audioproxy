@@ -1049,6 +1049,40 @@ defmodule AudioProxy.ConfigTest do
     end
   end
 
+  describe "the video policy is not part of this surface" do
+    # `AudioProxy.VideoPolicy` is configured through application env, by an
+    # embedding release, and the absence of an `AP_` spelling is the decision
+    # rather than an omission: a variable here would hand every operator of the
+    # published image a lever on a behaviour the image does not offer. The
+    # guards above already fail on a *new* variable; these say which variable
+    # must never arrive, so the reasoning survives someone adding one.
+    test "no published variable configures it" do
+      for variable <- Config.variables() do
+        refute variable =~ ~r/VIDEO|POLICY|EXTRACT/,
+               "#{variable} looks like an operator-facing lever on the video policy"
+      end
+    end
+
+    test "the environment cannot select a policy" do
+      # Every field, compared against a build from an empty environment: the
+      # variable is not merely unpublished, it is not read into anything. A
+      # `Map.has_key?` on the struct would have been a tautology, since the
+      # struct's keys are fixed at compile time.
+      baseline = Config.build!(%{})
+
+      for spelling <- ~w(AP_VIDEO_POLICY AP_VIDEO AP_EXTRACT_VIDEO AP_ALLOW_VIDEO) do
+        assert Config.build!(%{spelling => "AudioProxy.VideoPolicyTest.ExtractPolicy"}) ==
+                 baseline
+      end
+
+      # And the verdict is what it was, since a lever could also live outside
+      # `AudioProxy.Config` — which is where one would go to evade the scan.
+      assert AudioProxy.VideoPolicy.verdict(%{
+               "streams" => [%{"codec_type" => "video", "codec_name" => "h264"}]
+             }) == :reject
+    end
+  end
+
   # The variables the module *reads*: a parser helper taking `env` and the name
   # as a literal. Precise enough to define the surface.
   defp read_variables, do: scan(~r/\(\s*env,\s*"(AP_[A-Z0-9_]+)"/)

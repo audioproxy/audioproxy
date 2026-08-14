@@ -17,11 +17,14 @@ defmodule AudioProxy.Plugs.RenderAction do
   argument for rejecting rather than stripping is in
   `openspec/changes/add-audio-only-policy` — briefly, `-vn` alone would make
   this a free audio-extraction service for arbitrary video, at video's cost
-  profile and video's CVE surface. The gate's placement is the load-bearing
+  profile and video's CVE surface. The refusal itself is
+  `AudioProxy.VideoPolicy`'s, which defaults to exactly that and is a seam only
+  an embedding release can move. The gate's placement is the load-bearing
   part: after the cache lookup, so a HIT never pays for it, and before the
   semaphore, so a refused source cannot occupy a slot. Everything the gate
   cannot see inside is still covered downstream — every argv carries
-  `-vn -sn -dn` and a protocol whitelist (`AudioProxy.Ffmpeg.Command`).
+  `-vn -sn -dn` and a protocol whitelist (`AudioProxy.Ffmpeg.Command`), under
+  every verdict.
 
   Then the render: `AudioProxy.Source.ffmpeg_input/1` says what ffmpeg should
   read, `AudioProxy.Ffmpeg.Command.build/3` says how, and
@@ -163,13 +166,13 @@ defmodule AudioProxy.Plugs.RenderAction do
     Config,
     ErrorJSON,
     Expiry,
-    Ffprobe,
     ProbeCoordinator,
     RenderCoordinator,
     Semaphore,
     Source,
     Telemetry,
-    VariantCache
+    VariantCache,
+    VideoPolicy
   }
 
   alias AudioProxy.Ffmpeg.Command
@@ -350,6 +353,11 @@ defmodule AudioProxy.Plugs.RenderAction do
   # reached anyway, and a probe that times out or dies says so with the limit an
   # operator would raise. Nothing here falls back to "render it and see": a gate
   # that fails open is not a gate.
+  #
+  # The verdict on a probe that *did* find video is `AudioProxy.VideoPolicy`'s,
+  # and the default is the 415 this always gave. What survives either verdict is
+  # the placement: the probe is still what runs before a slot is asked for, so
+  # `:extract` renders under the same admission control as anything else.
   defp audio_only(source, input, type, opts) do
     probe_opts =
       [protocols: Command.protocols(type)] ++
@@ -366,7 +374,7 @@ defmodule AudioProxy.Plugs.RenderAction do
     # `{:queue_full, retry_after}` when the probe pool is full, which
     # `AudioProxy.ErrorJSON` renders as the same 429 a full render queue does.
     case ProbeCoordinator.probe(Source.canonical(source), input, probe_opts) do
-      {:ok, probe} -> if Ffprobe.has_video?(probe), do: {:error, :video_source}, else: :ok
+      {:ok, probe} -> VideoPolicy.admit(probe)
       {:error, reason} -> {:error, reason}
     end
   end
