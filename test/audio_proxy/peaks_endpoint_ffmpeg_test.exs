@@ -68,6 +68,14 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
     # boundary, and ~20 ms of slop there is not what this test is about.
     sine(root, "gap.wav", ["-af", "volume=enable='between(t,0.5,2.5)':volume=0"])
 
+    # Loud 40 Hz rumble, an octave below the preset's 80 Hz high-pass corner,
+    # so `enhance:voice` has something unambiguous to remove from the picture.
+    Fixtures.sine(Path.join(root, "rumble.wav"),
+      amplitude: @amplitude,
+      duration: 4,
+      frequency: 40
+    )
+
     {:ok, root: root}
   end
 
@@ -135,6 +143,31 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
       assert Enum.any?(pairs(whole_file), fn {_min, max} ->
                max > @expected_peak - @signal_tolerance
              end)
+    end
+
+    # The waveform is drawn under audio the listener hears, so a processed
+    # render has to move the picture. `enhance:voice` is the case that makes it
+    # visible: its high-pass removes the fixture's entire signal.
+    test "the enhance preset changes the picture, without moving the buckets", %{port: port} do
+      plain = json("/f:peaks/pts:32/plain/local://rumble.wav", port)
+      enhanced = json("/f:peaks/pts:32/enhance:voice/plain/local://rumble.wav", port)
+
+      assert Enum.any?(pairs(plain), fn {_min, max} ->
+               max > @expected_peak - @signal_tolerance
+             end)
+
+      for {min, max} <- pairs(enhanced) do
+        assert abs(min) < @expected_peak / 2
+        assert abs(max) < @expected_peak / 2
+      end
+
+      # And the bucket budget is untouched, which is the whole reason the preset
+      # is allowed here and `norm` is not: every filter in the chain preserves
+      # the frame count `Peaks.Render` budgeted from the probe. A chain that
+      # re-rated the decode would show up here as a different span.
+      assert enhanced["samples_per_pixel"] == plain["samples_per_pixel"]
+      assert enhanced["sample_rate"] == plain["sample_rate"]
+      assert length(enhanced["data"]) == length(plain["data"])
     end
 
     test "samples_per_pixel spans the trimmed region, not the whole source", %{port: port} do

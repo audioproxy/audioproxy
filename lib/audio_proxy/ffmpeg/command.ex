@@ -105,8 +105,15 @@ defmodule AudioProxy.Ffmpeg.Command do
 
   `f:peaks` builds raw interleaved `s16le` PCM on stdout — the input to
   `AudioProxy.Peaks`, not its output. Encoding and loudness options are already
-  refused for peaks by `AudioProxy.Options`; `t`, `ch` and `fade` apply, since
-  all three change the samples a waveform would be drawn from. `ch` is the one
+  refused for peaks by `AudioProxy.Options`; `t`, `ch`, `fade` and `enhance`
+  apply, since all four change the samples a waveform would be drawn from — a
+  picture that disagreed with the audio playing under it would be the defect.
+
+  The preset is safe here in a way `norm` is not, and the difference is frame
+  count rather than taste: every filter in the chain is rate-preserving, so the
+  decode emits exactly the frames `AudioProxy.Peaks.Render` budgeted from the
+  probe (measured frame-exact at 220500 for a 5 s 44.1 kHz source, against
+  240000 once `loudnorm` re-rates the decode). `ch` is the one
   option peaks read differently: absent, it means mono rather than "follow the
   source", because the reducer has to know the interleaving up front and a
   waveform UI draws one shape.

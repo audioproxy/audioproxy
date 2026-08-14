@@ -172,6 +172,19 @@ defmodule AudioProxy.Ffmpeg.CommandTest do
       refute filtergraph("f:mp3/norm:ebu") =~ "highpass"
     end
 
+    # A waveform is drawn under audio the listener hears, so an option that
+    # changes the samples has to change the picture too — `fade` is the
+    # precedent. It is only safe because every filter in the chain preserves the
+    # frame count the peaks reducer budgeted from the probe; `norm`, which
+    # re-rates the decode, is refused for that reason and not this one.
+    test "peaks are drawn from the enhanced samples" do
+      assert filtergraph("f:peaks/enhance:voice") == Command.enhance_chain(:voice)
+
+      assert filtergraph("f:peaks/enhance:voice/t:0:10/fade:1:1") ==
+               Command.enhance_chain(:voice) <>
+                 ",afade=t=in:st=0:d=1,afade=t=out:st=9:d=1"
+    end
+
     test "a downmix is an output option, not a filter" do
       assert filtergraph("ch:1") == nil
       assert "-ac" in argv("ch:1")

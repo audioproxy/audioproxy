@@ -136,7 +136,7 @@ Each is a `422` naming the offending segment:
 - `q` requires a format whose encoder has a quality scale, and a value inside that codec's range.
 - `bd` requires a lossless format (`flac`, `wav`); `bd:32f` requires `f:wav`.
 - `pts` and `pk_fmt` require `f:peaks`.
-- `f:peaks` refuses `br`, `q`, `sr`, `bd`, `gain` and `norm` — peaks are computed from the decoded source, so an option that cannot change the output would hand identical bytes two cache keys. It refuses `enhance` for a neighbouring reason: a waveform describes the source's own shape, and the preset's compressor would reshape it.
+- `f:peaks` refuses `br`, `q`, `sr`, `bd`, `gain` and `norm` — peaks are computed from the decoded source, so an option that cannot change the output would hand identical bytes two cache keys. It accepts `enhance`, as it accepts `fade`: both change the samples a waveform is drawn from, and a picture that disagreed with the audio playing under it would be the defect. `gain` and `norm` are a known exception awaiting a resampling fix, not the rule.
 - `enhance` takes a name from a closed vocabulary (`voice` today). Anything else — including a name a future release might mint, like `voice2` — is refused rather than passed through.
 - `sr` above 48000 is refused for lossy formats.
 - A fade must fit inside a bounded trim, and a fade-out requires the trim to be bounded at all: its start is `duration - out`, and without a duration there is nothing to count back from. A fade-in needs no trim.

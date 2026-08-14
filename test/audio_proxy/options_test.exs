@@ -471,8 +471,7 @@ defmodule AudioProxy.OptionsTest do
             {"f:peaks/sr:48000", "sr:48000"},
             {"f:peaks/bd:16", "bd:16"},
             {"f:peaks/gain:-3", "gain:-3"},
-            {"f:peaks/norm:ebu", "norm:ebu:-16:-1.5:11"},
-            {"f:peaks/enhance:voice", "enhance:voice"}
+            {"f:peaks/norm:ebu", "norm:ebu:-16:-1.5:11"}
           ] do
         assert {:error, %OptionError{segment: ^segment, reason: :unsupported_for_peaks}} =
                  Options.parse(options)
@@ -481,6 +480,18 @@ defmodule AudioProxy.OptionsTest do
 
     test "the options peaks do respect are still accepted" do
       assert {:ok, _} = Options.parse("f:peaks/t:10:5/ch:1/pts:2000/pk_fmt:dat/dl:p.json/cb:v2")
+    end
+
+    # The rule is "can this option change the picture", not "is it a filter".
+    # `enhance` reshapes the envelope a waveform is drawn from, so a peaks
+    # render that ignored it would disagree with the audio playing under it.
+    # `fade` is the precedent: also a filter, also respected here.
+    test "the enhance preset applies to peaks, as fade does" do
+      assert {:ok, %Options{format: :peaks, enhance: :voice}} =
+               Options.parse("f:peaks/enhance:voice")
+
+      assert {:ok, "ch:1/enhance:voice/f:peaks/pk_fmt:json/pts:800"} =
+               Options.normalize_string("f:peaks/enhance:voice")
     end
   end
 

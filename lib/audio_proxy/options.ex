@@ -155,19 +155,24 @@ defmodule AudioProxy.Options do
   @request_keys ~w(exp)
   @keys Enum.sort(@variant_keys ++ @request_keys)
 
-  # Encoding options (§3.1) plus the loudness stages: peaks are computed from
-  # the decoded source and ignore all of them (§3.3), so carrying them would
-  # mean distinct cache keys for byte-identical peaks output. Rejected instead.
+  # Encoding options (§3.1): peaks are computed from the decoded source, so an
+  # encoder setting cannot move a pixel, and carrying one would mean distinct
+  # cache keys for byte-identical peaks output. Rejected rather than ignored.
   #
-  # `enhance` joins them for a different reason, and it is a judgement rather
-  # than an identity: the preset *would* change a waveform, because its
-  # compressor reshapes the envelope the picture is drawn from. But §3.3 pins
-  # peaks to the source's own shape, and a waveform whose dynamics had been
-  # squashed to match a preview would misdescribe the master it is drawn under.
-  # Refusing is also the reversible direction — `f:peaks/enhance:voice` can
-  # become meaningful in a later slice without invalidating a single cached
-  # variant, whereas accepting it now and refusing it later would break URLs.
-  @peaks_unsupported ~w(br q sr bd gain norm enhance)
+  # The test is "can this option change the picture", and `enhance` is not in
+  # this list because it plainly can — the preset reshapes the very envelope a
+  # waveform draws. A picture that disagreed with the audio playing under it
+  # would be the defect, and `fade` (already respected here) settles the
+  # principle: an option that changes the samples changes the peaks.
+  #
+  # `gain` and `norm` remain listed, and that is a known inconsistency rather
+  # than the rule: both change the samples too. `norm` cannot simply be removed
+  # from this list, because single-pass `loudnorm` re-rates the decode and the
+  # reducer budgets its buckets from the source's probed rate — measured at
+  # 240000 frames against a 220500-frame budget for one 5 s 44.1 kHz source,
+  # which the reducer would absorb into its final bucket as a spike. Tracked in
+  # `peaks-follow-the-variant`, with the rate fix it depends on.
+  @peaks_unsupported ~w(br q sr bd gain norm)
 
   # `dl` and `cb` are opaque, but not arbitrary: a control byte in `dl` reaches
   # a `Content-Disposition` header, and any control byte would break the
@@ -276,8 +281,8 @@ defmodule AudioProxy.Options do
   the order they are reported: `br` excludes `q`; `bd` needs a lossless format;
   `br` needs a lossy format, and `q` needs a format with a quality scale and a
   value inside that codec's range; `bd` needs
-  a lossless format, and `bd:32f` needs `f:wav`; `f:peaks` refuses encoding,
-  loudness and enhancement options; `pts`/`pk_fmt` need `f:peaks`; `sr` is capped at 48 kHz for
+  a lossless format, and `bd:32f` needs `f:wav`; `f:peaks` refuses encoding and
+  loudness options; `pts`/`pk_fmt` need `f:peaks`; `sr` is capped at 48 kHz for
   lossy formats; a fade must fit inside a bounded trim, and a fade-out needs
   that trim to be bounded at all.
   """

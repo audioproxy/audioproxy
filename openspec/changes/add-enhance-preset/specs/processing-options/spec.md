@@ -19,6 +19,7 @@ The system SHALL accept `enhance:voice`, applying a pinned conventional enhancem
 - **WHEN** `enhance:` names anything outside the published vocabulary, including a name a future release might mint
 - **THEN** the request is refused with `422` naming the segment, so publishing a preset is additive rather than a change of meaning
 
-#### Scenario: Peaks refuse the preset
+#### Scenario: Peaks are drawn from the enhanced samples
 - **WHEN** `enhance` is combined with `f:peaks`
-- **THEN** the request is refused with `422`, as the loudness options are: a waveform describes the source's own shape, and the preset's compression would reshape the envelope the picture is drawn from
+- **THEN** the preset applies to the decode the waveform is reduced from, as `fade` already does, so the picture describes the audio a listener would hear rather than the unprocessed source
+- **AND** the bucket boundaries stay correct, because every filter in the chain preserves the frame count the reducer budgets from the source probe
