@@ -39,7 +39,12 @@ Thread the probe into `build/3` and the peaks question stops needing a peaks-spe
 - Tests: `f:peaks/norm:ebu` and `f:peaks/gain:-6` end to end, asserting the picture moves *and* `samples_per_pixel`/`sample_rate`/`length` stay put; a normalized render keeping 44.1 kHz and a 96 kHz master not being downsampled; the lossless depth fallback finally exercised against a real probe.
 - Estimated ~250 LOC. No new dependencies.
 
+## Decisions
+
+- **The one-time byte change is accepted, because there is nothing warm to break.** `norm` without `sr` currently returns 48 kHz and will return the source's rate, which changes bytes under an unchanged cache key — normally the hazard `add-enhance-preset` spent its whole review on, since a warm CDN would keep serving the old bytes while a cold cache produced the new ones. It does not apply here: there are no third-party deployments, and the only known instance is this project's own playground, whose variant store can be purged. So the fix goes in the argv where it belongs, rather than being confined to the peaks decode.
+
+  **Two things follow, and they are the cost of the decision rather than footnotes.** Purging the playground's variant store is part of the release, not an afterthought — a stale 48 kHz variant there is a demo that contradicts the documentation. And this window closes: the same change after the first real deployment would need a cache-busting story, so if this change is still unimplemented by then, reopen this decision rather than inheriting it.
+
 ## Open questions
 
-- **This changes bytes under an unchanged cache key.** `norm` without `sr` currently returns 48 kHz and would return the source's rate, so a warm CDN keeps serving the old bytes while a cold cache produces the new ones — the hazard `add-enhance-preset` spent its whole review on. It is a bug fix to behaviour that contradicts §3.1, and the project is pre-1.0, so a one-time discontinuity plus a release note is defensible. It is still a deliberate call, not an implementation detail: **decide before implementing**, and if the answer is no, the peaks half can ship alone by resampling only the peaks decode back to the source's rate.
 - Whether `sr` should also become valid under `f:peaks`. It cannot change the *picture* — bucket boundaries are a fraction of the total sample count — but it does change the `sample_rate` and `samples_per_pixel` a consumer reads. Currently refused; leaving it refused is defensible, and saying so explicitly is better than the silence today.
