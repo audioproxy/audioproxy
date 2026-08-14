@@ -72,7 +72,7 @@ defmodule AudioProxy.ProbeCoordinator do
   `Ffprobe.probe/2` blocks: it spawns the subprocess with itself as consumer and
   collects chunks until the output ends. A GenServer cannot do that and still
   answer the joins that are coalescing onto it — the same reason
-  `AudioProxy.RenderCoordinator` asks the semaphore with `request/1` rather than
+  `AudioProxy.RenderCoordinator` asks the semaphore with `request/2` rather than
   `acquire/1`.
 
   So the coordinator spawns a monitored runner process which calls

@@ -233,7 +233,7 @@ lifetime — including the kill discipline, since the release happens *after* th
 cancel rather than before it. A slot handed over while the previous ffmpeg was
 still being SIGKILLed would exceed the cap by exactly the margin that takes.
 
-**The coordinator waits without blocking.** It asks with `Semaphore.request/1`,
+**The coordinator waits without blocking.** It asks with `Semaphore.request/2`,
 which answers immediately with `:granted`, `:queued` or a queue-full error, and
 starts its render when the grant arrives as a message. So a coordinator has one
 phase more than the render does — `:queued`, before `:rendering` — and keeps

@@ -353,10 +353,12 @@ defmodule AudioProxy.Metrics do
     count("audio_proxy_render_queue_rejections_total", [])
   end
 
-  # The semaphore's other four events feed gauges this module samples instead,
-  # so they are attached and deliberately ignored: attaching to the whole set
+  # The semaphore's other events feed gauges this module samples instead, so
+  # they are attached and deliberately ignored: attaching to the whole set
   # means a new event cannot arrive here as an unmatched clause and take the
-  # handler down with it.
+  # handler down with it. `:displaced` arrived exactly that way — through
+  # `Semaphore.events/0`, into this clause, with no edit here — which is the
+  # arrangement working rather than a gap in it.
   defp record([:audio_proxy, :semaphore, _other], _measurements, _metadata, _config), do: :ok
 
   defp record(@bandit_stop, _measurements, %{conn: conn}, _config) do

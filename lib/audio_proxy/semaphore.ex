@@ -11,7 +11,7 @@ defmodule AudioProxy.Semaphore do
 
   ## The server never blocks
 
-  `request/1` is a `GenServer.call` that answers immediately with one of three
+  `request/2` is a `GenServer.call` that answers immediately with one of three
   outcomes:
 
     * `:granted` — a slot was free and the caller now holds it
@@ -24,8 +24,8 @@ defmodule AudioProxy.Semaphore do
   without the semaphore being unable to answer anyone else — including the
   releases that are the only way the queue ever moves.
 
-  `acquire/1` is the blocking convenience on top: `request/1` plus a receive
-  with the caller's own timeout. `AudioProxy.RenderCoordinator` uses `request/1`
+  `acquire/1` is the blocking convenience on top: `request/2` plus a receive
+  with the caller's own timeout. `AudioProxy.RenderCoordinator` uses `request/2`
   directly, because a coordinator that blocked waiting for a slot could not
   answer the joins that are coalescing onto it.
 
@@ -153,12 +153,14 @@ defmodule AudioProxy.Semaphore do
   # `interactive` is not evictable: a listener's patience budget is not a
   # batch's to spend.
   #
-  # Deliberately redundant. `victim/2` only ever considers classes *below* the
-  # arrival, and nothing is below the top class — so with `interactive` first
-  # in `@classes` this subtraction changes no outcome today, and removing
-  # either lock on its own leaves the suite green (measured). It earns its keep
-  # against the day a class is added above `interactive`, which would make a
-  # listener displaceable through the ordering alone.
+  # Redundant *for this one guarantee*, and only for it. `victim/2` also
+  # considers nothing above the arrival's own class, and nothing is above the
+  # top class — so with `interactive` first in `@classes`, removing this
+  # subtraction alone changes no outcome and leaves the suite green (measured).
+  # The rank filter is not redundant in the same way: removing *it* alone lets
+  # a class displace its own peers, and two tests say so. This subtraction
+  # earns its keep against the day a class is added above `interactive`, which
+  # would make a listener displaceable through the ordering alone.
   @evictable @classes -- [:interactive]
 
   @empty_order Map.new(@classes, &{&1, :queue.new()})
@@ -231,7 +233,9 @@ defmodule AudioProxy.Semaphore do
 
   The same service `AudioProxy.Telemetry.render_events/0` performs for the
   render lifecycle, and for the same reason: a consumer that listed the names
-  itself would go on working, silently short of one, the day a sixth is added.
+  itself would go on working, silently short of one, the next time this list
+  grows. It has grown once already — `:displaced` arrived with the admission
+  classes — and the consumers that read it needed no edit.
   """
   @spec events() :: [:telemetry.event_name()]
   def events do
@@ -264,6 +268,13 @@ defmodule AudioProxy.Semaphore do
 
     * `:class` — one of `classes/0`, defaulting to `:interactive`. See
       *Admission classes* in the moduledoc.
+
+  An unrecognised `:class` raises `ArgumentError`, in the *caller's* process
+  and before the call is made. That is a programmer error rather than a request
+  outcome — the class is an argument this codebase writes, not something a
+  client can send — so it is not part of `t:outcome/0` and the semaphore never
+  sees it. The request paths' "errors are data" rule governs what a client can
+  cause; a typo'd atom is a bug, and a bug is louder as an exception.
   """
   @spec request(GenServer.server(), keyword()) :: outcome()
   def request(server \\ @name, opts \\ []) do
@@ -374,7 +385,7 @@ defmodule AudioProxy.Semaphore do
   @doc """
   The `Retry-After` this semaphore would put on a rejection right now.
 
-  `request/1` already carries one on the rejection it returns. This is for the
+  `request/2` already carries one on the rejection it returns. This is for the
   caller that got as far as *queueing* and then gave up waiting: the same "come
   back later", with the same estimate behind it, but no rejection to read it
   off.
@@ -505,9 +516,9 @@ defmodule AudioProxy.Semaphore do
     |> Enum.reverse()
     |> Enum.take_while(&(&1 != class))
     |> Enum.find_value(fn candidate ->
-      case :queue.out_r(state.order[candidate]) do
-        {{:value, pid}, rest} -> {candidate, pid, rest}
-        {:empty, _rest} -> nil
+      case :queue.peek_r(state.order[candidate]) do
+        {:value, pid} -> {candidate, pid}
+        :empty -> nil
       end
     end)
   end
@@ -515,7 +526,14 @@ defmodule AudioProxy.Semaphore do
   # Drops the displaced waiter and tells it so. The reply is distinct from
   # queue-full because the two are distinguishable to the caller — it *was*
   # waiting, and something outranked it — even though both mean "come back".
-  defp displace(state, {class, pid, rest}) do
+  #
+  # `victim/2` only *peeks*, and the pop happens here against the state this
+  # function was handed. The two ran back to back against one state either way,
+  # but carrying a pre-computed queue between them would mean any future edit
+  # landing in that gap was silently discarded. The pin on `pid` asserts the
+  # two agree.
+  defp displace(state, {class, pid}) do
+    {{:value, ^pid}, rest} = :queue.out_r(state.order[class])
     {waiter, waiters} = Map.pop!(state.waiters, pid)
     Process.demonitor(waiter.monitor, [:flush])
 

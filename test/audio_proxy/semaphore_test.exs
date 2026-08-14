@@ -336,7 +336,10 @@ defmodule AudioProxy.SemaphoreTest do
       refute_received {:granted, ^high}
     end
 
-    test "an unknown class is refused before it reaches the server" do
+    # Raised, not returned: a class is an argument this codebase writes, so an
+    # unrecognised one is a bug rather than a request outcome. It happens in
+    # the caller's process, so the semaphore neither sees it nor suffers it.
+    test "an unknown class raises in the caller, and never reaches the server" do
       semaphore = start_semaphore(capacity: 1, queue_size: 1)
 
       assert_raise ArgumentError, ~r/unknown admission class :urgent/, fn ->
