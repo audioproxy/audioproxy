@@ -114,6 +114,7 @@ Options are `/`-separated `key:value` segments between the signature and the sou
 | `fade` | `in[:out]` seconds | Fades inside the trimmed region. An omitted out-fade is `0`, not a mirror of the in |
 | `gain` | signed number dB, \|value\| ≤ 100 | Static gain |
 | `norm` | `ebu[:I[:TP[:LRA]]]` | EBU R128 loudness normalization. Targets default to `-16:-1.5:11`; ranges are I −70–−5, TP −9–0, LRA 1–50. Single-pass `loudnorm`: good for previews, not for masters |
+| `enhance` | `voice` | Enhancement preset: high-pass, denoise, de-ess, compress, limit — applied ahead of every other filter, and peak-limited so the preset cannot clip a source that did not. Independent of `norm`, and the two combine. A preset value is pinned to its chain forever — see *Presets are pinned* |
 | `pts` | integer, 1–100000 | Peaks only: number of min/max pairs. Default `800` |
 | `pk_fmt` | `json` \| `dat` | Peaks only: serialization. Default `json` |
 | `dl` | filename | Sets `Content-Disposition: attachment`. Opaque, kept percent-encoded, control bytes refused |
@@ -135,9 +136,23 @@ Each is a `422` naming the offending segment:
 - `q` requires a format whose encoder has a quality scale, and a value inside that codec's range.
 - `bd` requires a lossless format (`flac`, `wav`); `bd:32f` requires `f:wav`.
 - `pts` and `pk_fmt` require `f:peaks`.
-- `f:peaks` refuses `br`, `q`, `sr`, `bd`, `gain` and `norm` — peaks are computed from the decoded source, so an option that cannot change the output would hand identical bytes two cache keys.
+- `f:peaks` refuses `br`, `q`, `sr`, `bd`, `gain` and `norm` — peaks are computed from the decoded source, so an option that cannot change the output would hand identical bytes two cache keys. It accepts `enhance`, as it accepts `fade`: both change the samples a waveform is drawn from, and a picture that disagreed with the audio playing under it would be the defect. `gain` and `norm` are a known exception awaiting a resampling fix, not the rule.
+- `enhance` takes a name from a closed vocabulary (`voice` today). Anything else — including a name a future release might mint, like `voice2` — is refused rather than passed through.
 - `sr` above 48000 is refused for lossy formats.
 - A fade must fit inside a bounded trim, and a fade-out requires the trim to be bounded at all: its start is `duration - out`, and without a duration there is nothing to count back from. A fade-in needs no trim.
+
+### Presets are pinned
+
+`enhance` names a chain rather than describing one, and the name is a promise about bytes: `enhance:voice` maps to one exact filter chain, permanently.
+
+It has to be. A variant is addressed by a key derived from the options string and served `Cache-Control: immutable`, so a chain that changed under an existing name would hand two different renders the same key — a warm CDN keeps serving the old bytes, a cold cache produces the new ones, and nothing in the URL tells them apart.
+
+So an improved chain ships as a **new value**, `voice2`, and `enhance:voice` goes on rendering what it always rendered. Two consequences for anything generating these URLs:
+
+- A preset name you have used before will not change what it does under you.
+- A name that is not in the vocabulary yet is a `422`, not a forward-compatible no-op. Adding a preset is additive; asking for one before it exists is an error.
+
+`enhance` runs first in the filter chain, ahead of `norm`, `gain`, the resample and the fades: it conditions the source, and every later stage is a statement about what comes out of it. That is also why it is orthogonal to `norm` rather than a substitute for it — the preset shapes dynamics, `norm` hits a loudness target, and asking for both means both.
 
 ### Expiring URLs
 

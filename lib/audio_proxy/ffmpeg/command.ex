@@ -72,10 +72,15 @@ defmodule AudioProxy.Ffmpeg.Command do
 
   ## Filter order
 
-  The chain is `loudnorm → volume → aresample → afade`, and the order is
-  load-bearing:
+  The chain is `enhance → loudnorm → volume → aresample → afade`, and the
+  order is load-bearing:
 
-    * `loudnorm` first, because normalizing after a static `gain` would undo
+    * the `enhance` preset first, because it is source conditioning: it cleans
+      up what was recorded, and every stage after it is a statement about the
+      signal that comes out. Putting it after `loudnorm` would mean measuring
+      loudness on audio the compressor was about to change, so the render would
+      miss its own target.
+    * `loudnorm` next, because normalizing after a static `gain` would undo
       it — `gain` with `norm` means "normalize, then offset".
     * `aresample` after `loudnorm`, because single-pass `loudnorm` resamples
       its output to 192 kHz. When `norm` is given without `sr` we therefore
@@ -100,8 +105,15 @@ defmodule AudioProxy.Ffmpeg.Command do
 
   `f:peaks` builds raw interleaved `s16le` PCM on stdout — the input to
   `AudioProxy.Peaks`, not its output. Encoding and loudness options are already
-  refused for peaks by `AudioProxy.Options`; `t`, `ch` and `fade` apply, since
-  all three change the samples a waveform would be drawn from. `ch` is the one
+  refused for peaks by `AudioProxy.Options`; `t`, `ch`, `fade` and `enhance`
+  apply, since all four change the samples a waveform would be drawn from — a
+  picture that disagreed with the audio playing under it would be the defect.
+
+  The preset is safe here in a way `norm` is not, and the difference is frame
+  count rather than taste: every filter in the chain is rate-preserving, so the
+  decode emits exactly the frames `AudioProxy.Peaks.Render` budgeted from the
+  probe (measured frame-exact at 220500 for a 5 s 44.1 kHz source, against
+  240000 once `loudnorm` re-rates the decode). `ch` is the one
   option peaks read differently: absent, it means mono rather than "follow the
   source", because the reducer has to know the interleaving up front and a
   waveform UI draws one shape.
@@ -243,6 +255,48 @@ defmodule AudioProxy.Ffmpeg.Command do
   # loudnorm's output rate; see the moduledoc's filter-order note.
   @loudnorm_output_rate 48_000
 
+  # The pinned preset chains. Each value maps to exactly these characters
+  # forever: a variant is served immutable under a key derived from
+  # `enhance:voice`, so improving the chain means adding `voice2` here, never
+  # editing this string. `AudioProxy.Ffmpeg.CommandEnhanceTest` compares it to
+  # a literal so the rule cannot be broken quietly.
+  #
+  # What each stage is for, on speech:
+  #
+  #   * `highpass=f=80` — rumble, handling noise and plosive energy live below
+  #     a speaking voice's fundamental. 80 Hz is under a low male voice and
+  #     above almost every room.
+  #   * `afftdn=nr=12:nf=-30` — spectral denoise, 12 dB of reduction against a
+  #     −30 dBFS noise floor. Deliberately gentle: past roughly 20 dB the
+  #     artefacts are more distracting on speech than the hiss was.
+  #   * `deesser=i=0.4:m=0.5:f=0.5:s=o` — sibilance, which the compressor below
+  #     would otherwise pump on. `i` is intensity and `f` is a normalized
+  #     frequency, not Hz.
+  #   * `acompressor=threshold=0.125:ratio=3:attack=20:release=250:makeup=2` —
+  #     3:1 above −18 dBFS (0.125 linear, which is how this filter spells it),
+  #     with a 2× makeup. Speech-radio settings: enough to even out a wandering
+  #     mic distance, not enough to sound processed.
+  #   * `alimiter=limit=0.977:level=disabled` — a −0.2 dBFS ceiling, and the
+  #     stage the chain shipped without until it was measured. The compressor's
+  #     20 ms attack lets a transient shorter than that through *uncompressed*,
+  #     and the makeup then adds its full 6 dB on top: a source peaking at
+  #     −3.1 dBFS came back at 0.0, i.e. clipped, where the source had not.
+  #     With the limiter it comes back at −0.2 and the duration is unchanged.
+  #
+  #     `level=disabled` is load-bearing rather than tidy. `alimiter`'s `level`
+  #     option defaults to *enabled*, which auto-normalizes the output back up
+  #     to full scale — so the obvious `alimiter=limit=0.977` still measured
+  #     0.0 dBFS and looked like the limiter had done nothing.
+  #
+  # `norm` is a separate stage and stays that way; the preset shapes dynamics,
+  # it does not hit a loudness target.
+  @enhance_chains %{
+    voice:
+      "highpass=f=80,afftdn=nr=12:nf=-30,deesser=i=0.4:m=0.5:f=0.5:s=o," <>
+        "acompressor=threshold=0.125:ratio=3:attack=20:release=250:makeup=2," <>
+        "alimiter=limit=0.977:level=disabled"
+  }
+
   # Fragment length for `f:m4a`, in microseconds. See `container_args/1`.
   @fragment_duration_us "1000000"
 
@@ -339,6 +393,25 @@ defmodule AudioProxy.Ffmpeg.Command do
   def allowed_flags, do: @flags |> Map.keys() |> Enum.sort()
 
   @doc """
+  The pinned filter chain for an `enhance` preset.
+
+  Published because the pinning rule needs somewhere to be asserted: the suite
+  compares this against a literal, so changing a chain fails a test naming the
+  rule instead of silently re-rendering every cached variant that asked for the
+  old one. A preset value maps to exactly these characters forever; an improved
+  chain is a *new* value.
+
+  An unknown preset raises — `AudioProxy.Options` is the gate, and a name it
+  accepts with no chain here should crash this module's tests rather than
+  render unenhanced audio under an enhanced key.
+
+      iex> AudioProxy.Ffmpeg.Command.enhance_chain(:voice)
+      "highpass=f=80,afftdn=nr=12:nf=-30,deesser=i=0.4:m=0.5:f=0.5:s=o,acompressor=threshold=0.125:ratio=3:attack=20:release=250:makeup=2,alimiter=limit=0.977:level=disabled"
+  """
+  @spec enhance_chain(Options.enhance()) :: String.t()
+  def enhance_chain(preset) when is_atom(preset), do: Map.fetch!(@enhance_chains, preset)
+
+  @doc """
   Whether `flag` is followed by a value argument.
 
   The other half of what the property test needs: without it, walking an argv
@@ -403,6 +476,7 @@ defmodule AudioProxy.Ffmpeg.Command do
 
   defp filters(%Options{} = options) do
     [
+      enhance(options.enhance),
       loudnorm(options.norm),
       volume(options.gain),
       resample(options),
@@ -410,6 +484,9 @@ defmodule AudioProxy.Ffmpeg.Command do
       fade_out(options)
     ]
   end
+
+  defp enhance(nil), do: nil
+  defp enhance(preset), do: enhance_chain(preset)
 
   defp loudnorm(nil), do: nil
 
