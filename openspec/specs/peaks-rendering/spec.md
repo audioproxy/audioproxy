@@ -15,38 +15,25 @@ response as it comes off the wire. Because bucket boundaries are a function of
 the total sample count, a peaks render is a leading `ffprobe` *and then* a
 decode; it shares `source-info`'s probe argv and contract mapping, so the
 duration the proxy reports and the duration it buckets by cannot drift.
-
 ## Requirements
 ### Requirement: Peaks are computed from decoded audio
-The system SHALL render `f:peaks` by decoding the source (respecting the `t` trim, ignoring encoding options) and reducing samples to `pts` min/max pairs (default 800) spanning the selected region evenly.
+The system SHALL reduce `f:peaks` from the decoded samples of the variant the same URL would render, so every option that changes those samples — `t`, `ch`, `fade`, `enhance`, `gain` and `norm` — is reflected in the picture, and only options that cannot change it (`br`, `q`, `bd`, `sr`) are refused.
 
-`ch` selects the channel count and, unlike every other format, SHALL default to **mono** rather than following the source: the reducer must know the interleaving before it reads a byte, and a waveform UI draws one shape. That default SHALL be materialized into the normalized options string, so `f:peaks` and `f:peaks/ch:1` are one cache key.
+#### Scenario: A level change moves the picture
+- **WHEN** `f:peaks/gain:-6` is requested
+- **THEN** the pairs are drawn from the attenuated samples, so a waveform matches the audio the same options would render
 
-`length` SHALL equal `pts` exactly, whatever sample count the decoder produced.
+#### Scenario: A normalized render draws a normalized waveform
+- **WHEN** `f:peaks/norm:ebu` is requested
+- **THEN** loudness normalization applies to the decode the reduction reads
 
-#### Scenario: Known signal shape
-- **WHEN** peaks are rendered for a generated full-scale sine
-- **THEN** min and max values approach the signed 16-bit bounds uniformly across buckets (within codec tolerance)
+#### Scenario: Bucket boundaries survive the loudness stage
+- **WHEN** a peaks render includes a filter chain that would otherwise change the decode's sample rate
+- **THEN** the frames the decode emits match the count the reduction budgeted from the source probe, so no part of the audio is folded into the final bucket and the reported `sample_rate` describes the samples actually reduced
 
-#### Scenario: Silence detected
-- **WHEN** peaks are rendered for a silent region
-- **THEN** the corresponding pairs are ~0
-
-#### Scenario: Trim respected
-- **WHEN** peaks are rendered with `t:1:1` over a fixture that is silent across that window
-- **THEN** all pairs are ~0 even though the rest of the file is loud
-
-#### Scenario: The mono default is one cache key
-- **WHEN** `f:peaks` and `f:peaks/ch:1` are normalized
-- **THEN** both yield the same options string, and `f:peaks/ch:2` yields a different one
-
-#### Scenario: Encoding options ignored
-- **WHEN** `br` or `sr` accompany `f:peaks`
-- **THEN** options validation rejects the request (422) per §3.3's option gating
-
-#### Scenario: Decoder disagrees with the probe
-- **WHEN** the decode yields more or fewer samples than the probed duration implied
-- **THEN** extra samples fold into the final pair, missing ones leave trailing pairs at zero, and `length` is still `pts`
+#### Scenario: Encoding options remain refused
+- **WHEN** `br`, `q`, `bd` or `sr` is combined with `f:peaks`
+- **THEN** the request is refused with `422` naming the segment, because an option that cannot change the picture would hand one result two cache keys
 
 ### Requirement: JSON peaks output
 The system SHALL serve `pk_fmt:json` (default) as an audiowaveform-compatible JSON object: `version`, `channels`, `sample_rate`, `samples_per_pixel`, `bits`, `length`, and interleaved min/max integer `data`. `bits` SHALL always be 16.
@@ -79,3 +66,4 @@ The system SHALL cache peaks variants exactly like audio variants (cache key, wr
 #### Scenario: Peaks HIT
 - **WHEN** the same peaks URL is requested twice with the variant bucket configured
 - **THEN** the second response is a HIT without decoding
+

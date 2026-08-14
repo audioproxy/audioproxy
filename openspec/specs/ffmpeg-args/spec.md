@@ -98,8 +98,20 @@ The system SHALL map each processing option to its ffmpeg form per API doc §3: 
 - **THEN** the filtergraph runs `loudnorm` before `volume` (normalize, then offset), `aresample` after `loudnorm` (which outputs 192 kHz), and `afade` last
 
 #### Scenario: Loudness normalization without an explicit sample rate
-- **WHEN** building `norm:ebu` with no `sr`
-- **THEN** argv appends `aresample=48000`, since single-pass `loudnorm` would otherwise emit 192 kHz
+- **WHEN** building `norm:ebu` with no `sr` for a source whose rate the probe reported
+- **THEN** argv appends an `aresample` to **the source's own rate**, since single-pass `loudnorm` would otherwise emit 192 kHz and §3.1 defines an absent `sr` as the source's rate
+
+#### Scenario: A high-rate master is not silently downsampled
+- **WHEN** building `norm:ebu` with no `sr` for a 96 kHz source
+- **THEN** argv resamples to 96000, for a lossy format as well as a lossless one, because the §3.1 lossy ceiling bounds what a request may ask for rather than what a source may be — clamping here would let a loudness option change a variant's rate
+
+#### Scenario: The ceiling still bounds an explicit request
+- **WHEN** `sr:96000` is requested with a lossy format
+- **THEN** the request is refused with `422`, unchanged by the scenario above
+
+#### Scenario: A normalized render with no probed rate
+- **WHEN** building `norm:ebu` with no `sr` and no source rate available
+- **THEN** argv falls back to `aresample=48000`, the value it emitted unconditionally before the probe reached the builder
 
 #### Scenario: Quality maps to the knob the codec has
 - **WHEN** building `q` for mp3, ogg, aac or m4a
@@ -107,7 +119,7 @@ The system SHALL map each processing option to its ffmpeg form per API doc §3: 
 
 #### Scenario: Peaks extract raw PCM
 - **WHEN** building `f:peaks`
-- **THEN** argv decodes to interleaved `s16le` on stdout, honouring `t`, `ch` and `fade` and encoding nothing
+- **THEN** argv decodes to interleaved `s16le` on stdout, honouring every option that changes the samples — `t`, `ch`, `fade`, `enhance`, `gain` and `norm` — and encoding nothing
 
 #### Scenario: Peaks name their channel count explicitly
 - **WHEN** building `f:peaks` with no `ch`
@@ -189,4 +201,15 @@ The command builder SHALL map each `enhance` preset value to one exact filter ch
 #### Scenario: The chain needs no dependency beyond ffmpeg
 - **WHEN** a preset chain is built
 - **THEN** every filter in it is one stock ffmpeg provides, so no preset requires a new package, build flag or non-redistributable encoder
+
+### Requirement: The builder is given the source's own properties
+The command builder SHALL receive the resolved source's sample rate and bit depth alongside its type, supplied from the probe the render already runs, so the options documented as following the source can do so. The builder itself SHALL still run no probe and read no bytes: the properties arrive as explicit arguments, each with a documented fallback.
+
+#### Scenario: A lossless variant follows the source's depth
+- **WHEN** a lossless format is requested with no `bd` and the probe reported the source's bit depth
+- **THEN** the argv encodes at that depth rather than at the 16-bit fallback
+
+#### Scenario: The fallbacks stay documented
+- **WHEN** no probe metadata is available for a render
+- **THEN** the argv falls back to 16-bit and 48 kHz, the same values it uses today
 
