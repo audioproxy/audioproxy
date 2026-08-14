@@ -9,5 +9,5 @@
 - [x] 2.2 `:ffmpeg` end-to-end: `f:peaks/gain:-6` and `f:peaks/norm:ebu` move the picture while `samples_per_pixel`, `sample_rate` and `length` stay put
 - [x] 2.3 Frame-count guard: the decode emits what the reducer budgeted, asserted rather than assumed
 ## 3. Release
-- [ ] 3.1 API doc §3.1/§3.2/§3.3, `llms-full.txt` (guards enforce), `docs/ffmpeg-arguments.md` filter-order note, and the release note the byte change owes
+- [x] 3.1 API doc §3.1/§3.2/§3.3, `llms-full.txt` (guards enforce), `docs/ffmpeg-arguments.md` filter-order note, and the release note the byte change owes
 - [ ] 3.2 Purge the playground's variant store on release, so no stale 48 kHz variant outlives the fix

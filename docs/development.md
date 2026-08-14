@@ -362,6 +362,26 @@ Afterwards, confirm all four names agree: the git tag, `mix.exs`, the image tag
 on GHCR, and the version on [hex.pm](https://hex.pm/packages/audio_proxy) with
 its docs rendered on [hexdocs](https://hexdocs.pm/audio_proxy).
 
+### Owed to the next release's notes
+
+A change that alters the bytes an *unchanged* URL renders is owed a line in the
+release notes, because nothing else will tell an operator: the URL is the same,
+the cache key is the same, and a warm CDN and a cold one will disagree about
+what they serve until the old objects age out. This section is where such a
+line waits between merging and being cut, and an entry is deleted by the
+release that carries it — an empty section is the normal state.
+
+- **`norm` without an explicit `sr` now renders at the source's sample rate**
+  rather than at a flat 48 kHz (`peaks-follow-the-variant`). A normalized
+  variant of a 44.1 kHz source, or of a 96 kHz master, is different bytes under
+  the same key than the release before it. Two consequences for the release
+  itself: say so in the notes, and **purge the playground's variant store**
+  before announcing, so the demo does not keep serving 48 kHz variants that
+  contradict the documentation. The change was taken deliberately while no
+  third-party deployment exists — see that change's proposal for the argument,
+  and for why the same fix after the first real deployment would have needed a
+  cache-busting story instead.
+
 **Release notes are claims, and claims name their checks.** Before publishing
 notes, every Highlight must point at the automated check that demonstrates it —
 a smoke assertion, a tagged suite, a named test. A feature no check exercises
