@@ -223,8 +223,8 @@ Three ways a coordinator ends, differing in what happens to the key:
 
 Coalescing bounds the worst hot-key case. What it cannot bound is a burst across
 *distinct* keys, and that is what `AudioProxy.Semaphore` is for: a counting
-semaphore of `AP_MAX_CONCURRENCY` slots with a FIFO wait queue of
-`AP_QUEUE_SIZE` behind it.
+semaphore of `AP_MAX_CONCURRENCY` slots with a wait queue of `AP_QUEUE_SIZE`
+behind it, FIFO for every caller in this repository.
 
 **A slot is per render, not per request.** The coordinator takes one before it
 spawns its pipeline and releases it from `terminate/2`, so twenty requests
@@ -233,7 +233,7 @@ lifetime — including the kill discipline, since the release happens *after* th
 cancel rather than before it. A slot handed over while the previous ffmpeg was
 still being SIGKILLed would exceed the cap by exactly the margin that takes.
 
-**The coordinator waits without blocking.** It asks with `Semaphore.request/1`,
+**The coordinator waits without blocking.** It asks with `Semaphore.request/2`,
 which answers immediately with `:granted`, `:queued` or a queue-full error, and
 starts its render when the grant arrives as a message. So a coordinator has one
 phase more than the render does — `:queued`, before `:rendering` — and keeps
@@ -283,12 +283,53 @@ nothing but `AP_RENDER_TIMEOUT` ends it: the timeout fails the render, the
 coordinator stops, and the slot goes to the next waiter.
 
 Occupancy and queue depth are published as `[:audio_proxy, :semaphore, _]`
-telemetry events (`acquired`, `queued`, `rejected`, `released`, `abandoned`).
+telemetry events (`acquired`, `queued`, `rejected`, `released`, `abandoned`,
+`displaced`).
 `AudioProxy.Metrics` counts `rejected` from that set, and reads the gauges off
 `Semaphore.stats/2` per scrape rather than from the events — a gauge
 maintained by events needs its increments and decrements to balance for the
 life of the VM, and asking the semaphore what it holds cannot drift. Either
 way this path is untouched.
+
+### Admission classes
+
+The queue is ordered rather than flat. A waiter belongs to one of four classes —
+`interactive > high > normal > low` — and a freed slot goes to the *oldest
+waiter of the highest non-empty class*, FIFO holding within a class. The class
+is chosen per call, `Semaphore.request(server, class: :low)`, and defaults to
+`interactive`.
+
+That default is the whole design. **Nothing in this repository passes a class**,
+so every waiter is `interactive`, every comparison is a tie, and the queue is
+the plain FIFO described above — a property test compares a classless workload
+against a FIFO model to keep it that way. The classes are here for callers with
+work that should yield to a live listener: cache warming, batch or eager
+rendering, anything rendered *before* someone asked for it.
+
+When the queue is full, an arrival that outranks something already waiting does
+not queue behind it and does not fail — it **displaces the newest waiter of the
+lowest non-`interactive` class present**, which is then told
+`{:displaced, retry_after}` rather than `{:queue_full, retry_after}`. Newest
+rather than oldest, because the newest has waited least and so wastes the least
+sunk waiting. An arrival that outranks nothing queued — a `normal` behind a
+queue of `high`, or anything at all behind a queue of `interactive` — is refused
+with the same 429 it always was. An `interactive` waiter is never displaced.
+
+**Lower classes starve, and that is the contract.** There is no aging: under
+sustained interactive load `low` waits indefinitely and is the first thing
+displaced. That is safe because the work is deferred rather than lost — a
+variant that never got its background render is still rendered lazily the moment
+someone requests it — and it is visible, because every event carries per-class
+depth. The alternative, letting batch work overtake a listener, trades the one
+latency this proxy is judged on for throughput nobody is waiting on.
+
+Every semaphore event carries the `class` it is about in its metadata, and the
+depth of *every* class in its measurements (`queued_interactive`,
+`queued_high`, `queued_normal`, `queued_low`). Reporting only the event's own
+class would leave a starved class' depth stale for as long as it is starved —
+which is exactly the state worth seeing, and exactly when no event of its own
+fires. `AudioProxy.Metrics` publishes the aggregate gauges it always did; the
+per-class breakdown is on the events for a consumer that wants it.
 
 ## Delivery over HTTP
 

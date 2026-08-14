@@ -105,7 +105,7 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 - Sources on a mounted directory or in S3, read by ffmpeg through a presigned URL, so a trim fetches only the bytes it needs
 - A variant store on a local directory or in S3, so the cache survives a restart and is shared between nodes, and with it `AP_SERVE_MODE=redirect`. The store can carry its own `AP_VARIANT_S3_*` credentials and endpoint, so sources and variants may live with different providers or under different principals
 - `f:peaks`, waveform min/max data in audiowaveform's JSON and binary formats
-- A cap on simultaneous renders with a bounded wait queue, so a burst queues and then sheds rather than thrashing the machine
+- A cap on simultaneous renders with a bounded wait queue, so a burst queues and then sheds rather than thrashing the machine. The queue also carries admission classes, so background work can be made to yield to a live listener; nothing here sets one yet, and the queue is plain FIFO until something does
 - `GET /info` for source metadata, `GET /ready` for queue-aware readiness, and a Prometheus `GET /metrics` on a bind-restricted listener of its own
 - Video input refused rather than transcoded, enforced rather than intended
 - Optional CORS (`AP_ALLOW_ORIGIN`), off by default

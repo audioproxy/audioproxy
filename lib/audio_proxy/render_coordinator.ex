@@ -33,7 +33,7 @@ defmodule AudioProxy.RenderCoordinator do
   a slot, and releases that slot from `terminate/2` — so the cap counts renders
   rather than requests, and a variant twenty clients are waiting on costs one.
 
-  It asks with `Semaphore.request/1` rather than the blocking `acquire/1`,
+  It asks with `Semaphore.request/2` rather than the blocking `acquire/1`,
   because this process must keep answering joins while it waits: the requests
   coalescing onto a queued render are exactly the ones that should not each take
   a slot of their own. So a coordinator has one phase more than the render does
@@ -368,7 +368,7 @@ defmodule AudioProxy.RenderCoordinator do
     # Asked for here rather than after `init/1` returns, so that a full queue is
     # a `start_child` error the requesting process gets back directly — a 429
     # before a coordinator exists, rather than a coordinator whose only act is
-    # to broadcast a failure. `request/1` answers immediately whichever way it
+    # to broadcast a failure. `request/2` answers immediately whichever way it
     # goes; only the *waiting* would block, and that is what `:queued` is.
     #
     # Before the tee, too: a coordinator that cannot get a slot stops without
