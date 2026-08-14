@@ -306,37 +306,6 @@ defmodule AudioProxy.Options do
   end
 
   @doc """
-  Whether a format is a lossy encode.
-
-  Published for `AudioProxy.Ffmpeg.Command`, which has to know whether a rate it
-  did not get from the request is subject to the §3.1 lossy ceiling. `:peaks` is
-  neither lossy nor lossless — it is decoded samples — and answers `false`, which
-  is the answer that matters at the one call site: a peaks decode follows the
-  source's rate exactly, because that is what the reducer budgeted from.
-
-      iex> AudioProxy.Options.lossy?(:mp3)
-      true
-
-      iex> AudioProxy.Options.lossy?(:flac)
-      false
-  """
-  @spec lossy?(format()) :: boolean()
-  def lossy?(format) when is_atom(format), do: format in @lossy
-
-  @doc """
-  The §3.1 sample-rate ceiling for lossy formats, in Hz.
-
-  One definition, read both by `validate/1` — which refuses an `sr` above it —
-  and by `AudioProxy.Ffmpeg.Command`, which clamps a *source* rate to it rather
-  than refusing anything: a 96 kHz master is a legitimate source for an mp3.
-
-      iex> AudioProxy.Options.lossy_sample_rate_cap()
-      48000
-  """
-  @spec lossy_sample_rate_cap() :: pos_integer()
-  def lossy_sample_rate_cap, do: @lossy_sample_rate_cap
-
-  @doc """
   How many min/max pairs `opts` asks for. Meaningful under `f:peaks` only.
 
       iex> {:ok, opts} = AudioProxy.Options.parse("f:peaks")

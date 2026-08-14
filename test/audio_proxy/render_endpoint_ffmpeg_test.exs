@@ -214,21 +214,33 @@ defmodule AudioProxy.RenderEndpointFfmpegTest do
       assert stream["sample_rate"] == "96000"
     end
 
-    # Belt-and-braces, and it says so rather than pretending otherwise: no lossy
-    # encoder accepts a rate above the ceiling — that is why the ceiling exists —
-    # so libmp3lame would negotiate 96 kHz down to 48 kHz even with the clamp
-    # deleted, and this assertion stays green either way (mutation-checked). The
-    # clamp's actual guard is `AudioProxy.Ffmpeg.CommandTest`; what this pins is
-    # the observable contract, end to end.
-    test "a normalized lossy variant is still held to the §3.1 ceiling",
+    # `aac` rather than `mp3`, and that is the whole test: libmp3lame accepts
+    # nothing above 48 kHz, so an mp3 renders at 48 kHz however wrong the argv
+    # is, and the assertion would hold for reasons that have nothing to do with
+    # this proxy. ffmpeg's aac encoder does 96 kHz, so this is the format where
+    # "adding `norm` must not change the rate" is observable at all.
+    test "a normalized lossy variant keeps the source's rate, as a plain one does",
          %{port: port, tmp_dir: tmp_dir} do
-      response = render("/f:mp3/norm:ebu/t:0:1/plain/local://master.wav", port)
+      plain = render("/f:aac/t:0:1/plain/local://master.wav", port)
+      normalized = render("/f:aac/norm:ebu/t:0:1/plain/local://master.wav", port)
 
-      assert response.head =~ "http/1.1 200 ok"
+      assert plain.head =~ "http/1.1 200 ok"
+      assert normalized.head =~ "http/1.1 200 ok"
 
-      stream = probe(RawHttp.dechunk(response.body), "mp3", tmp_dir)["streams"] |> hd()
+      plain_rate = probe(RawHttp.dechunk(plain.body), "aac", tmp_dir)["streams"] |> hd()
+      normalized_rate = probe(RawHttp.dechunk(normalized.body), "aac", tmp_dir)["streams"] |> hd()
 
-      assert stream["sample_rate"] == "48000"
+      assert plain_rate["sample_rate"] == "96000"
+      assert normalized_rate["sample_rate"] == "96000"
+    end
+
+    # The other half of the same rule, and the reason dropping the clamp does
+    # not widen the API: the ceiling still refuses the rate as a *request*.
+    test "the §3.1 ceiling still refuses an explicit sr above it", %{port: port} do
+      response = render("/f:aac/sr:96000/t:0:1/plain/local://master.wav", port)
+
+      assert response.head =~ "http/1.1 422"
+      assert JSON.decode!(response.body)["error"] == "invalid_options"
     end
   end
 

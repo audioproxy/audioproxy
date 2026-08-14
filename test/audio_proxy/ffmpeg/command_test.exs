@@ -165,24 +165,21 @@ defmodule AudioProxy.Ffmpeg.CommandTest do
                "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=96000"
     end
 
-    # Nothing is refused here — a 96 kHz master is a perfectly good source for
-    # an mp3 — but §3.1's ceiling is what an explicit `sr` would have been held
-    # to, so a rate the request never named is held to it as well.
-    test "a lossy format clamps the source's rate to the §3.1 ceiling" do
-      assert filtergraph("f:mp3/norm:ebu", sample_rate: 96_000) ==
-               "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000"
+    # The §3.1 ceiling is a rule about the *request* — `sr:96000` with a lossy
+    # format is a 422, asserted in `AudioProxy.OptionsTest` — and not about the
+    # source. Clamping here would mean `f:aac/norm:ebu` downsampling a master
+    # that plain `f:aac` returns at 96 kHz, i.e. a loudness option changing the
+    # rate. Every format follows the source, and that is the point.
+    test "every format follows the source's rate, lossy included" do
+      for format <- ~w(flac wav mp3 opus ogg aac m4a peaks) do
+        assert filtergraph("f:#{format}/norm:ebu", sample_rate: 96_000) ==
+                 "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=96000",
+               "f:#{format} did not follow the source's 96 kHz"
 
-      # Under the ceiling it is the source's rate that wins, not the ceiling.
-      assert filtergraph("f:mp3/norm:ebu", sample_rate: 44_100) ==
-               "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=44100"
-    end
-
-    # Peaks are neither lossy nor lossless: they are the decoded samples the
-    # reducer buckets, and the budget comes from the source's probed rate. So
-    # the rate is followed exactly, ceiling or no ceiling.
-    test "a normalized peaks decode follows the source's rate unclamped" do
-      assert filtergraph("f:peaks/norm:ebu", sample_rate: 96_000) ==
-               "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=96000"
+        assert filtergraph("f:#{format}/norm:ebu", sample_rate: 44_100) ==
+                 "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=44100",
+               "f:#{format} did not follow the source's 44.1 kHz"
+      end
     end
 
     test "an unprobed source falls back to 48 kHz, as it always did" do

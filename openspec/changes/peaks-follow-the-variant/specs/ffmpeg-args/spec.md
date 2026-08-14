@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Loudness normalization without an explicit sample rate
-The system SHALL resample a normalized render back to **the source's own sample rate** rather than to a fixed 48 kHz, since §3.1 defines an absent `sr` as "follow the source". For a lossy format the rate SHALL be clamped to the §3.1 lossy ceiling. Where no probe supplied the source's rate, the render SHALL fall back to 48 kHz, documented rather than silent.
+The system SHALL resample a normalized render back to **the source's own sample rate** rather than to a fixed 48 kHz, since §3.1 defines an absent `sr` as "follow the source". The target SHALL be the source's rate for every format: the §3.1 lossy ceiling bounds what a request may ask for, not what a source may be, so applying it here would make `norm` change a variant's rate as well as its loudness. Where no probe supplied the source's rate, the render SHALL fall back to 48 kHz, documented rather than silent.
 
 #### Scenario: A normalized render keeps the source's rate
 - **WHEN** `norm:ebu` is requested with no `sr` for a 44.1 kHz source
@@ -11,9 +11,13 @@ The system SHALL resample a normalized render back to **the source's own sample 
 - **WHEN** `norm:ebu` is requested with no `sr` for a 96 kHz source and a lossless format
 - **THEN** the argv resamples to 96000
 
-#### Scenario: A lossy format stays under the ceiling
+#### Scenario: A lossy format follows the source too
 - **WHEN** `norm:ebu` is requested with no `sr` for a 96 kHz source and a lossy format
-- **THEN** the argv resamples to the lossy ceiling rather than the source's rate
+- **THEN** the argv resamples to 96000, because adding a loudness option must not change the rate a plain render of that source would have returned
+
+#### Scenario: The ceiling still bounds an explicit request
+- **WHEN** `sr:96000` is requested with a lossy format
+- **THEN** the request is refused with `422`, unchanged by the above
 
 ### Requirement: The builder is given the source's own properties
 The command builder SHALL receive the resolved source's sample rate and bit depth alongside its type, supplied from the probe the render already runs, so the options documented as following the source can do so.

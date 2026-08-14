@@ -293,13 +293,19 @@ shape survives the stages above it.
 
 That 192 kHz has one visible consequence: **`norm` without an explicit `sr`
 appends an `aresample` of its own.** Without it every normalized render would
-be a 192 kHz file. The rate it targets is the **source's own**, because §3.1
-defines an absent `sr` as "follow the source" and a normalized render is not an
-exception — so `norm` on a 96 kHz master stays at 96 kHz, and on a 44.1 kHz
-source stays at 44.1. A lossy format is clamped to the §3.1 ceiling (48 kHz)
-rather than refused: a 96 kHz master is a legitimate source for an mp3. Where
-no probe supplied a rate the fallback is 48 kHz, which is what this emitted
-unconditionally before the probe reached the builder.
+be a 192 kHz file. The rate it targets is the **source's own**, for every
+format, because §3.1's default is the source's rate for every format — so
+`norm` on a 96 kHz master stays at 96 kHz and on a 44.1 kHz source stays at
+44.1. The stage undoes an implementation detail; landing anywhere but where the
+render would have been without it would make `norm` a rate option as well as a
+loudness one. Where no probe supplied a rate the fallback is 48 kHz, which is
+what this emitted unconditionally before the probe reached the builder.
+
+**No lossy ceiling is applied here, deliberately.** §3.1's 48 kHz cap governs
+what a request may ask for — `sr:96000` with `f:aac` is a 422 — not what a
+source may be. Clamping this stage would mean `f:aac/norm:ebu` downsampling a
+96 kHz master that plain `f:aac` returns at 96 kHz, which is a loudness option
+quietly changing the rate.
 
 The builder learns the source's rate the same way it learns its bit depth: the
 render action's audio-only gate probes every miss, and passes both into
@@ -343,10 +349,11 @@ special-casing opus here would mean the builder knowing each encoder's
 supported rates, which is a larger contract than the one option it would fix.
 Pass `sr:48000` on that path if the extra conversion matters.
 
-The ceiling `norm` clamps to is worth stating precisely, because it is easy to
-read as more than it is: it bounds the rate *this builder targets*, and nothing
-else. A plain lossy render emits no `aresample` at all, so `f:aac` on a 96 kHz
-master encodes at 96 kHz. See §3.1.
+Worth knowing when reading an argv: a plain render emits no `aresample` at all,
+so the encoder is handed whatever the source had and `f:aac` on a 96 kHz master
+encodes at 96 kHz. `f:mp3` and `f:opus` on that source come back at 48 kHz
+anyway, because libmp3lame and libopus accept nothing higher and ffmpeg
+negotiates it down. See §3.1.
 
 Two fallbacks remain, and both are reachable only when the probe could not
 answer: with no `bd`, `f:wav` encodes 16-bit when the source's depth is unknown

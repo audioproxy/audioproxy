@@ -86,12 +86,10 @@ defmodule AudioProxy.Ffmpeg.Command do
       its output to 192 kHz. When `norm` is given without `sr` we therefore
       append an `aresample` ourselves; without it every normalized render would
       be a 192 kHz file (or a silent auto-resample by the encoder). The target
-      is the **source's own rate** — §3.1 defines an absent `sr` as "follow the
-      source", and a normalized render is not an exception — clamped to the
-      lossy ceiling for a lossy format, since a 96 kHz master is a legitimate
-      source for an mp3. Only where no probe supplied a rate does it fall back
-      to 48 kHz, which is the ceiling itself and universally supported. See
-      `resample/2`.
+      is the **source's own rate**, for every format, because that is §3.1's
+      default for every format — the stage undoes an implementation detail and
+      has to land where the render would have been without it. Only where no
+      probe supplied a rate does it fall back to 48 kHz. See `resample/2`.
     * `afade` last, so the fade shape survives the stages above it.
 
   ## What the builder does not know
@@ -270,8 +268,10 @@ defmodule AudioProxy.Ffmpeg.Command do
   @peaks_content_types %{json: "application/json", dat: "application/octet-stream"}
 
   # Where a normalized render lands when no probe said what the source's rate
-  # was. The lossy ceiling, which is also universally supported. See
-  # `resample/2` and the moduledoc's filter-order note.
+  # was. Chosen because it is universally supported and because it is what this
+  # emitted unconditionally before the probe reached the builder, so the
+  # unprobed path behaves exactly as it always did. See `resample/2` and the
+  # moduledoc's filter-order note.
   @loudnorm_output_rate 48_000
 
   # The pinned preset chains. Each value maps to exactly these characters
@@ -526,10 +526,16 @@ defmodule AudioProxy.Ffmpeg.Command do
 
   # An explicit `sr` always resamples, to exactly what it asked for. Without
   # one, `norm` still forces a resample — single-pass loudnorm hands back
-  # 192 kHz — and the target is then the *source's* rate, because that is what
-  # an absent `sr` means (§3.1). A lossy format is clamped to the ceiling §3.1
-  # would have refused an explicit `sr` above; nothing is refused here, since a
-  # 96 kHz master is a perfectly good source for an mp3.
+  # 192 kHz — and the target is the *source's* rate, for every format, because
+  # that is what §3.1's default is for every format. This stage exists to undo
+  # an implementation detail, so it has to land exactly where the render would
+  # have been without it.
+  #
+  # No ceiling is applied here, and that is the deliberate part. §3.1's 48 kHz
+  # lossy cap is a rule about what a *request* may ask for — `sr:96000` with
+  # `f:aac` is a 422 — not about what a source may be. Clamping here would mean
+  # `f:aac/norm:ebu` downsampling a 96 kHz master that plain `f:aac` returns at
+  # 96 kHz: a loudness option quietly changing the rate.
   #
   # With no probed rate the fallback is 48 kHz, the same value this emitted
   # unconditionally before the probe reached it. It is documented rather than
@@ -537,17 +543,11 @@ defmodule AudioProxy.Ffmpeg.Command do
   # probes every MISS.
   defp resample(%Options{sample_rate: nil, norm: nil}, _source), do: nil
 
-  defp resample(%Options{sample_rate: nil} = options, source) do
-    "aresample=#{normalized_rate(options.format, Keyword.get(source, :sample_rate))}"
+  defp resample(%Options{sample_rate: nil}, source) do
+    "aresample=#{Keyword.get(source, :sample_rate) || @loudnorm_output_rate}"
   end
 
   defp resample(%Options{sample_rate: rate}, _source), do: "aresample=#{rate}"
-
-  defp normalized_rate(_format, nil), do: @loudnorm_output_rate
-
-  defp normalized_rate(format, rate) do
-    if Options.lossy?(format), do: min(rate, Options.lossy_sample_rate_cap()), else: rate
-  end
 
   defp fade_in(nil), do: nil
   defp fade_in(+0.0), do: nil
