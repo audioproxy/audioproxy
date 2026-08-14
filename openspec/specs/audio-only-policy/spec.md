@@ -134,3 +134,14 @@ The whitelist SHALL be derived from the resolved source's type and SHALL NOT be 
 #### Scenario: Pivot attempt fails at ffmpeg (integration)
 - **WHEN** ffmpeg is handed an input that redirects to or references a `file:` URL under the remote whitelist, or a network URL under the local one
 - **THEN** the render fails as a source error rather than reading the local file or issuing the fetch
+
+### Requirement: The video verdict is a policy with a rejecting default
+The gate SHALL obtain its verdict for video-containing sources from a configured policy module; the default policy SHALL reject exactly as specified today, and OSS configuration SHALL offer no way to select another — the seam is for embedding releases.
+
+#### Scenario: Default is byte-identical
+- **WHEN** no embedding release configures a policy
+- **THEN** every response (status, body, headers) is identical to the pre-seam behavior, pinned by the existing gate suite running unchanged
+
+#### Scenario: Extraction verdict never touches egress
+- **WHEN** a policy answers `:extract` for a video-containing source
+- **THEN** the render proceeds with `-vn -sn -dn` in argv and no video encoder reachable — the audio-only *output* guarantee holds regardless of policy
