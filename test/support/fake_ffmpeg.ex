@@ -67,17 +67,14 @@ defmodule AudioProxy.FakeFfmpeg.Pipeline do
   @moduledoc """
   `AudioProxy.Plugs.RenderPipeline` with the stand-in encoder.
 
-  The chain ahead of the action is copied from there, so a plug added to the
-  production pipeline has to be added here too — otherwise every test mounting
-  this one asserts against a chain the deployment does not run.
+  The chain ahead of the action is the same mounted unit the production
+  pipeline uses, so a plug added there is added here — a test driving this
+  router asserts against the chain the deployment runs.
   """
 
   use Plug.Builder
 
-  plug AudioProxy.Plugs.VerifySignature
-  plug AudioProxy.Plugs.ParseOptions
-  plug AudioProxy.Plugs.CheckExpiry
-  plug AudioProxy.Plugs.ResolveSource
+  plug AudioProxy.Plugs.SignedChain
   # Resolved at compile time, which is the same filesystem the tests run on.
   plug AudioProxy.Plugs.Action,
     render: [
@@ -102,10 +99,7 @@ defmodule AudioProxy.CountingProbe.Pipeline do
 
   use Plug.Builder
 
-  plug AudioProxy.Plugs.VerifySignature
-  plug AudioProxy.Plugs.ParseOptions
-  plug AudioProxy.Plugs.CheckExpiry
-  plug AudioProxy.Plugs.ResolveSource
+  plug AudioProxy.Plugs.SignedChain
 
   plug AudioProxy.Plugs.Action,
     render: [

@@ -1,37 +1,30 @@
 defmodule AudioProxy.Plugs.RenderPipeline do
   @moduledoc """
-  The signed chain (API doc §2): verify, parse, check, resolve, act.
+  The deployed signed chain: `AudioProxy.Plugs.SignedChain` and then the action.
 
-  Cheapest checks first — signature verification, both parsers and the expiry
-  check are pure functions of the request (and, for expiry, the clock), and
-  authorization is an existence-blind confinement resolution; the action's
-  `stat` is the only source-metadata I/O and runs last. A halted conn
-  short-circuits the rest of the chain, so a 401 never reaches option parsing,
-  a 422 never touches the filesystem, and a 410 never learns whether the source
-  it names exists.
+  The checks ahead of the action, their order and the assigns contract between
+  them live in `AudioProxy.Plugs.SignedChain`, which the test pipelines mount
+  too — this module is that unit plus the production action options, and the
+  test mountings differ from it only in theirs.
 
-  The mounting contract is the assigns chain: `VerifySignature` assigns
-  `:rest_of_path`, `ParseOptions` assigns `:options` and `:source_string`,
-  `CheckExpiry` reads `:options` and assigns nothing, `ResolveSource` assigns
-  `:source`, and each plug reads exactly what its predecessor assigns — a plug
-  mounted without its upstream raises `KeyError`. Mount the five together, in
-  this order.
+  **A new check goes in `SignedChain`, never here.** A plug added between the
+  two below runs in production and in neither test mounting, which is the
+  divergence the extraction removed, reinstated in one line. Nothing prevents
+  it structurally: the seam is "everything ahead of the action", and moving it
+  would mean making the action mountable through the unit.
 
   Mounted by the router for `GET /:sig/*rest`; `/health` stays outside it, so
   an unsigned liveness check never touches signature verification.
 
   The action is the seam, and there are two behind it: the streaming render and
-  the info probe. Both endpoints in §2 are the same route and the same first
-  three checks, so which one a request reached is a fact the chain discovers
-  rather than the router — `AudioProxy.Plugs.ParseOptions` decides it and
+  the info probe. Both endpoints in §2 are the same route and the same checks,
+  so which one a request reached is a fact the chain discovers rather than the
+  router — `AudioProxy.Plugs.ParseOptions` decides it and
   `AudioProxy.Plugs.Action` acts on it.
   """
 
   use Plug.Builder
 
-  plug AudioProxy.Plugs.VerifySignature
-  plug AudioProxy.Plugs.ParseOptions
-  plug AudioProxy.Plugs.CheckExpiry
-  plug AudioProxy.Plugs.ResolveSource
+  plug AudioProxy.Plugs.SignedChain
   plug AudioProxy.Plugs.Action
 end
