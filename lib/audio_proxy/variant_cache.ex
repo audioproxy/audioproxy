@@ -43,6 +43,16 @@ defmodule AudioProxy.VariantCache do
   A syntactically valid range that no byte of the variant can satisfy is a
   `416` — the one status this module produces that is not a HIT's body.
 
+  ## A HEAD on a HIT is the same answer without the read
+
+  RFC 9110 §9.3.2 lets a server omit only the header fields "determined only
+  while generating the content", and on a HIT none of them are: the store's
+  `c:AudioProxy.VariantStore.head/1` returned the size and the stored metadata
+  before any byte moved. So a HEAD gets the GET's head verbatim —
+  `Content-Length`, `Accept-Ranges`, `ETag`, `Content-Type`, `Cache-Control`,
+  `X-Audio-Proxy: HIT` — and no `get_stream/2` call at all. Redirect mode needs
+  nothing special: its `302` has no body to skip.
+
   ## The redirect is not the variant
 
   Redirect mode answers `302` with a short-lived presigned URL — no longer
@@ -178,6 +188,28 @@ defmodule AudioProxy.VariantCache do
   end
 
   ## Proxy mode
+
+  # A HEAD asks what a GET would answer, and on a HIT the store's own `head/1`
+  # has already said all of it — size and metadata both — so the answer is the
+  # GET's response head with the read left out. The headers are built by the
+  # same three calls `deliver/6` makes, in the same order, because parity is
+  # the requirement: a header added to the HIT below has to appear here or the
+  # set-difference test fails.
+  #
+  # `Range` is deliberately not consulted. §14.2 permits ignoring it, a HEAD
+  # carrying one is vanishingly rare, and answering 206 for a body that is not
+  # sent would only invite a client to believe something about a request it did
+  # not make.
+  defp proxy(%Plug.Conn{method: "HEAD"} = conn, _key, %{size: size, metadata: metadata}) do
+    {:ok,
+     conn
+     |> mark_hit()
+     |> describe(metadata)
+     |> put_resp_header("accept-ranges", "bytes")
+     |> put_resp_header("content-length", Integer.to_string(size))
+     |> send_resp(200, "")
+     |> halt()}
+  end
 
   defp proxy(conn, key, %{size: size, metadata: metadata}) do
     case requested_range(conn, size) do

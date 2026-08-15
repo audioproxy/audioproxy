@@ -81,6 +81,26 @@ defmodule AudioProxy.VariantCacheStreamTest do
       assert response.body == @variant
     end
 
+    test "a HEAD on a HIT declares the length on the wire, with no body", %{port: port} do
+      # `Plug.Test` cannot show this one: the adapter decides whether a
+      # `Content-Length` the plug set survives on a response with no body, and
+      # RFC 9110 §8.6 lets it go either way. Bandit keeps ours, and the whole
+      # value of the header is that it does — a client sizing a download reads
+      # this or gets nothing.
+      store!(@variant)
+
+      response = @rest |> signed() |> RawHttp.head(port) |> RawHttp.read(@deadline)
+
+      assert response.head =~ "http/1.1 200 ok"
+      assert response.head =~ "content-length: #{byte_size(@variant)}"
+      assert response.head =~ "accept-ranges: bytes"
+      assert response.head =~ "x-audio-proxy: hit"
+      refute response.head =~ "transfer-encoding"
+
+      # The length describes the GET's body; it is not a promise to send one.
+      assert response.body == ""
+    end
+
     test "a Range on a HIT is a 206 with the slice, on the wire", %{port: port} do
       store!(@variant)
 
