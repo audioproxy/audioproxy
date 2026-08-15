@@ -232,6 +232,8 @@ A `Range` this proxy does not implement — several ranges at once, a unit other
 
 That makes `HEAD` the cheap way to ask the three things a player wants to know before committing: how big this is, whether it can seek, and whether the variant is already cached. On a `MISS` the first two have no answer yet — nothing has been rendered — so those headers are absent rather than guessed. A `Range` on a `HEAD` is ignored in either shape.
 
+A hit is answered from the variant store's metadata and never stats the source; a miss pays for the store lookup and then the stat. Neither shape is counted in the proxy's cache hit ratio — those counters describe variants delivered — so polling `HEAD` cannot skew the metric.
+
 It still neither decodes nor probes, so it cannot report a source ffmpeg would reject or one that turns out to be video: both answer `200` where the `GET` answers `415`.
 
 ### Cache-Control

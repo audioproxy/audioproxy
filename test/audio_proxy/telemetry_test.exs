@@ -172,18 +172,56 @@ defmodule AudioProxy.TelemetryTest do
       refute_receive {:render, [:audio_proxy, :render, :start], _, _}
     end
 
-    test "a request that never commits to a header emits nothing" do
+    test "a request that delivers nothing emits nothing: HEAD on a miss" do
       attach_cache(:cache)
 
-      # A HEAD does not consult the cache, so it has no outcome to report —
-      # counting one would put a request the client was told nothing about into
-      # the ratio's denominator.
+      # A HEAD reports `MISS` in its header and is still not counted: the
+      # counters describe variants delivered, and this one delivered nothing.
       rest = "/f:mp3/plain/local://piece.wav"
       path = signed(rest)
 
       capture_log(fn -> conn(:head, path) |> AudioProxy.FakeFfmpeg.Router.call(@fake_opts) end)
 
       refute_receive {:cache, [:audio_proxy, :cache, :lookup], _, _}
+    end
+
+    test "a HEAD on a hit reports HIT in the header and is still not counted",
+         %{tmp_dir: tmp_dir} do
+      # The asymmetry that made this worth pinning: only the hit side touches
+      # the store, so a counted HEAD would add probe traffic to the numerator
+      # while the miss case above stayed out of the denominator. A player
+      # polling HEAD — the reason the header is on a HEAD at all — would then
+      # drive the hit ratio to 100% by asking.
+      store = Path.join(tmp_dir, "head-store")
+      File.mkdir_p!(store)
+      put_config(%{variant_store: {:file, store}, serve_mode: :proxy})
+
+      options = "f:mp3"
+      key = AudioProxy.CacheKey.derive!(options, "local://piece.wav")
+
+      :ok =
+        AudioProxy.VariantStore.put_stream(key, ["stored-variant-bytes"], %{
+          content_type: "audio/mpeg",
+          cache_control: "public, max-age=31536000, immutable, no-transform",
+          etag: ~s("#{key}")
+        })
+
+      attach_cache(:cache)
+
+      {head, _log} =
+        with_log(fn ->
+          conn(:head, signed("/#{options}/plain/local://piece.wav"))
+          |> AudioProxy.FakeFfmpeg.Router.call(@fake_opts)
+        end)
+
+      assert Plug.Conn.get_resp_header(head, "x-audio-proxy") == ["HIT"]
+      refute_receive {:cache, [:audio_proxy, :cache, :lookup], _, _}
+
+      # And the GET for the same variant still is counted, so this is an
+      # exemption for the probe rather than a hole in the hit counter.
+      render("/#{options}/plain/local://piece.wav")
+
+      assert_receive {:cache, [:audio_proxy, :cache, :lookup], _, %{status: :hit, format: :mp3}}
     end
   end
 

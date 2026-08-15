@@ -271,6 +271,8 @@ On a HIT the header set equals the `GET`'s, header for header — redirect mode 
 
 On a MISS the two framing headers *are* determined only by rendering, so they are absent — the permitted omission, not an oversight. `Range` is not honoured on either shape.
 
+**What a `HEAD` costs.** The cache lookup stands where the `GET`'s does, before the source stat, so a hit is answered from the variant store's metadata alone and never stats the source — cheaper than the old behavior, and the reason a hit can report a length at all. A miss pays for both: the store lookup that established the miss, then the stat. Against `s3://` on both sides that is two round trips where a `GET` on a miss also makes two, so a probe is never more expensive than the request it stands in for, but it is not free either. Nothing about it is counted in the cache hit ratio: those counters describe variants delivered, and a `HEAD` delivers none, so polling one cannot move the number an operator reads.
+
 Where a `HEAD` still diverges from its `GET` is the statuses only a subprocess can discover. It neither decodes nor probes, so an undecodable source and one carrying video both answer `200` where the `GET` answers `415`: diagnosing that *is* the work a `HEAD` exists to skip.
 
 ### Common headers
