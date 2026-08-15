@@ -253,8 +253,8 @@ equivalent for anyone who needs one, and it is an image.
 
 The two artifacts cannot disagree about what they contain. The publish job
 asserts `mix.exs` matches the tag before it does anything, and both are built
-from that same commit — so `ghcr.io/audioproxy/audioproxy:0.7.0` and
-`audio_proxy 0.7.0` are the same code by construction, not by discipline.
+from that same commit — so `ghcr.io/audioproxy/audioproxy:0.7.1` and
+`audio_proxy 0.7.1` are the same code by construction, not by discipline.
 
 **The image is published first, then the package, then the docs** — three
 steps, and the order is what makes a partial failure recoverable:
