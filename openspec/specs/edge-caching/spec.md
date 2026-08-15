@@ -62,17 +62,6 @@ The system SHALL answer a render request whose `If-None-Match` matches the URL-d
 - **WHEN** an unsigned request carries a matching `If-None-Match`
 - **THEN** the response is 401, not 304
 
-### Requirement: HEAD is supported on signed endpoints
-The system SHALL answer HEAD requests on the render endpoint with the same status and headers a GET would produce through the full check chain (signature, options, source authorize + stat), an empty body, and no render subprocess.
-
-#### Scenario: HEAD on a valid variant URL
-- **WHEN** a valid signed render URL receives a HEAD request
-- **THEN** the response is 200 with `Content-Type`, `Cache-Control`, and `ETag`, an empty body, and no ffmpeg process was spawned
-
-#### Scenario: HEAD reports errors like GET
-- **WHEN** a HEAD request has a bad signature or names a missing source
-- **THEN** it answers 401 or 404 with the same headers as GET (bodiless)
-
 ### Requirement: Range on an uncached variant is ignored
 The system SHALL answer a render (MISS) request carrying a `Range` header with the full `200` chunked stream, ignoring the header; 206 semantics belong to cached variants only.
 
