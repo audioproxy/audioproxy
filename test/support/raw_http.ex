@@ -33,10 +33,23 @@ defmodule AudioProxy.RawHttp do
   header must be able to send one this module does not understand.
   """
   @spec get(String.t(), :inet.port_number(), keyword()) :: :gen_tcp.socket()
-  def get(path, port, opts \\ []) do
+  def get(path, port, opts \\ []), do: open("GET", path, port, opts)
+
+  @doc """
+  Opens a connection and sends `HEAD path`.
+
+  Its own entry point because the header a HEAD is asked about — a
+  `Content-Length` describing a body that is not sent — is one only the server
+  may write, and adapters have been known to drop it. From the conn a HEAD and
+  its GET look alike; on the wire they must, header for header.
+  """
+  @spec head(String.t(), :inet.port_number(), keyword()) :: :gen_tcp.socket()
+  def head(path, port, opts \\ []), do: open("HEAD", path, port, opts)
+
+  defp open(method, path, port, opts) do
     {:ok, socket} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false, packet: :raw])
 
-    :ok = send_get(socket, path, opts)
+    :ok = send_request(socket, method, path, opts)
 
     socket
   end
@@ -48,7 +61,11 @@ defmodule AudioProxy.RawHttp do
   left behind.
   """
   @spec send_get(:gen_tcp.socket(), String.t(), keyword()) :: :ok
-  def send_get(socket, path, opts \\ []) do
+  def send_get(socket, path, opts \\ []), do: send_request(socket, "GET", path, opts)
+
+  @doc "Sends `method path` down a socket that is already open."
+  @spec send_request(:gen_tcp.socket(), String.t(), String.t(), keyword()) :: :ok
+  def send_request(socket, method, path, opts \\ []) do
     close = if Keyword.get(opts, :close, true), do: "Connection: close\r\n", else: ""
 
     headers =
@@ -56,7 +73,10 @@ defmodule AudioProxy.RawHttp do
       |> Keyword.get(:headers, [])
       |> Enum.map_join(fn {name, value} -> "#{name}: #{value}\r\n" end)
 
-    :gen_tcp.send(socket, "GET #{path} HTTP/1.1\r\nHost: localhost\r\n#{close}#{headers}\r\n")
+    :gen_tcp.send(
+      socket,
+      "#{method} #{path} HTTP/1.1\r\nHost: localhost\r\n#{close}#{headers}\r\n"
+    )
   end
 
   @doc """

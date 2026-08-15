@@ -42,10 +42,16 @@ defmodule AudioProxy.Plugs.RenderAction do
   revalidation is pure computation. A cache key already in the variant store
   is served from it by `AudioProxy.VariantCache`, which owns everything about
   a HIT and is the reason this module's streaming loop only ever reports
-  `MISS` or `COALESCED`. And a HEAD runs the full check chain including the
-  stat but ends bodiless after it, with no subprocess. All three sit after the
-  signature plug by pipeline order, so none is an existence oracle for
-  unsigned probes.
+  `MISS` or `COALESCED`. And a HEAD runs the full check chain — the cache
+  lookup included, then the stat if that missed — but ends bodiless, with no
+  subprocess. All three sit after the signature plug by pipeline order, so none
+  is an existence oracle for unsigned probes.
+
+  A HEAD that hits is `AudioProxy.VariantCache`'s answer with the read left
+  out, headers and all; one that misses carries `X-Audio-Proxy: MISS` and the
+  variant's description, and stops there. Neither renders, queues, or writes
+  anything — the probe has to stay cheap under any volume, or it becomes a
+  lever rather than a courtesy.
 
   Two consequences worth stating, because both look like bugs and are not:
 
@@ -240,16 +246,11 @@ defmodule AudioProxy.Plugs.RenderAction do
   # source which may since have been deleted, and a stat per HIT is exactly
   # the I/O a cache exists to avoid.
   #
-  # HEAD deliberately does not consult the cache. It answers what the check
-  # chain can determine, and the divergence that buys is the same shape as the
-  # 415 one below: a HEAD reports the render path's framing even where the GET
-  # would answer a HIT's, or a 302. Consulting the store would make HEAD the
-  # one request whose answer depends on cache state, which is the property §5
-  # tells clients not to build on.
-  defp cached_or_rendered(%Plug.Conn{method: "HEAD"} = conn, source, opts) do
-    respond(conn, source, opts)
-  end
-
+  # HEAD takes the same route, cache lookup included: the question it asks is
+  # "what would a GET answer", and on a HIT the store already knows the whole
+  # answer — see `AudioProxy.VariantCache`, which is what leaves the body out.
+  # The lookup is also why a HEAD on a HIT never stats: it stands exactly where
+  # the GET's does, before the stat, for the same reason.
   defp cached_or_rendered(conn, source, opts) do
     key = conn.assigns.cache_key
 
@@ -265,13 +266,22 @@ defmodule AudioProxy.Plugs.RenderAction do
 
   # HEAD runs every check the chain can run, including stat — a HEAD that lies
   # about 404s is worse than none — and skips only the spawn, along with the
-  # statuses only a render can discover (see the moduledoc: 415, 500, 504). No
-  # `X-Audio-Proxy`: that header reports what *this response's* render did, and
-  # none ran.
+  # statuses only a render can discover (see the moduledoc: 415, 500, 504).
+  #
+  # The lookup above found nothing, so `MISS` is the honest verdict and the
+  # header says it: a client probing cache state gets an answer here rather
+  # than a silence it has to interpret. What it does *not* get is
+  # `Content-Length` or `Accept-Ranges` — for a variant that has never been
+  # rendered those are precisely the values RFC 9110 §9.3.2 permits omitting,
+  # since nothing short of the render knows them.
   defp respond(%Plug.Conn{method: "HEAD"} = conn, source, _opts) do
     with {:ok, stat} <- Source.stat(source),
          :ok <- within_limit(stat.size) do
-      conn |> describe() |> send_resp(200, "") |> halt()
+      conn
+      |> describe()
+      |> put_resp_header("x-audio-proxy", cache_status(conn))
+      |> send_resp(200, "")
+      |> halt()
     else
       {:error, reason} -> ErrorJSON.halt_with(conn, reason)
     end
@@ -691,7 +701,8 @@ defmodule AudioProxy.Plugs.RenderAction do
 
   # §5's two render statuses. `HIT` is not one of them: a request served from
   # the store never reaches this function, because `AudioProxy.VariantCache`
-  # has already sent its response.
+  # has already sent its response — which is what makes this safe for the HEAD
+  # path too, where nothing renders and `MISS` is the whole of the answer.
   defp cache_status(%{assigns: %{render_status: :coalesced}}), do: "COALESCED"
   defp cache_status(_conn), do: "MISS"
 

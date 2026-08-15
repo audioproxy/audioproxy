@@ -476,8 +476,8 @@ defmodule AudioProxy.RenderEndpointTest do
     end
   end
 
-  describe "HEAD is supported on the signed endpoint" do
-    test "a valid URL answers the GET's headers, an empty body, and no spawn" do
+  describe "HEAD on a miss" do
+    test "answers what is knowable without rendering, and spawns nothing" do
       conn = request(:head, signed("/f:opus/br:96/plain/local://piece.wav"))
 
       assert conn.status == 200
@@ -489,9 +489,42 @@ defmodule AudioProxy.RenderEndpointTest do
 
       assert get_resp_header(conn, "etag") == [quoted_etag("f:opus/br:96", "local://piece.wav")]
 
-      # No render ran, so the header that names a render's outcome is absent.
-      assert get_resp_header(conn, "x-audio-proxy") == []
+      # Nothing is stored, and saying so is the point: a client probing cache
+      # state gets an answer rather than a silence to interpret.
+      assert get_resp_header(conn, "x-audio-proxy") == ["MISS"]
       assert no_render_spawned?()
+    end
+
+    test "no length and no ranges: neither is knowable before the render" do
+      # RFC 9110 §9.3.2's permitted omission, and the one case in this change
+      # that qualifies for it. A `content-length` here would be a guess, and
+      # `accept-ranges` would promise seeking the chunked MISS cannot do.
+      conn = request(:head, signed("/f:opus/br:96/plain/local://piece.wav"))
+
+      assert get_resp_header(conn, "content-length") == []
+      assert get_resp_header(conn, "accept-ranges") == []
+    end
+
+    test "probing does not warm: no render, nothing stored, the GET still MISSes",
+         %{tmp_dir: tmp_dir} do
+      # The safety property the rest of this change rests on. A HEAD is the
+      # cheapest request a client can make, and it has to stay that way under
+      # any volume — a probe that rendered would be a denial-of-service lever
+      # dressed as a courtesy.
+      store = Path.join(tmp_dir, "probe-store")
+      File.mkdir_p!(store)
+      put_config(%{variant_store: {:file, store}})
+
+      key = AudioProxy.CacheKey.derive!("f:opus/br:96", "local://piece.wav")
+      path = signed("/f:opus/br:96/plain/local://piece.wav")
+
+      assert request(:head, path).status == 200
+      assert no_render_spawned?()
+      assert AudioProxy.VariantStore.head(key) == {:error, :not_found}
+
+      # Not a slot taken and released: the semaphore never saw this request,
+      # so a following GET is the first render of this variant.
+      assert get_resp_header(render(path), "x-audio-proxy") == ["MISS"]
     end
 
     test "a bad signature is 401, a missing source 404 — errors as GET" do
@@ -508,6 +541,20 @@ defmodule AudioProxy.RenderEndpointTest do
 
       assert missing.status == 404
       assert get_resp_header(missing, "cache-control") == ["max-age=10"]
+      assert no_render_spawned?()
+    end
+
+    test "an expired URL is 410 and a source outside the allowlist the generic 404" do
+      # Every gate a GET passes still gates the HEAD, and this is why it has to:
+      # a probe that answered from behind a refused signature or a dead `exp`
+      # would be an existence oracle for variants nobody may fetch.
+      expired = signed("/f:opus/exp:#{System.os_time(:second) - 1}/plain/local://piece.wav")
+
+      assert request(:head, expired).status == 410
+
+      outside = request(:head, signed("/f:mp3/plain/local://../secret.wav"))
+
+      assert outside.status == 404
       assert no_render_spawned?()
     end
 
@@ -533,6 +580,83 @@ defmodule AudioProxy.RenderEndpointTest do
 
       assert get_resp_header(conn, "content-disposition") ==
                [~s(attachment; filename="preview.mp3")]
+    end
+  end
+
+  describe "HEAD on a hit" do
+    # Everything but the per-request identifier, which is supposed to differ:
+    # `Plug.RequestId` stamps one on every response, and two requests that
+    # shared one would be the bug.
+    defp comparable(conn) do
+      conn.resp_headers
+      |> Enum.reject(fn {name, _value} -> name == "x-request-id" end)
+      |> MapSet.new()
+    end
+
+    @hit_options "f:opus/br:96"
+    @hit_rest "/f:opus/br:96/plain/local://piece.wav"
+    @hit_bytes "cached-opus-bytes"
+
+    setup %{tmp_dir: tmp_dir} do
+      store = Path.join(tmp_dir, "hit-store")
+      File.mkdir_p!(store)
+      put_config(%{variant_store: {:file, store}})
+
+      key = AudioProxy.CacheKey.derive!(@hit_options, "local://piece.wav")
+
+      :ok =
+        AudioProxy.VariantStore.put_stream(key, [@hit_bytes], %{
+          content_type: "audio/ogg",
+          cache_control: "public, max-age=31536000, immutable, no-transform",
+          etag: ~s("#{key}")
+        })
+
+      {:ok, key: key}
+    end
+
+    test "the header set is the GET's, header for header" do
+      # A set difference rather than a list of names: whatever a later change
+      # adds to the HIT response has to reach the HEAD too, and this fails
+      # naming the header that did not.
+      path = signed(@hit_rest)
+
+      get = render(path)
+      head = request(:head, path)
+
+      assert get.status == 200
+      assert get_resp_header(get, "x-audio-proxy") == ["HIT"]
+      assert head.status == 200
+      assert head.resp_body == ""
+
+      missing = MapSet.difference(comparable(get), comparable(head))
+      extra = MapSet.difference(comparable(head), comparable(get))
+
+      assert Enum.to_list(missing) == [], "HEAD omitted headers the GET sent"
+      assert Enum.to_list(extra) == [], "HEAD sent headers the GET did not"
+    end
+
+    test "size and seekability, without downloading a byte", %{key: key} do
+      conn = request(:head, signed(@hit_rest))
+
+      assert get_resp_header(conn, "x-audio-proxy") == ["HIT"]
+      assert get_resp_header(conn, "content-length") == ["#{byte_size(@hit_bytes)}"]
+      assert get_resp_header(conn, "accept-ranges") == ["bytes"]
+      assert get_resp_header(conn, "etag") == [~s("#{key}")]
+      assert get_resp_header(conn, "content-type") == ["audio/ogg"]
+      assert no_render_spawned?()
+    end
+
+    test "a hit is answered from the store's head, so the source is never stat'd",
+         %{tmp_dir: tmp_dir} do
+      # Same ordering as the GET, which is what makes the parity above cheap:
+      # the cache lookup stands before the stat, so a variant whose source has
+      # since been deleted still answers from the store.
+      File.rm!(Path.join(tmp_dir, "piece.wav"))
+
+      conn = request(:head, signed(@hit_rest))
+
+      assert conn.status == 200
+      assert get_resp_header(conn, "x-audio-proxy") == ["HIT"]
     end
   end
 

@@ -68,6 +68,11 @@ defmodule AudioProxy.VariantCacheTest do
     |> AudioProxy.FakeFfmpeg.Router.call(@fake_opts)
   end
 
+  defp head_request(path) do
+    SignedRequest.conn(:head, path, [])
+    |> AudioProxy.FakeFfmpeg.Router.call(@fake_opts)
+  end
+
   defp cache_key(source \\ "local://cached.wav"), do: CacheKey.derive!(@options, source)
 
   # Puts `bytes` in the store under the cache key `rest` resolves to, with the
@@ -356,6 +361,32 @@ defmodule AudioProxy.VariantCacheTest do
       assert get_resp_header(conn, "x-audio-proxy") == ["MISS"]
     end
 
+    test "a HEAD mirrors the redirect, Location and no-store included" do
+      # Nothing to skip here — a 302 has no body — so the only requirement is
+      # that the HEAD takes the same branch rather than falling through to a
+      # description of a variant it would never have sent.
+      conn = head_request(signed(@rest))
+
+      assert conn.status == 302
+      assert get_resp_header(conn, "x-audio-proxy") == ["HIT"]
+      assert get_resp_header(conn, "cache-control") == ["no-store"]
+
+      assert [location] = get_resp_header(conn, "location")
+      assert location =~ cache_key()
+    end
+
+    test "a HEAD whose presign fails falls back to describing the variant" do
+      PresigningStore.fail_presign(cache_key(), :nope)
+
+      conn = head_request(signed(@rest))
+
+      assert conn.status == 200
+      assert conn.resp_body == ""
+      assert get_resp_header(conn, "x-audio-proxy") == ["HIT"]
+      assert get_resp_header(conn, "content-length") == ["#{byte_size(@variant)}"]
+      assert get_resp_header(conn, "accept-ranges") == ["bytes"]
+    end
+
     test "proxy mode against the same backend serves the bytes itself" do
       put_config(%{serve_mode: :proxy})
 
@@ -386,6 +417,21 @@ defmodule AudioProxy.VariantCacheTest do
       assert conn.status == 200
       assert get_resp_header(conn, "x-audio-proxy") == ["MISS"]
       assert conn.resp_body == @payload
+    end
+
+    test "a HEAD answers from head/1 alone: unreadable bytes change nothing" do
+      # The proof that the HEAD path never reaches `get_stream/2` — a store
+      # whose reads all fail still answers the full description, because the
+      # size and the metadata came off `head/1`. A HEAD that read the bytes to
+      # count them would fall through to a render here.
+      key = store!(@variant)
+      PresigningStore.vanish_reads(key)
+
+      conn = head_request(signed(@rest))
+
+      assert conn.status == 200
+      assert get_resp_header(conn, "x-audio-proxy") == ["HIT"]
+      assert get_resp_header(conn, "content-length") == ["#{byte_size(@variant)}"]
     end
 
     test "a body short of its declared Content-Length tears the response down" do

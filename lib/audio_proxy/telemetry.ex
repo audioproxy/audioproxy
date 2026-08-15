@@ -25,15 +25,27 @@ defmodule AudioProxy.Telemetry do
   | `[:audio_proxy, :cache, :lookup]` | `system_time` | `status`, `format` |
   | `[:audio_proxy, :variant_store, :write_failure]` | `system_time` | `key`, `reason` |
 
-  The lookup event fires once per request that commits to one of §5's three
-  `X-Audio-Proxy` values, and `status` is that value: `:hit`, `:miss` or
-  `:coalesced`. Two consequences follow from tying it to the header rather
-  than to the store read behind it. A request that never commits — a 429, a
-  404, a HEAD, a 304 — emits nothing, so `hit / (hit + miss + coalesced)` is a
+  The lookup event fires once per request that **delivers** a variant under one
+  of §5's three `X-Audio-Proxy` values, and `status` is that value: `:hit`,
+  `:miss` or `:coalesced`. Two consequences follow from tying it to delivery
+  rather than to the store read behind it. A request that delivers nothing — a
+  429, a 404, a 304 — emits nothing, so `hit / (hit + miss + coalesced)` is a
   ratio over variants actually served rather than over a denominator nobody
   can name. And a `:coalesced` request is not counted as a store miss even
   though its store lookup missed: it did not render either, and folding it
   into `:miss` would hide the number this proxy exists to move.
+
+  **A HEAD is the one request that reports a verdict without being counted**,
+  and the exemption is deliberate rather than incidental. Since
+  `fix-head-response-headers` a HEAD carries `X-Audio-Proxy` in both shapes, so
+  "commits to a header" stopped being the same question as "delivered
+  something" — this is written against the second. The asymmetry is what makes
+  it matter: only the hit side touches the store, so counting the header would
+  add probe traffic to the numerator while the miss side, which never reaches
+  the render path that emits, stayed out of the denominator. A player polling
+  HEAD to decide whether playback will be instant — the reason the header is on
+  a HEAD at all — would drive the ratio to 100% by asking. `AudioProxy.VariantCache`
+  is where that split lives.
 
   It overlaps the render events' `cache_status` on purpose. That field
   describes a render, and there is no render behind a `:hit` — the request

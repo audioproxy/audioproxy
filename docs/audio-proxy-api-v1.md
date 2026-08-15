@@ -255,6 +255,26 @@ The same URL is framed differently depending on what is cached, and clients must
 
 Both begin delivering before the variant is complete or fully read. What a client observes is a property of the *cache state*, never of the configured backend or serve mode: the same signed URL against a `file://` deployment and an `s3://` one delivers the same bytes with the same `Content-Type`, `ETag` and `Cache-Control`, and is range-capable on a HIT either way. Backends differ in where the bytes come from, never in what a client must implement.
 
+### HEAD
+
+A `HEAD` on a signed endpoint answers the headers its `GET` would, with an empty body, and never renders: no subprocess, no render slot, no write-back, whatever the volume. It runs the same check chain — signature, `exp`, options, source authorization, the source stat — so a refusal is identical to the `GET`'s and reveals nothing about whether the variant exists. Which of its two shapes a client gets is the cache state:
+
+| | HIT | MISS |
+|---|---|---|
+| Status | `200` (proxy mode) / `302` (redirect mode) | `200` |
+| `X-Audio-Proxy` | `HIT` | `MISS` |
+| `Content-Length` | the stored object's size | absent |
+| `Accept-Ranges` | `bytes` | absent |
+| `Content-Type`, `Cache-Control`, `ETag` | as the `GET` | as the `GET` |
+
+On a HIT the header set equals the `GET`'s, header for header — redirect mode included, where `Location` and its `Cache-Control: no-store` are mirrored. Nothing is omitted because nothing needs generating: the store's metadata answers all of it before a byte moves, and RFC 9110 §9.3.2 permits omitting only what is "determined only while generating the content".
+
+On a MISS the two framing headers *are* determined only by rendering, so they are absent — the permitted omission, not an oversight. `Range` is not honoured on either shape.
+
+**What a `HEAD` costs.** The cache lookup stands where the `GET`'s does, before the source stat, so a hit is answered from the variant store's metadata alone and never stats the source — cheaper than the old behavior, and the reason a hit can report a length at all. A miss pays for both: the store lookup that established the miss, then the stat. Against `s3://` on both sides that is two round trips where a `GET` on a miss also makes two, so a probe is never more expensive than the request it stands in for, but it is not free either. Nothing about it is counted in the cache hit ratio: those counters describe variants delivered, and a `HEAD` delivers none, so polling one cannot move the number an operator reads.
+
+Where a `HEAD` still diverges from its `GET` is the statuses only a subprocess can discover. It neither decodes nor probes, so an undecodable source and one carrying video both answer `200` where the `GET` answers `415`: diagnosing that *is* the work a `HEAD` exists to skip.
+
 ### Common headers
 
 `Content-Type` per format · `Cache-Control: public, max-age=31536000, immutable, no-transform` (URL encodes the variant, so it *is* immutable; `no-transform` because the bytes are the product and must survive edge features that recompress or mangle bodies) · `ETag` = cache key, sent quoted, since RFC 9110 defines an entity-tag as a quoted-string and a bare token is not one.
@@ -267,7 +287,7 @@ Every response, success or error, carries an explicit `Cache-Control` — no CDN
 
 - Errors: `404`/`413`/`415` → `max-age=10` (verdicts about the current source bytes; a re-upload changes them), `401`/`422` → `max-age=60` (pure functions of the URL; only a deploy changes them), `410` → `public, max-age=31536000, immutable` (see §3.5 — the one verdict a deploy cannot change either), `416`/`429`/`5xx` → `no-store` (transient, or — for `416` — dependent on a request header no `Vary` declares). The `502` row inherits that rather than inventing it, and the inheritance is the point: a store outage is exactly the failure that must not be cached, since the retry it suppresses is the one that would have worked. `/health`, `/ready` and the unmatched-route `404` state theirs too (`no-store`, `no-store` and `max-age=10`).
 - **Conditional requests**: an `If-None-Match` matching the URL-derived `ETag` answers `304` with `ETag` and `Cache-Control`, no body, no render, no storage access. Placed after signature verification — never an existence oracle for unsigned probes.
-- **HEAD** on signed endpoints answers the status and headers a `GET` would, through the full check chain including the source stat, with an empty body and no render subprocess. Errors as `GET`, bodiless. No `X-Audio-Proxy`: that header reports a render's outcome, and none ran. It deliberately does **not** consult the variant cache, so it reports the render path's framing even where a `GET` would answer a HIT's, or a `302`; making HEAD the one request whose answer depends on cache state would invite clients to build on exactly what the framing contract above tells them not to.
+- **HEAD** answers the `GET`'s headers bodilessly and renders nothing, in the two shapes stated under *HEAD* above. Errors as `GET`, bodiless.
 - **Range on a MISS is ignored**: the full `200` chunked stream, no `Accept-Ranges`, no `206`/`416` (RFC 9110 §14.2 permits ignoring `Range`). `206` semantics belong to cached variants — served by the proxy or by storage, per the serve mode.
 
 ### Errors (JSON body)

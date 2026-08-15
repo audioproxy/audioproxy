@@ -220,7 +220,21 @@ A `Range` this proxy does not implement — several ranges at once, a unit other
 
 `If-None-Match` matching the `ETag` answers `304` before anything is rendered or fetched. The signature still gates: an unsigned conditional request is a `401`.
 
-`HEAD` on a signed URL runs signature, options, source authorization and a stat, with no body and no render. It neither decodes nor probes, so it cannot report a source ffmpeg would reject or one that turns out to be video, and it does not consult the variant cache.
+`HEAD` on a signed URL runs signature, options, source authorization and a stat, with no body and no render — no subprocess, no render slot, no write-back, however often you send it. It answers the headers the `GET` would, in two shapes:
+
+| | `HIT` | `MISS` |
+|---|---|---|
+| Status | `200`, or `302` in redirect mode | `200` |
+| `x-audio-proxy` | `HIT` | `MISS` |
+| `content-length` | the stored variant's size | absent |
+| `accept-ranges` | `bytes` | absent |
+| `content-type`, `cache-control`, `etag` | as the `GET` | as the `GET` |
+
+That makes `HEAD` the cheap way to ask the three things a player wants to know before committing: how big this is, whether it can seek, and whether the variant is already cached. On a `MISS` the first two have no answer yet — nothing has been rendered — so those headers are absent rather than guessed. A `Range` on a `HEAD` is ignored in either shape.
+
+A hit is answered from the variant store's metadata and never stats the source; a miss pays for the store lookup and then the stat. Neither shape is counted in the proxy's cache hit ratio — those counters describe variants delivered — so polling `HEAD` cannot skew the metric.
+
+It still neither decodes nor probes, so it cannot report a source ffmpeg would reject or one that turns out to be video: both answer `200` where the `GET` answers `415`.
 
 ### Cache-Control
 
