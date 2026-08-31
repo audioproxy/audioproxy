@@ -346,15 +346,18 @@ is wrong. The `{127, 0, 0, 1}` on both sides of that match is an assertion that
 the listener came up loopback-only, not leftover pattern.
 
 `AudioProxy.MarkedTable` owns the parser the documentation drift guards share,
-for the tables fenced by `<!-- <name>-table:start -->` in `llms-full.txt`:
+for the tables fenced by `<!-- <name>-table:start -->` in `llms-full.txt` and
+`docs/development.md`:
 
 | Function | Holds |
 |---|---|
 | `rows/2` | The rows of a marked table, each as its list of backticked cell tokens. A non-backticked cell is `nil`; a row whose *first* cell is not backticked is dropped, which is what skips the header and the `\|---\|` separator. |
 
-`AudioProxy.LlmsDocsTest` is its only caller since `condense-readme` removed the
-README's configuration table. `first_cells/2` went with that guard rather than
-staying as unused support API; re-add it beside the next guard that wants it.
+Its callers are `AudioProxy.LlmsDocsTest` and `AudioProxy.RequiredChecksTest`
+(the required-check table, from `gate-merges-on-image-checks`). `first_cells/2`
+went with the README's configuration guard when `condense-readme` removed it,
+rather than staying as unused support API; re-add it beside the next guard that
+wants it.
 
 One rule, and it was bought rather than reasoned:
 

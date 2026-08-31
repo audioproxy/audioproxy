@@ -266,37 +266,58 @@ Hex packages and GitHub Actions. Minor and patch updates are grouped into one PR
 per ecosystem; majors come individually. Every one of them is gated by the
 workflow above.
 
-`main` is protected: pull requests cannot merge until the gating jobs pass, and
-the branch rejects force-pushes and deletion. **Branch protection is a repo
-setting, not a file**, so it does not travel with a clone — a fork has to set it
-up again, under *Settings → Branches → Add rule* for `main`, requiring the
-checks named **format, compile, unit tests**, **ffmpeg-tagged tests against the
-shipped ffmpeg (amd64)**, **ffmpeg-tagged tests against the shipped ffmpeg
-(arm64)**, **container smoke suite (amd64)**, **container smoke suite (arm64)**
-and **the hex package is what we meant to ship** (GitHub lists status checks by
-job name, not by the job's key in the YAML). `publish` is not a required check —
-it does not run on pull requests at all.
+`main` is protected: pull requests cannot merge until the required checks pass,
+and the branch rejects force-pushes and deletion. The required set is derived
+rather than chosen: **everything that gates a tag also gates a merge**, so a
+commit that could not be published cannot reach `main` either. Concretely that
+is every job `publish` transitively `needs:` that runs on a pull request,
+expanded the way GitHub names it — status checks are listed by job *name*, not
+by the job's key in the YAML, and a matrix job reports one check per leg, with
+the leg in the name:
 
+<!-- required-checks-table:start -->
+| Check | Required to merge | Notes |
+|---|---|---|
+| `format, compile, unit tests` | `yes` | |
+| `ffmpeg-tagged tests against the shipped ffmpeg (amd64)` | `yes` | |
+| `ffmpeg-tagged tests against the shipped ffmpeg (arm64)` | `yes` | |
+| `both architectures ship the same ffmpeg` | `yes` | |
+| `container smoke suite (amd64)` | `yes` | |
+| `container smoke suite (arm64)` | `yes` | |
+| `the published memory model holds` | `no` | Deliberately advisory: `capacity` drives a concurrent workload with a two-hour source, and paying that wait on every merge is a cost decision, not an oversight. It still gates every publish through `needs:`. |
+| `the hex package is what we meant to ship` | `yes` | |
+| `the image carries its notices and its source manifest (amd64)` | `yes` | |
+| `the image carries its notices and its source manifest (arm64)` | `yes` | |
+<!-- required-checks-table:end -->
 
-> **`hex-package` has to be added to that list by hand.** It gates `publish`
-> through `needs:`, which stops a *tag* from publishing a bad tarball but does
-> nothing to stop a pull request from merging one — and by the time the tag
-> runs, the fix is a new version rather than an edit. Until the rule names it,
-> a red `hex-package` is advisory.
+`publish` and `verify-published` are absent because they never run on a pull
+request, and `meta` and `image-build` are skipped there too — a check that
+never reports cannot be required.
 
-> **Renaming or removing a job means editing that list in the same breath.** A
-> required check is matched by job name, so one that no longer runs never
-> reports, and GitHub shows it as *Expected — waiting for status*: visually
-> identical to a job still in progress, on a run that finished minutes ago.
-> Every pull request then blocks forever. Dropping the old apt-ffmpeg job did
-> exactly this, and the symptom reads as a hung CI rather than a settings
-> mismatch, so it costs more to diagnose than it should.
->
-> **Putting a job in a matrix renames it too.** A matrix reports one check per
-> leg, with the leg in the name: `add-multi-arch-images` turned **container
-> smoke suite** into **container smoke suite (amd64)** and **… (arm64)**, which
-> is why the list above has four image checks where it had two. Adding a third
-> architecture later adds its rows to that list in the same breath.
+**Branch protection is a repo setting, not a file**, so it does not travel with
+a clone: a fork has to recreate the rule under *Settings → Branches → Add
+rule* for `main`, requiring every check the table marks `yes`.
+
+The table is compared against the workflow by
+[`test/required_checks_test.exs`](../test/required_checks_test.exs), which
+derives the gating job names from `ci.yml` — matrix legs expanded — and fails
+on disagreement in either direction, inside the `test` job like any other
+drift guard. A check the workflow produces but the table omits is an ungated
+merge; a check the table names that the workflow no longer produces is a rule
+that blocks every pull request forever, showing *Expected — waiting for
+status*: visually identical to a job still in progress, on a run that finished
+minutes ago. Dropping the old apt-ffmpeg job did exactly that, and the symptom
+read as a hung CI rather than a settings mismatch. Renaming a job, putting one
+in a matrix, or adding an architecture all rename checks the same way, and all
+now land in this table as a red `test` job first.
+
+> **The guard checks this document, not the repo setting.** Nothing short of
+> admin scope can read or write the rule itself — and a workflow that could
+> rewrite its own merge gate would be a worse problem than the drift it
+> prevents. So the division of labour is: the guard keeps these *instructions*
+> right, and a human keeps the *rule* matching them. When this table changes,
+> editing the branch-protection rule on `main` in the same breath is part of
+> the change, not a follow-up.
 
 ---
 

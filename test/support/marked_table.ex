@@ -13,9 +13,10 @@ defmodule AudioProxy.MarkedTable do
   two were not identical: one tolerated a line holding nothing but `|` and the
   other raised `ArgumentError` on it, which is precisely the divergence a
   duplicated helper produces and nobody notices until a document is edited.
-  That second guard read `README.md`, and `condense-readme` removed it, so
-  `AudioProxy.LlmsDocsTest` is the only caller today. The module stays because
-  the rule it encodes is about the *next* guard, not the last one.
+  That second guard read `README.md`, and `condense-readme` removed it; the
+  next one arrived with `gate-merges-on-image-checks`, so today the callers are
+  `AudioProxy.LlmsDocsTest` and `AudioProxy.RequiredChecksTest` (which reads
+  the required-check table out of `docs/development.md`).
 
   ## The shape a table must keep
 
