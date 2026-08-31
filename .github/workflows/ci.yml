@@ -75,14 +75,45 @@ jobs:
           AP_TEST_MINIO_ENDPOINT: http://127.0.0.1:9000
 
   # ---------------------------------------------------------------------------
-  # Image verification. Both jobs build from the same Dockerfile and share a
-  # buildx layer cache, so the second one to run pays for very little.
+  # Image verification. Every job here builds from the same Dockerfile and
+  # shares a buildx layer cache, so the second one to run pays for very little.
+  #
+  # **The image jobs run once per published architecture, on native hardware.**
+  # A published tag is a manifest list holding linux/amd64 and linux/arm64, and
+  # an architecture nobody has smoked is an architecture nobody has shipped: the
+  # matrix below is what earns the second entry in that list. Native runners
+  # rather than QEMU because emulated builds are 5-20x slower and the BEAM's JIT
+  # under QEMU is a known flake source — the arm64 image is built and exercised
+  # by an arm64 machine or not at all.
+  #
+  # The buildx cache is scoped by architecture and not by job. Two arches
+  # sharing one scope evict each other on every run, because the layers differ
+  # all the way down; two *jobs* of the same arch sharing one scope is the reuse
+  # the paragraph above describes, and that is kept.
+  #
+  # `capacity` is deliberately outside the matrix, and not for cost. Its guard
+  # already spans both architectures: the table in docs/capacity.md was measured
+  # on arm64 and is asserted here on amd64, with the 1.5x headroom factor
+  # covering exactly that gap. Running it on arm64 too would compare arm64
+  # figures against themselves, which is a weaker claim than the one being made
+  # now.
   # ---------------------------------------------------------------------------
 
   image-ffmpeg:
-    name: ffmpeg-tagged tests against the shipped ffmpeg
+    name: ffmpeg-tagged tests against the shipped ffmpeg (${{ matrix.arch }})
     needs: test
-    runs-on: ubuntu-latest
+    # fail-fast off throughout the image matrix: when one architecture goes red,
+    # the other's result is what distinguishes an arch-specific break from a
+    # real one, and cancelling it throws that away.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
 
@@ -99,8 +130,8 @@ jobs:
           target: test
           load: true
           tags: audio_proxy:test
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
 
       - name: Build runtime stage
         uses: docker/build-push-action@v7
@@ -109,8 +140,8 @@ jobs:
           target: runtime
           load: true
           tags: audio_proxy:runtime
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
 
       - name: Assert the tested ffmpeg is the shipped ffmpeg
         run: |
@@ -143,13 +174,72 @@ jobs:
             exit 1
           fi
 
+          # The full Debian version, kept for the parity job below. The version
+          # token rather than the whole banner: the banner also names the gcc
+          # that built it, which may legitimately differ between architectures
+          # and is not what VERSIONS.md records.
+          printf '%s\n' "$ship_ffmpeg" | awk '{ print $3 }' > ffmpeg-version.txt
+          echo "recorded version: $(cat ffmpeg-version.txt)"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ffmpeg-version-${{ matrix.arch }}
+          path: ffmpeg-version.txt
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Run :ffmpeg-tagged tests in the image
         run: docker run --rm audio_proxy:test mix test --only ffmpeg
 
-  smoke:
-    name: container smoke suite
-    needs: test
+  # Debian builds one source version per suite, so the two architectures are
+  # expected to carry the same ffmpeg — expected, not guaranteed: an arch can
+  # lag a security upload by days. VERSIONS.md records one version because there
+  # has only ever been one; this job is what makes that a checked claim rather
+  # than an assumption, and the day it fails, that table grows a per-arch row
+  # and the divergence is accepted deliberately or waited out.
+  ffmpeg-arch-parity:
+    name: both architectures ship the same ffmpeg
+    needs: image-ffmpeg
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: versions
+          pattern: ffmpeg-version-*
+
+      - name: Compare the recorded versions
+        run: |
+          set -euo pipefail
+
+          amd64=$(cat versions/ffmpeg-version-amd64/ffmpeg-version.txt)
+          arm64=$(cat versions/ffmpeg-version-arm64/ffmpeg-version.txt)
+          echo "amd64: $amd64"
+          echo "arm64: $arm64"
+
+          # Non-empty as well as equal: two failed extractions would compare
+          # equal and report parity having read nothing.
+          if [ -z "$amd64" ] || [ -z "$arm64" ]; then
+            echo "::error::an architecture recorded no ffmpeg version — the extraction in image-ffmpeg failed"
+            exit 1
+          fi
+
+          if [ "$amd64" != "$arm64" ]; then
+            echo "::error::ffmpeg differs across architectures (amd64 $amd64, arm64 $arm64) — record both in VERSIONS.md and decide deliberately"
+            exit 1
+          fi
+
+  smoke:
+    name: container smoke suite (${{ matrix.arch }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
 
@@ -167,11 +257,13 @@ jobs:
           build-args: |
             VERSION=${{ github.ref_type == 'tag' && github.ref_name || 'edge' }}
             REVISION=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
 
-      # Ruby is preinstalled on ubuntu-latest; the script needs no gems, and it
-      # takes its ffmpeg from the image rather than the runner.
+      # Ruby is preinstalled on both runner images; the script needs no gems,
+      # and it takes its ffmpeg from the image rather than the runner — which is
+      # what makes this leg a claim about the arm64 artifact and not about the
+      # arm64 runner.
       - name: Run the smoke suite
         run: SKIP_BUILD=1 IMAGE=audio_proxy:smoke bin/smoke-image
 
@@ -200,8 +292,10 @@ jobs:
           target: runtime
           load: true
           tags: audio_proxy:capacity
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # amd64 only, so its scope is written out rather than taken from a
+          # matrix this job does not have.
+          cache-from: type=gha,scope=amd64
+          cache-to: type=gha,mode=max,scope=amd64
 
       # The guard reads a container's own cgroup accounting, so the runner has
       # to be able to provide it. `memory.peak` wants cgroup v2 on kernel >=
@@ -271,9 +365,21 @@ jobs:
         run: bin/check-hex-package
 
   license-compliance:
-    name: the image carries its notices and its source manifest
+    # Per arch, because the obligation is per artifact: SOURCES.txt is generated
+    # inside the image from that image's own dpkg, so the arm64 manifest is a
+    # different document listing different package versions. Checking one arch
+    # and publishing two would leave half the distribution unverified.
+    name: the image carries its notices and its source manifest (${{ matrix.arch }})
     needs: test
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
 
@@ -286,8 +392,8 @@ jobs:
           target: runtime
           load: true
           tags: audio_proxy:license
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
 
       # The image distributes GPL binaries, so it has to ship the notices for
       # them. debian:slim strips /usr/share/doc but keeps the copyright files;
@@ -421,20 +527,38 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
-  # Publishing. Gated on everything above; never runs for a pull request, so a
-  # fork cannot push and an unreviewed branch has nowhere to publish to.
+  # Publishing, in three jobs rather than one, because the artifact is a
+  # manifest list and a manifest list cannot be built by a single machine:
+  #
+  #   meta        — what this ref is called, computed once so the build and the
+  #                 stitch cannot disagree about it
+  #   image-build — one per architecture, on its own hardware, pushing an
+  #                 *untagged* image and reporting its digest
+  #   publish     — stitches those digests into one manifest list per tag, then
+  #                 publishes the hex package on a tag
+  #
+  # That split is also the all-or-nothing gate. `image-build` pushes by digest,
+  # so what reaches GHCR before the stitch is unreferenced by any tag and
+  # unreachable by `docker pull`; if either architecture fails, `publish` never
+  # runs and no tag moves. The alternative — tagging per arch and merging
+  # afterwards — publishes a single-arch `:latest` for the width of the window
+  # in between, which is precisely the state this change exists to remove.
+  #
+  # Gated on everything above; never runs for a pull request, so a fork cannot
+  # push and an unreviewed branch has nowhere to publish to. The `if` lives on
+  # `meta` alone: a skipped job skips everything downstream of it.
   # ---------------------------------------------------------------------------
 
-  publish:
-    name: publish image to GHCR and package to hex
-    needs: [smoke, image-ffmpeg, capacity, license-compliance, hex-package]
+  meta:
+    name: compute the release version and tags
     if: >-
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+    outputs:
+      version: ${{ steps.tags.outputs.version }}
+      tags: ${{ steps.tags.outputs.tags }}
+      primary_tag: ${{ steps.tags.outputs.primary_tag }}
     steps:
       - uses: actions/checkout@v7
 
@@ -493,7 +617,28 @@ jobs:
           fi
           echo "tags=$tags" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          # The first tag, for the jobs that need *a* published reference rather
+          # than all of them — the post-publish pull check below.
+          echo "primary_tag=${tags%%,*}" >> "$GITHUB_OUTPUT"
           echo "publishing: $tags"
+
+  image-build:
+    name: build and push by digest (${{ matrix.arch }})
+    needs: [meta, smoke, image-ffmpeg, ffmpeg-arch-parity, capacity, license-compliance, hex-package]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
 
       - uses: docker/setup-buildx-action@v4
 
@@ -508,21 +653,135 @@ jobs:
       # buys nothing since the inputs are byte-identical.
       #
       # `cache-from` only. The smoke and image-ffmpeg jobs already exported every
-      # layer this build reads, in this same run, so exporting again would write
-      # a cache nobody reads — and it would be the one cache write happening
-      # under a narrowed `permissions:` block, which is a question not worth
-      # having.
-      - name: Build and push
+      # layer this build reads, in this same run, on this same architecture, so
+      # exporting again would write a cache nobody reads — and it would be the
+      # one cache write happening under a narrowed `permissions:` block, which
+      # is a question not worth having.
+      #
+      # No `tags:`. `push-by-digest=true` uploads the image and reports its
+      # digest without naming it, which is what makes the stitch below the only
+      # thing that can move a tag. `name-canonical=true` records the repository
+      # in the descriptor so `imagetools` can resolve `<repo>@<digest>` later.
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
           target: runtime
-          push: true
-          tags: ${{ steps.tags.outputs.tags }}
+          platforms: linux/${{ matrix.arch }}
           build-args: |
-            VERSION=${{ steps.tags.outputs.version }}
+            VERSION=${{ needs.meta.outputs.version }}
             REVISION=${{ github.sha }}
-          cache-from: type=gha
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.arch }}
+
+      # The digest travels as a filename, not as file contents: the stitch job
+      # reconstructs `<image>@sha256:<name>` from whatever it downloads, so
+      # merging the two artifact directories needs no parsing and no ordering.
+      - name: Export the digest
+        run: |
+          set -euo pipefail
+          digest="${{ steps.build.outputs.digest }}"
+          case "$digest" in
+            sha256:*) ;;
+            *) echo "::error::build reported no digest — nothing to stitch"; exit 1;;
+          esac
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${digest#sha256:}"
+          echo "$digest"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: publish image to GHCR and package to hex
+    needs: [meta, image-build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # One `imagetools create` per run, carrying every tag: the tags of a
+      # release are aliases for one manifest list, and creating them in one call
+      # is what makes them incapable of pointing at different content.
+      #
+      # The count is asserted first. `merge-multiple` on a matrix leg that never
+      # ran produces a directory with one file in it, and `imagetools create`
+      # over a single digest succeeds — publishing exactly the single-arch
+      # manifest this change exists to stop. The gate that catches that is this
+      # number, not the `needs:` above.
+      - name: Stitch the per-arch digests into one manifest list per tag
+        env:
+          TAGS: ${{ needs.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          cd /tmp/digests
+
+          digests=(*)
+          echo "digests: ${digests[*]}"
+          if [ "${#digests[@]}" -ne 2 ]; then
+            echo "::error::expected 2 per-arch digests, got ${#digests[@]} — refusing to publish a partial manifest"
+            exit 1
+          fi
+
+          refs=()
+          for digest in "${digests[@]}"; do
+            refs+=( "${IMAGE_NAME}@sha256:${digest}" )
+          done
+
+          tag_args=()
+          IFS=',' read -r -a tags <<< "$TAGS"
+          for tag in "${tags[@]}"; do
+            tag_args+=( --tag "$tag" )
+          done
+
+          docker buildx imagetools create "${tag_args[@]}" "${refs[@]}"
+
+      # And read back what was actually published, rather than trusting the
+      # command that wrote it. `unknown/unknown` entries are the provenance
+      # attestations buildkit attaches to each image; they are platforms in the
+      # descriptor and not architectures anybody pulls, so they are dropped
+      # before the comparison.
+      - name: Assert every published tag lists both platforms
+        env:
+          TAGS: ${{ needs.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          IFS=',' read -r -a tags <<< "$TAGS"
+          for tag in "${tags[@]}"; do
+            platforms=$(
+              docker buildx imagetools inspect "$tag" \
+                --format '{{range .Manifest.Manifests}}{{.Platform.OS}}/{{.Platform.Architecture}}{{"\n"}}{{end}}' \
+                | grep -v '^unknown/unknown$' | sort -u | tr '\n' ' '
+            )
+            echo "$tag -> $platforms"
+            for want in linux/amd64 linux/arm64; do
+              case " $platforms " in
+                *" $want "*) ;;
+                *) echo "::error::$tag does not list $want"; exit 1;;
+              esac
+            done
+          done
 
       # ---------------------------------------------------------------------
       # The hex package, on tags only. `main` publishes an `:edge` image and
@@ -580,3 +839,90 @@ jobs:
           MIX_ENV: dev
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
         run: mix hex.publish docs --yes
+
+  # ---------------------------------------------------------------------------
+  # And the claim the manifest is actually making: that a plain `docker pull` on
+  # an arm64 machine gets an arm64 image that boots. `imagetools inspect` above
+  # reads a descriptor; this pulls the tag the way an operator does, on hardware
+  # that has no amd64 emulation to fall back on, and waits for the release to
+  # answer /health. A manifest listing a platform whose image does not run is a
+  # worse failure than a manifest missing it.
+  # ---------------------------------------------------------------------------
+
+  verify-published:
+    name: the published tag pulls and boots natively (${{ matrix.arch }})
+    needs: [meta, publish]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # No `--platform`: taking the default is the whole assertion. What comes
+      # back is then checked against the runner's own architecture, so a
+      # manifest that resolved to the wrong image fails here rather than
+      # silently running under emulation.
+      - name: Pull the published tag and check what came back
+        env:
+          TAG: ${{ needs.meta.outputs.primary_tag }}
+        run: |
+          set -euo pipefail
+          docker pull "$TAG"
+          got=$(docker image inspect -f '{{.Architecture}}' "$TAG")
+          echo "pulled architecture: $got, runner: ${{ matrix.arch }}"
+          if [ "$got" != "${{ matrix.arch }}" ]; then
+            echo "::error::$TAG resolved to $got on a ${{ matrix.arch }} runner"
+            exit 1
+          fi
+
+      # AP_ALLOW_INSECURE and a local root are the README's quick start: the
+      # smallest configuration that boots, since what is under test here is the
+      # artifact rather than any behaviour the smoke suite already covers.
+      - name: Boot it and wait for health
+        env:
+          TAG: ${{ needs.meta.outputs.primary_tag }}
+        run: |
+          set -euo pipefail
+          docker run -d --name boot-check -p 4000:4000 \
+            -e AP_ALLOW_INSECURE=true \
+            -e AP_LOCAL_ROOT=/tmp \
+            "$TAG"
+
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4000/health >/dev/null 2>&1; then
+              echo "healthy"
+              docker rm -f boot-check >/dev/null
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "::error::the published ${{ matrix.arch }} image did not become healthy"
+          docker logs boot-check
+          docker rm -f boot-check >/dev/null
+          exit 1
+
+      # The ffmpeg inside the *published* image, reported once per arch. Not an
+      # assertion — image-ffmpeg and ffmpeg-arch-parity already made those, on
+      # the same digests — but the line an operator reading a release run wants
+      # when they ask which encoder a given tag carries.
+      - name: Report the shipped ffmpeg
+        env:
+          TAG: ${{ needs.meta.outputs.primary_tag }}
+        run: |
+          set -euo pipefail
+          banner=$(docker run --rm --entrypoint ffmpeg "$TAG" -version)
+          echo "${banner%%$'\n'*}"

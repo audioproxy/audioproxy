@@ -2,7 +2,7 @@
 
 One container is the whole product for most deployments: it is stateless, it renders as fast as its CPU allows, and [docs/capacity.md](capacity.md) tells you how much memory a given `AP_MAX_CONCURRENCY` needs. This document is about the point after that — when one node's schedulers are the ceiling, and the answer is more nodes.
 
-Nothing here needs a cluster mode, a gossip protocol or a shared database, because the proxy has no cross-node state worth sharing. What it has instead is a URL that names its own output completely. Two nodes handed the same URL produce the same bytes, so the worst a badly-routed fleet does is repeat work. Everything below is about making that repetition rare rather than about preventing it.
+Nothing here needs a cluster mode, a gossip protocol or a shared database, because the proxy has no cross-node state worth sharing. What it has instead is a URL that names its own output completely. Two nodes handed the same URL produce the same audio, so the worst a badly-routed fleet does is repeat work. (Identical *bytes* too, on nodes of the same CPU architecture — see [A mixed-architecture fleet](#a-mixed-architecture-fleet) for the one case where that is not quite the same statement.) Everything below is about making that repetition rare rather than about preventing it.
 
 ## Contents
 
@@ -27,6 +27,21 @@ The variant store is where a render is written back, and it is the only thing th
 - **A `file://` store on a shared filesystem** — an NFS mount, an EFS/Filestore volume, a Kubernetes `ReadWriteMany` volume. Workable, and the only option if object storage is off the table. Redirect mode is refused against a `file://` store at boot (there are no URLs to presign), so a shared-filesystem fleet runs `AP_SERVE_MODE=proxy` and keeps the proxy in the byte path.
 
 A per-node store is not *wrong* — the proxy runs fine that way, and for a fleet fronted by a CDN that absorbs the repeats it can even be reasonable. It is just not a cache you are sharing, and it should be a decision rather than an accident.
+
+### A mixed-architecture fleet
+
+The image is published for `linux/amd64` and `linux/arm64`, so a fleet can hold both — an x86 baseline with Graviton or Ampere nodes added for cost, most commonly. Everything above applies unchanged, with one thing worth knowing before you mix them.
+
+**The two architectures render the same URL to the same audio, not to the same bytes.** ffmpeg is entitled to differ in the last bit or two across hardware: different SIMD paths, different float rounding. Format, duration, channel layout, bitrate and everything the URL asks for are identical, and every decoder agrees; the file's checksum is not guaranteed to be. Both architectures ship the same ffmpeg version — CI refuses to publish a tag whose two images disagree about it — so the variance stays down at the level of arithmetic and is never a difference of encoder.
+
+The cache key knows nothing about architecture, deliberately. So on a fleet sharing one variant store, a given URL is rendered once by whichever node got the miss, and every node afterwards serves *that* object. Which architecture rendered it is decided by routing and by nothing else, and it can change after the object ages out or the bucket is cleared.
+
+For almost every deployment that is a non-event: clients decode audio, and the audio is the same. It matters in exactly two cases.
+
+- **You checksum variants** — an integrity manifest, a fixture test, a CDN that diffs objects. Compare decoded audio, or pin one architecture for rendering.
+- **You need reproducibility across a rebuild** — the same requirement, with time as the second axis. An ffmpeg pin bump already moves those bytes (see [VERSIONS.md](https://github.com/audioproxy/audioproxy/blob/main/VERSIONS.md)); architecture is a second axis of the same kind, and pinning one architecture removes it.
+
+Pinning is ordinary scheduling, not a proxy setting: a node selector, an instance type, or simply not adding the other kind of machine.
 
 ## What duplicate renders actually cost
 
