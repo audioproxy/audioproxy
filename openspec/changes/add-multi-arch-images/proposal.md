@@ -24,3 +24,11 @@
 - Modified: `.github/workflows/ci.yml` (arch matrix for image jobs, manifest stitch in publish), `Dockerfile` only if arch-conditional bits surface (none expected — debian + apt are arch-transparent).
 - Depends on: `add-docker-release` (the pipeline and tag scheme it extends).
 - Position: post-MVP, lowest priority — schedule on demand (first arm64 deployment target or contributor), not by default order.
+
+## Deferred out of this change
+
+Both found in the adversarial review round, both left out deliberately, both on the board rather than only in this file:
+
+- **`serialize-image-publish`** — `ci.yml` has no `concurrency:` group, so two pushes to `main` in quick succession can leave `:edge` on the older commit. The race predates this change; splitting publishing into four jobs widened its window from seconds to minutes, which is what makes it worth its own slice now.
+- **`gate-merges-on-image-checks`** — `ffmpeg-arch-parity` (added here) and `license-compliance` gate a tag through `needs:` but do not gate a merge, so a red commit can still reach `main`. The same gap the repository already documents for `hex-package`.
+

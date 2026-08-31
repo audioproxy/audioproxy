@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-08-31
+goal: Make every job that gates a tag also gate a merge, and keep the
+  required-check list honest

@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-08-31
+goal: Serialize the publish pipeline per ref so concurrent pushes cannot leave a
+  moving tag on an older commit
