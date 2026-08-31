@@ -202,10 +202,12 @@ Dockerfile instead, which is why `VERSIONS.md` has to be bumped alongside
 `.tool-versions` — the two are not wired together, and nothing but that file's
 procedure keeps them in step.
 
-Later slices extend this workflow rather than adding parallel ones — MinIO as a
-service container from `add-s3-client`, the arm64 matrix from
-`add-multi-arch-images` — so there stays one workflow to require. Both have
-landed; the pattern is the point.
+Later slices extend this workflow rather than adding parallel ones — MinIO from
+`add-s3-client`, the arm64 matrix from `add-multi-arch-images` — so there stays
+one workflow to require. Both have landed. MinIO arrived as a `docker run` in
+the `test` job rather than as a `services:` container, for the reason the
+comment beside it gives: the image needs a command (`server /data`) and the
+services block has nowhere to put one.
 
 ### Two architectures
 
@@ -447,8 +449,10 @@ release that carries it — an empty section is the normal state.
   rendered first. Nothing re-renders and no URL changes meaning; an operator who
   hashes variants rather than decoding them needs to know, and one who needs
   byte-stability pins a single architecture. Checked by `verify-published`,
-  which pulls each published tag on its own architecture and boots it, and by
-  `ffmpeg-arch-parity`, which holds both architectures to the same ffmpeg.
+  which pulls the primary published tag on each architecture and boots it, and
+  by `ffmpeg-arch-parity`, which holds both architectures to the same ffmpeg.
+  (Every tag is checked for both platforms, by `imagetools inspect` in
+  `publish`; it is the pull-and-boot that takes one tag as the sample.)
 
 **Release notes are claims, and claims name their checks.** Before publishing
 notes, every Highlight must point at the automated check that demonstrates it —

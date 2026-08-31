@@ -51,7 +51,7 @@ Across nodes there is no coalescing. If *k* nodes are each handed a request for 
 
 This is bounded and harmless, and it is worth being precise about why:
 
-- **The bytes are identical.** The cache key is a hash of the normalized options plus the source, and the same options produce the same ffmpeg argv. Two nodes racing to write the same key write the same object; last-writer-wins is a correct outcome because there is nothing to lose.
+- **The bytes are identical**, on nodes of the same CPU architecture. The cache key is a hash of the normalized options plus the source, and the same options produce the same ffmpeg argv. Two nodes racing to write the same key write the same object; last-writer-wins is a correct outcome because there is nothing to lose. On a fleet mixing amd64 and arm64 the races write *equivalent* objects rather than identical ones, and last-writer-wins is still correct for the same reason — see [A mixed-architecture fleet](#a-mixed-architecture-fleet).
 - **The window is one render long.** Once any node has written it back, every node hits. The duplication is a property of the cold moment, not of the URL.
 - **It is capped by the fleet, not by traffic.** A thousand simultaneous requests for one cold URL across ten nodes cost ten renders, not a thousand — the node-local coalescing absorbs the rest. The worst case is *k* = the number of nodes, and only for URLs that are cold.
 

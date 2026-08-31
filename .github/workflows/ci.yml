@@ -737,8 +737,13 @@ jobs:
           set -euo pipefail
           cd /tmp/digests
 
+          # nullglob so an empty directory is an empty array rather than the
+          # literal `*`, which counted as one digest and made "nothing was
+          # uploaded" report itself as "got 1".
+          shopt -s nullglob
           digests=(*)
-          echo "digests: ${digests[*]}"
+          shopt -u nullglob
+          echo "digests: ${digests[*]-(none)}"
           if [ "${#digests[@]}" -ne 2 ]; then
             echo "::error::expected 2 per-arch digests, got ${#digests[@]} — refusing to publish a partial manifest"
             exit 1
@@ -762,6 +767,14 @@ jobs:
       # attestations buildkit attaches to each image; they are platforms in the
       # descriptor and not architectures anybody pulls, so they are dropped
       # before the comparison.
+      #
+      # The inspect output is captured before it is filtered, and the filter's
+      # own failure is absorbed with `|| true`. Piping straight into `grep -v`
+      # meant that a manifest whose every line was dropped — attestations only,
+      # or a buildx bump that changed what `--format` emits — exited 1 through
+      # `pipefail` and killed the step *before* the `case` below could name the
+      # problem. It failed in the safe direction and said nothing about why,
+      # which reads as an unexplained CI death rather than as a finding.
       - name: Assert every published tag lists both platforms
         env:
           TAGS: ${{ needs.meta.outputs.tags }}
@@ -769,11 +782,15 @@ jobs:
           set -euo pipefail
           IFS=',' read -r -a tags <<< "$TAGS"
           for tag in "${tags[@]}"; do
-            platforms=$(
+            raw=$(
               docker buildx imagetools inspect "$tag" \
-                --format '{{range .Manifest.Manifests}}{{.Platform.OS}}/{{.Platform.Architecture}}{{"\n"}}{{end}}' \
-                | grep -v '^unknown/unknown$' | sort -u | tr '\n' ' '
+                --format '{{range .Manifest.Manifests}}{{.Platform.OS}}/{{.Platform.Architecture}}{{"\n"}}{{end}}'
             )
+            if [ -z "${raw//[[:space:]]/}" ]; then
+              echo "::error::imagetools inspect listed no platforms at all for $tag — the --format template no longer matches what buildx emits"
+              exit 1
+            fi
+            platforms=$(printf '%s\n' "$raw" | { grep -v '^unknown/unknown$' || true; } | sort -u | tr '\n' ' ')
             echo "$tag -> $platforms"
             for want in linux/amd64 linux/arm64; do
               case " $platforms " in
