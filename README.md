@@ -24,7 +24,7 @@ docker run --rm -p 4000:4000 \
   ghcr.io/audioproxy/audioproxy:0.7.1
 ```
 
-> On Apple Silicon, add `--platform linux/amd64`. The image is x86-64 only for now and runs under emulation; arm64 is [its own slice](https://github.com/audioproxy/audioproxy/tree/main/openspec/changes/add-multi-arch-images).
+> The image published for `0.7.1` is linux/amd64 only, so Apple Silicon needs `--platform linux/amd64` and runs it under emulation. **From the next release every tag is a manifest list carrying linux/amd64 and linux/arm64**, built and smoke-tested on native hardware, and `docker pull` picks the right one on Graviton, Ampere and Apple Silicon alike.
 
 Now ask for a variant, from another shell. `SRC` names a file *relative to the directory you mounted*, so `track.wav` means `/path/to/your/audio/track.wav`:
 
@@ -113,7 +113,7 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 - Optional CORS (`AP_ALLOW_ORIGIN`), off by default
 - A single container, published per release, and the package on hex
 
-**After that:** HTTPS sources, for stores that are not S3; arm64 images, so Graviton/Ampere and Apple Silicon run natively.
+**After that:** HTTPS sources, for stores that are not S3.
 
 **Under consideration:** a `/sync/` URL that renders fully before responding, trading time-to-first-byte for a seekable first play. Still open, because warming the cache does the same job for nothing: fetch the URL once, discard it, then set `src`.
 

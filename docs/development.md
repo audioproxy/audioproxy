@@ -165,11 +165,16 @@ would never get that far.
 | Job | Needs | Runs | Notes |
 |---|---|---|---|
 | `test` | — | `mix format --check-formatted`, `mix compile --warnings-as-errors`, starts MinIO, then `mix test --include integration --include minio` | No external *binaries* — the untagged + `:integration` suite must pass on a bare runner |
-| `image-ffmpeg` | `test` | Builds the `test` and `runtime` stages, then `mix test --only ffmpeg` inside the image | Asserts the two stages carry the *same* ffmpeg build, and that its major matches [`VERSIONS.md`](../VERSIONS.md) |
-| `smoke` | `test` | Builds the release image, runs [`bin/smoke-image`](../bin/smoke-image) | Boot, health, an end-to-end render off a read-only mount, an `s3://` render against MinIO (and `502` once the store is gone), an `s3://` variant store served proxied and then redirected from a second container, a signed percent-escaped URL over h2c, config validation, SIGTERM during a render |
+| `image-ffmpeg` (×2) | `test` | Builds the `test` and `runtime` stages, then `mix test --only ffmpeg` inside the image | Asserts the two stages carry the *same* ffmpeg build, and that its major matches [`VERSIONS.md`](../VERSIONS.md). Once per architecture; each leg records the full ffmpeg version as an artifact |
+| `ffmpeg-arch-parity` | `image-ffmpeg` | Compares the two recorded ffmpeg versions | The architectures must ship the *same* Debian ffmpeg, not merely the same major. See [`VERSIONS.md`](../VERSIONS.md) for what to do the day they diverge |
+| `smoke` (×2) | `test` | Builds the release image, runs [`bin/smoke-image`](../bin/smoke-image) | Boot, health, an end-to-end render off a read-only mount, an `s3://` render against MinIO (and `502` once the store is gone), an `s3://` variant store served proxied and then redirected from a second container, a signed percent-escaped URL over h2c, config validation, SIGTERM during a render |
 | `capacity` | `test` | Runs [`bin/capacity-matrix --verify`](../bin/capacity-matrix), then builds the release image and runs [`bin/check-capacity`](../bin/check-capacity) twice | Drives a concurrent workload (two-hour source included) and asserts cgroup `memory.peak` stays inside the model [`docs/capacity.md`](capacity.md) publishes; the second run is the guard's own red-path check. The `--verify` step needs no image and checks the other direction — that every cell of that document's decision matrix really is the largest concurrency its column's memory limit holds |
 | `hex-package` | `test` | Runs [`bin/check-hex-package`](../bin/check-hex-package) | Builds the tarball, asserts it holds the allowlist and nothing else (LICENSE, `llms.txt`, `llms-full.txt` present; `openspec/`, `test/`, `examples/`, `Dockerfile`, `.github/` absent at any depth), unpacks it outside the checkout and compiles it, then builds the docs and asserts every documented link resolves. Runs on pull requests, because a published hex version is permanent |
-| `publish` | `smoke`, `image-ffmpeg`, `capacity`, `license-compliance`, `hex-package` | Pushes to GHCR, and on a tag publishes to hex.pm | Never runs for a pull request; see [Releases](#releases) |
+| `license-compliance` (×2) | `test` | Builds the release image and reads its notices back | Asserts every installed package ships a `/usr/share/doc/*/copyright`, that `SOURCES.txt` matches this image's own dpkg, and that a sample of its source URLs resolves. Once per architecture, because `SOURCES.txt` is generated inside the image and lists that architecture's packages |
+| `meta` | — | Computes the version and the tag list once | Only on a push to `main` or a `v*` tag; the `if` that keeps publishing off pull requests lives here, and skipping it skips everything below |
+| `image-build` (×2) | `meta` and every check above | Builds the release image per architecture and pushes it to GHCR **by digest**, untagged | What reaches the registry here is unreachable by `docker pull`; nothing is named until the stitch below |
+| `publish` | `meta`, `image-build` | Stitches the per-arch digests into one manifest list per tag, then on a tag publishes to hex.pm | Refuses to run with fewer than two digests, and reads every tag back with `imagetools inspect` to confirm both platforms are listed. Never runs for a pull request; see [Releases](#releases) |
+| `verify-published` (×2) | `publish` | Pulls the published tag with no `--platform` and boots it | On each architecture's own runner: the pull must resolve to that architecture and the release must answer `/health` |
 
 Compilation runs with warnings as errors because the compiler's set-theoretic
 type checker reports through warnings — that flag is what makes the type gate a
@@ -197,9 +202,64 @@ Dockerfile instead, which is why `VERSIONS.md` has to be bumped alongside
 `.tool-versions` — the two are not wired together, and nothing but that file's
 procedure keeps them in step.
 
-Later slices extend this workflow rather than adding parallel ones — MinIO as a
-service container from `add-s3-client`, and the arm64 matrix from
-`add-multi-arch-images` — so there stays one workflow to require.
+Later slices extend this workflow rather than adding parallel ones — MinIO from
+`add-s3-client`, the arm64 matrix from `add-multi-arch-images` — so there stays
+one workflow to require. Both have landed. MinIO arrived as a `docker run` in
+the `test` job rather than as a `services:` container, for the reason the
+comment beside it gives: the image needs a command (`server /data`) and the
+services block has nowhere to put one.
+
+### Two architectures
+
+A published tag is a **manifest list** holding `linux/amd64` and `linux/arm64`,
+so `docker pull` resolves to a native image on Graviton, Ampere and Apple
+Silicon without anyone passing `--platform`. Four things follow from that, and
+all four are decisions rather than incidental mechanics.
+
+**Native runners, not QEMU.** The arm64 legs run on `ubuntu-24.04-arm`, GitHub's
+hosted arm64 machines. Emulated builds are 5–20× slower, and the BEAM's JIT
+under QEMU is a known flake source — which would put emulation artifacts
+squarely in the middle of the one suite whose job is to tell a real boot failure
+from a fake one. The arm64 image is built and exercised by an arm64 machine or
+it is not published. The amd64 side stays on `ubuntu-latest`; the arm side names
+a concrete image because there is no floating `-arm` alias to point at.
+
+**Nothing is named until both architectures are green.** `image-build` pushes
+*by digest* — the image reaches GHCR carrying no tag, so no `docker pull` can
+reach it — and `publish` is the only job that stitches those digests into a
+manifest list and attaches the tags. If either architecture fails, `publish`
+never runs and not one tag moves. The obvious alternative, tagging per
+architecture and merging afterwards, publishes a single-arch `:latest` for the
+width of the window in between, and a pull landing in that window silently gets
+emulation or an error. The digest count is asserted in the stitch step itself
+rather than left to `needs:`, because a matrix leg that never ran leaves a
+directory with one digest in it and `imagetools create` over one digest
+succeeds — which is exactly the partial manifest this arrangement exists to
+prevent.
+
+**The buildx layer cache is scoped per architecture.** Two architectures sharing
+one cache scope evict each other on every run: the layers differ all the way
+down. Two *jobs* of the same architecture sharing a scope is the reuse worth
+having, and that is what the `scope=${{ matrix.arch }}` on every image build
+keeps.
+
+**Renders are not asserted to be byte-identical across architectures, and this
+is deliberate.** ffmpeg may legitimately emit different bytes for the same input
+on different hardware — float rounding, different SIMD paths — and the per-arch
+contract is the same one the smoke suite already states: the output decodes, its
+duration is right, and the ffmpeg major is the pinned one. The consequence
+belongs to operators rather than to CI: **a mixed-arch fleet sharing one variant
+bucket can serve two byte-different renders under one cache key**, depending on
+which node rendered first. That is the same variance an ffmpeg patch bump
+introduces, it is invisible to any client that decodes rather than hashes, and a
+deployment that genuinely needs byte-stability pins one architecture. What *is*
+asserted is that both architectures ship the same ffmpeg — see
+[`VERSIONS.md`](../VERSIONS.md) — so the variance stays down at the level of
+arithmetic and never becomes a difference of encoder.
+
+The devcontainer needs nothing from any of this: its base images already exist
+for both architectures, so a worktree on an Apple Silicon machine builds arm64
+locally and one on an x86 machine builds amd64, with no flag either way.
 
 [`.github/dependabot.yml`](../.github/dependabot.yml) opens update PRs weekly for
 Hex packages and GitHub Actions. Minor and patch updates are grouped into one PR
@@ -211,10 +271,12 @@ the branch rejects force-pushes and deletion. **Branch protection is a repo
 setting, not a file**, so it does not travel with a clone — a fork has to set it
 up again, under *Settings → Branches → Add rule* for `main`, requiring the
 checks named **format, compile, unit tests**, **ffmpeg-tagged tests against the
-shipped ffmpeg**, **container smoke suite** and **the hex package is what we
-meant to ship** (GitHub lists status checks by job name, not by the job's key
-in the YAML). `publish` is not a required check — it does not run on pull
-requests at all.
+shipped ffmpeg (amd64)**, **ffmpeg-tagged tests against the shipped ffmpeg
+(arm64)**, **container smoke suite (amd64)**, **container smoke suite (arm64)**
+and **the hex package is what we meant to ship** (GitHub lists status checks by
+job name, not by the job's key in the YAML). `publish` is not a required check —
+it does not run on pull requests at all.
+
 
 > **`hex-package` has to be added to that list by hand.** It gates `publish`
 > through `needs:`, which stops a *tag* from publishing a bad tarball but does
@@ -229,6 +291,12 @@ requests at all.
 > Every pull request then blocks forever. Dropping the old apt-ffmpeg job did
 > exactly this, and the symptom reads as a hung CI rather than a settings
 > mismatch, so it costs more to diagnose than it should.
+>
+> **Putting a job in a matrix renames it too.** A matrix reports one check per
+> leg, with the leg in the name: `add-multi-arch-images` turned **container
+> smoke suite** into **container smoke suite (amd64)** and **… (arm64)**, which
+> is why the list above has four image checks where it had two. Adding a third
+> architecture later adds its rows to that list in the same breath.
 
 ---
 
@@ -371,7 +439,20 @@ what they serve until the old objects age out. This section is where such a
 line waits between merging and being cut, and an entry is deleted by the
 release that carries it — an empty section is the normal state.
 
-*Empty — both entries were carried by `v0.7.0`'s notes.*
+- **Multi-arch images** (`add-multi-arch-images`). Every tag from this release on
+  is a manifest list carrying `linux/amd64` and `linux/arm64`, so a host that
+  was pulling an amd64 image under emulation starts pulling a native arm64 one
+  without changing anything. The two encode the same URL to bytes that may
+  differ — not audibly, and not in duration or format, but they are not the same
+  bytes — so **a fleet running both architectures against one variant bucket can
+  hold either render under a given cache key**, decided by whichever node
+  rendered first. Nothing re-renders and no URL changes meaning; an operator who
+  hashes variants rather than decoding them needs to know, and one who needs
+  byte-stability pins a single architecture. Checked by `verify-published`,
+  which pulls the primary published tag on each architecture and boots it, and
+  by `ffmpeg-arch-parity`, which holds both architectures to the same ffmpeg.
+  (Every tag is checked for both platforms, by `imagetools inspect` in
+  `publish`; it is the pull-and-boot that takes one tag as the sample.)
 
 **Release notes are claims, and claims name their checks.** Before publishing
 notes, every Highlight must point at the automated check that demonstrates it —

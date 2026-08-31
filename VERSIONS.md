@@ -11,7 +11,7 @@ toolchain named here.
 | Erlang/OTP | `28.5.0.4` | `.tool-versions`, `Dockerfile` (`OTP_VERSION`), `.devcontainer/Dockerfile` |
 | Elixir | `1.20.2` (OTP 28) | `.tool-versions`, `Dockerfile` (`ELIXIR_VERSION`), `.devcontainer/Dockerfile` |
 | Debian | `trixie-20260713` | `Dockerfile` (`DEBIAN_VERSION`; `ELIXIR_IMAGE` is derived from it) |
-| ffmpeg / ffprobe | `7.1.5` | Debian trixie's `ffmpeg` package; the major is asserted in CI |
+| ffmpeg / ffprobe | `7.1.5` | Debian trixie's `ffmpeg` package; the major is asserted in CI, per architecture |
 
 `ELIXIR_IMAGE` is derived from `DEBIAN_VERSION` in the Dockerfile rather than
 written out, because the build and runtime stages must name the same Debian
@@ -56,6 +56,28 @@ place to change and no second copy to fall out of step:
   moves it fails the pipeline until this file moves with it.
 - The `test` and `runtime` stages must report the *same* ffmpeg build, so the
   encoder the argv contract is checked against is the one that ships.
+- **Both published architectures must report the same full ffmpeg version.**
+  The image is published as a manifest list holding linux/amd64 and linux/arm64,
+  and the `image-ffmpeg` job runs once per architecture on native hardware; the
+  `ffmpeg-arch-parity` job then compares the two Debian version strings, not
+  just their majors.
+
+### If the architectures ever diverge
+
+One version is recorded above because there has only ever been one: Debian
+builds a source package once per suite and every architecture takes the same
+version. That is the normal case, not a guarantee — an architecture can lag a
+security upload by days, and when it does, `ffmpeg-arch-parity` goes red naming
+both versions.
+
+That failure is a decision, not a flake to retry. Either wait for the slower
+architecture's build to land, or accept the split deliberately — in which case
+the ffmpeg row above becomes two rows, one per architecture, and the release
+notes say which architecture renders with which encoder. **A mixed-version
+release is a real difference in output bytes for the same URL**, which is the
+same class of change a pin bump is, and it belongs in the notes for the same
+reason. `FFMPEG_MAJOR` stays a single line either way: a divergence that moved
+the *major* is not a release to reconcile, it is a release to stop.
 
 ## Bumping a pin
 
