@@ -11,4 +11,4 @@
 
 ## 3. Apply
 
-- [ ] 3.1 Update the branch-protection rule on `main` by hand to match the table (not automatable; the change is not done until this is done)
+- [x] 3.1 Update the branch-protection rule on `main` by hand to match the table (not automatable; the change is not done until this is done) — applied 2026-08-31 and verified: the rule requires all nine `yes` checks
