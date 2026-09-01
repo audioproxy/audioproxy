@@ -319,6 +319,46 @@ now land in this table as a red `test` job first.
 > editing the branch-protection rule on `main` in the same breath is part of
 > the change, not a follow-up.
 
+### One publish at a time
+
+The publish-side jobs — `meta`, `image-build`, `publish` and `verify-published`
+— share a single `concurrency:` group keyed by `github.ref`. Everything above
+them stays ungrouped.
+
+The reason is that a moving tag is shared state. `:edge` moves on every push to
+`main`, and `:latest`/`:X.Y` move on a release; the immutable `:sha-<12>` tags
+do not, because they name their own commit. Without a group, two pushes landing
+close together run two whole pipelines that each stitch their own digests onto
+those tags, and the tag ends up naming whichever pipeline happened to finish
+last — which is not necessarily the newer commit. Publishing is now a four-job
+pipeline with an artifact round-trip in the middle, so the window in which one
+run can overtake another is minutes rather than seconds. Serialized, the second
+run waits for the first, and a moving tag names the newest commit that finished
+publishing.
+
+Keying by ref rather than by workflow gives one queue for `main` and one per
+release tag: they touch disjoint tag sets and have no reason to wait on each
+other.
+
+**`cancel-in-progress` is `false`, and that is the part worth reading twice.**
+The reflex everywhere else is `true` — superseded work is wasted work — and
+here it would be actively harmful. Cancelling a run mid-`publish` can leave some
+tags of a release stitched and others not, which is precisely the partial state
+the digest-then-stitch split exists to prevent. A publish that has begun is
+allowed to finish; the next run supersedes it in an orderly way. Queued runs do
+not pile up either: GitHub keeps only the most recent *pending* run per group
+and cancels the older pending ones, which is the right trade — work that has not
+started is worth nothing.
+
+The verification jobs are exempt on purpose. They are pure functions of a
+commit, they write nothing outside their own run, and they are the bulk of the
+wall clock; serializing them would double the cost of a busy day and protect
+nothing.
+
+What this does *not* fix: a multi-`--tag` `imagetools create` is not atomic, so
+a call that fails part-way can move some tags and not others. That is inherited
+from the single-step push and is a different problem.
+
 ---
 
 ## Releases

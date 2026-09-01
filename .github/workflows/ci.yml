@@ -518,9 +518,31 @@ jobs:
   #
   # Never runs for a pull request. The `if` lives on `meta` alone — a skipped
   # job skips everything downstream.
+  #
+  # All four jobs share one `concurrency:` group, keyed by ref, so two pushes
+  # landing close together publish one after the other and a moving tag (`:edge`,
+  # `:latest`, `:X.Y`) ends on the newer commit rather than on whichever pipeline
+  # finished last. `meta` is in the group despite being cheap, so the version a
+  # run computes and the digests it publishes come from the same point in the
+  # queue.
+  #
+  # `cancel-in-progress` is `false` here where most workflows want `true`:
+  # killing a run mid-`publish` can leave some tags of a release stitched and
+  # others not, which is exactly the partial state the digest-then-stitch split
+  # exists to prevent. A publish that has begun finishes; the next run supersedes
+  # it in order.
+  #
+  # The verification jobs above (`test`, `image-ffmpeg`, `ffmpeg-arch-parity`,
+  # `smoke`, `capacity`, `hex-package`, `license-compliance`) are deliberately
+  # ungrouped: they are pure functions of a commit and hold no registry state, so
+  # serializing them would double the wall clock of a busy day for nothing.
   # ---------------------------------------------------------------------------
 
   meta:
+    # Serialized with the other publish-side jobs; see the block comment above.
+    concurrency:
+      group: publish-${{ github.ref }}
+      cancel-in-progress: false
     name: compute the release version and tags
     if: >-
       github.event_name == 'push' &&
@@ -593,6 +615,10 @@ jobs:
           echo "publishing: $tags"
 
   image-build:
+    # Serialized with the other publish-side jobs; see the block comment above.
+    concurrency:
+      group: publish-${{ github.ref }}
+      cancel-in-progress: false
     name: build and push by digest (${{ matrix.arch }})
     needs: [meta, smoke, image-ffmpeg, ffmpeg-arch-parity, capacity, license-compliance, hex-package]
     strategy:
@@ -664,6 +690,10 @@ jobs:
           retention-days: 1
 
   publish:
+    # Serialized with the other publish-side jobs; see the block comment above.
+    concurrency:
+      group: publish-${{ github.ref }}
+      cancel-in-progress: false
     name: publish image to GHCR and package to hex
     needs: [meta, image-build]
     runs-on: ubuntu-latest
@@ -823,6 +853,10 @@ jobs:
   # ---------------------------------------------------------------------------
 
   verify-published:
+    # Serialized with the other publish-side jobs; see the block comment above.
+    concurrency:
+      group: publish-${{ github.ref }}
+      cancel-in-progress: false
     name: the published tag pulls and boots natively (${{ matrix.arch }})
     needs: [meta, publish]
     strategy:
