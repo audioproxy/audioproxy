@@ -355,6 +355,16 @@ commit, they write nothing outside their own run, and they are the bulk of the
 wall clock; serializing them would double the cost of a busy day and protect
 nothing.
 
+The arrangement is held in place by
+[`test/publish_concurrency_test.exs`](../test/publish_concurrency_test.exs),
+which derives the publish-side set from the workflow rather than listing it —
+a job that cannot run for a pull request is downstream of `meta`’s push-only
+`if:`, and so is part of the publish half — and asserts the biconditional:
+every such job carries the ref-keyed group with `cancel-in-progress: false`,
+and no job that runs on a pull request carries one at all. What it cannot
+assert is that GitHub honours the key; that is GitHub’s behaviour, and what is
+ours is the workflow declaring it.
+
 What this does *not* fix: a multi-`--tag` `imagetools create` is not atomic, so
 a call that fails part-way can move some tags and not others. That is inherited
 from the single-step push and is a different problem.

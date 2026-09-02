@@ -207,6 +207,7 @@ itself:
 | `AudioProxy.TestServer` | Booting a real listener, and reading back the port it got. | A test that binds a socket boots it through this helper. |
 | `AudioProxy.MarkedTable` | Reading a table out of a marked region of a published document. | A drift guard parses its table through this, never with its own regex. |
 | `AudioProxy.CapturingStore` | A second S3 endpoint that answers plausibly and records which identity signed each request. | It verifies nothing and must not grow into a fake S3; what it proves is routing and identity, never a signature. |
+| `AudioProxy.Workflow` | Reading `.github/workflows/ci.yml` as jobs. | A guard that asserts something about CI parses the workflow through this, never with its own regex. |
 
 Promoting another duplicated helper adds a row here and a subsection below. The
 section is meant to grow a row at a time; nothing above needs rewriting to make
@@ -395,6 +396,29 @@ Two rules, and the first is the reason this is allowed to exist at all:
   by a write-back, so `head/1` reports nothing until a test asks for a hit. A
   store that answered every HEAD with a variant would make a MISS render
   unreachable, which is how the first draft of this helper was wrong.
+
+`AudioProxy.Workflow` owns reading `.github/workflows/ci.yml`, for the drift
+guards that assert something about CI's shape rather than about the code:
+
+| Function | Holds |
+|---|---|
+| `jobs/0`, `source/0`, `block!/2` | The workflow split into `%{key => block}`, and the raising lookup. Read per test, not at compile time. |
+| `job_name/2`, `needs/1`, `arches/1`, `concurrency/1` | The four facts a guard asks of a job. |
+| `closure/2`, `runs_on_pull_request?/2` | The `needs:` closure, and the push-only `if:` propagated down it. |
+| `check_names/2` | GitHub's status-check naming, matrix legs expanded (`name (leg)`). |
+
+Two rules:
+
+- **It is line-based on purpose, and stays that way.** A YAML dependency for a
+  test helper is not worth it under the dependency policy, and the workflow is
+  written by hand in a house style these regexes read reliably. Where it cannot
+  answer it raises: asserting against a job it mis-parsed is the drift it
+  exists to catch.
+- **A CI guard parses through this, never with its own regex.** It was
+  extracted the moment the second guard needed it — `AudioProxy.RequiredChecksTest`
+  (the required-check table) and `AudioProxy.PublishConcurrencyTest` (the
+  publish-side `concurrency:` group) — rather than after the two copies
+  disagreed, which is how `AudioProxy.MarkedTable` was bought.
 
 ## Open questions (decide as they come up)
 

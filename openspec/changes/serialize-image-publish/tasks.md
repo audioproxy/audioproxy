@@ -5,7 +5,7 @@
 
 ## 2. Verification
 
-- [ ] 2.1 Two pushes to a scratch branch in quick succession: assert the second run's publish waits, and that the resulting moving tag resolves to the newer commit's digest
+- [x] 2.1 A drift guard, `test/publish_concurrency_test.exs`: derive the publish-side jobs structurally (a job that never runs for a pull request) and assert each carries the ref-keyed group with `cancel-in-progress: false`, and that no pull-request job carries one. The originally planned live experiment is not runnable — `meta`'s `if:` gates the publish half to `main` and `v*` tags, so a scratch branch never publishes and has no moving tag to inspect, while a pair of scratch `v*` tags would push real image tags and attempt `mix hex.publish`. Verified by mutation: dropping the group, flipping `cancel-in-progress` to `true`, dropping `github.ref` from the key, and grouping a verification job each turn the suite red.
 
 ## 3. Docs
 
