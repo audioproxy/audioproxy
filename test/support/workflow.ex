@@ -84,6 +84,12 @@ defmodule AudioProxy.Workflow do
 
   @doc "The job keys a job's `needs:` names, in either YAML form."
   def needs(block) do
+    if Regex.match?(~r/^    needs:\s*$/m, block) do
+      raise "a job writes `needs:` as a block list; this parser reads the inline " <>
+              "form only, and returning no dependencies would silently shrink " <>
+              "every derivation built on it"
+    end
+
     case Regex.run(~r/^    needs: (.+?)\s*$/m, block) do
       nil ->
         []
@@ -95,6 +101,22 @@ defmodule AudioProxy.Workflow do
         |> String.split(",", trim: true)
         |> Enum.map(&String.trim/1)
     end
+  end
+
+  @doc """
+  A block with its comment lines removed.
+
+  A job's block runs to the next job key, so the block comments that sit
+  *between* jobs ride along at the end of the preceding one. That is harmless
+  for the field readers above, which anchor on an indented key, and a trap for
+  anything that greps a block for prose: a comment explaining `imagetools
+  create` reads as a job that runs it. Grep through this.
+  """
+  def uncommented(block) do
+    block
+    |> String.split("\n")
+    |> Enum.reject(&Regex.match?(~r/^\s*#/, &1))
+    |> Enum.join("\n")
   end
 
   @doc "The `arch:` legs of a job's matrix, empty when it has none."
@@ -158,8 +180,28 @@ defmodule AudioProxy.Workflow do
 
   defp push_only?(block) do
     case Regex.run(~r/^    if:(.*(?:\n {6}\S.*)*)/m, block) do
-      nil -> false
-      [_match, condition] -> String.contains?(condition, "github.event_name == 'push'")
+      nil ->
+        false
+
+      [_match, condition] ->
+        cond do
+          # Names the pull_request event positively, so it runs for one.
+          String.contains?(condition, "github.event_name == 'pull_request'") ->
+            false
+
+          String.contains?(condition, "github.event_name == 'push'") ->
+            true
+
+          String.contains?(condition, "github.event_name != 'pull_request'") ->
+            true
+
+          not String.contains?(condition, "github.event_name") ->
+            false
+
+          true ->
+            raise "a job's `if:` tests github.event_name in a form this guard " <>
+                    "cannot classify: #{String.trim(condition)}"
+        end
     end
   end
 

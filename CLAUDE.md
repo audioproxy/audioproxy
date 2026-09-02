@@ -404,21 +404,33 @@ guards that assert something about CI's shape rather than about the code:
 |---|---|
 | `jobs/0`, `source/0`, `block!/2` | The workflow split into `%{key => block}`, and the raising lookup. Read per test, not at compile time. |
 | `job_name/2`, `needs/1`, `arches/1`, `concurrency/1` | The four facts a guard asks of a job. |
+| `uncommented/1` | A block with its comment lines stripped, for anything that greps a block for prose. |
 | `closure/2`, `runs_on_pull_request?/2` | The `needs:` closure, and the push-only `if:` propagated down it. |
 | `check_names/2` | GitHub's status-check naming, matrix legs expanded (`name (leg)`). |
 
-Two rules:
+Three rules:
 
 - **It is line-based on purpose, and stays that way.** A YAML dependency for a
   test helper is not worth it under the dependency policy, and the workflow is
-  written by hand in a house style these regexes read reliably. Where it cannot
-  answer it raises: asserting against a job it mis-parsed is the drift it
-  exists to catch.
+  written by hand in a house style these regexes read reliably.
+- **Where it cannot answer, it raises — and both raises were bought.** A
+  block-form `needs:` used to read as *no dependencies*, silently shrinking
+  every derivation built on it; an `if:` that names `pull_request` in a form
+  the classifier does not recognise used to be guessed at. Both now name the
+  problem. The guards' failure messages are only as good as the parser's
+  refusal to invent an answer.
 - **A CI guard parses through this, never with its own regex.** It was
   extracted the moment the second guard needed it — `AudioProxy.RequiredChecksTest`
   (the required-check table) and `AudioProxy.PublishConcurrencyTest` (the
-  publish-side `concurrency:` group) — rather than after the two copies
-  disagreed, which is how `AudioProxy.MarkedTable` was bought.
+  publish `concurrency:` group) — rather than after the two copies disagreed,
+  which is how `AudioProxy.MarkedTable` was bought.
+
+A trap worth knowing before writing the next guard: **a job's block runs to the
+next job key, so the block comments that sit between jobs ride along at the end
+of the preceding one.** Harmless for the field readers, which anchor on an
+indented key; fatal for a grep. The guard that checks `publish` is the only job
+writing a tag matched a *comment about* `imagetools create` in the job above it,
+and `uncommented/1` exists for that.
 
 ## Open questions (decide as they come up)
 

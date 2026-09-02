@@ -519,30 +519,39 @@ jobs:
   # Never runs for a pull request. The `if` lives on `meta` alone — a skipped
   # job skips everything downstream.
   #
-  # All four jobs share one `concurrency:` group, keyed by ref, so two pushes
-  # landing close together publish one after the other and a moving tag (`:edge`,
-  # `:latest`, `:X.Y`) ends on the newer commit rather than on whichever pipeline
-  # finished last. `meta` is in the group despite being cheap, so the version a
-  # run computes and the digests it publishes come from the same point in the
-  # queue.
+  # `publish` carries a `concurrency:` group keyed by ref, and it is the only job
+  # that does. It is the only job that writes a tag, so it is the only shared
+  # state two runs can race over: without the group, two pushes landing close
+  # together each stitch their own digests onto the moving tags and `:edge` ends
+  # on whichever pipeline finished last rather than on the newer commit. The
+  # immutable `:sha-<12>` tags never raced — they name their own commit.
   #
-  # `cancel-in-progress` is `false` here where most workflows want `true`:
-  # killing a run mid-`publish` can leave some tags of a release stitched and
-  # others not, which is exactly the partial state the digest-then-stitch split
-  # exists to prevent. A publish that has begun finishes; the next run supersedes
-  # it in order.
+  # Nothing else may join the group, and that is a correctness constraint rather
+  # than a cost one. GitHub allows exactly one *pending* job per group and
+  # cancels the previously pending one whenever another is queued; the
+  # `cancel-in-progress: false` below buys protection for a job that is already
+  # running and none at all for a queued one. So a second grouped job — a matrix
+  # leg, or `meta` and `verify-published` — gives one run two ways to want the
+  # group at once, and the eviction that follows lands on whatever is pending,
+  # including a *newer* run's `meta`. That is the bug this is meant to fix,
+  # made deterministic. One job in the group means at most one pending entry per
+  # run and nothing to evict.
   #
-  # The verification jobs above (`test`, `image-ffmpeg`, `ffmpeg-arch-parity`,
-  # `smoke`, `capacity`, `hex-package`, `license-compliance`) are deliberately
-  # ungrouped: they are pure functions of a commit and hold no registry state, so
-  # serializing them would double the wall clock of a busy day for nothing.
+  # `cancel-in-progress: false` because the reflex `true` would let a new push
+  # kill a run midway through `imagetools create` and leave some tags of a
+  # release stitched and others not — the partial state the digest-then-stitch
+  # split exists to prevent.
+  #
+  # Keyed by `github.ref` so `main` and each release tag queue separately: they
+  # touch disjoint tag sets and have no reason to wait on each other.
+  #
+  # What this does not buy is *ordering*. GitHub queues by arrival at the job, so
+  # a run whose build was slow can still publish after a newer one and leave a
+  # moving tag on the older commit. Serialization prevents a torn manifest, not a
+  # stale tag; see docs/development.md.
   # ---------------------------------------------------------------------------
 
   meta:
-    # Serialized with the other publish-side jobs; see the block comment above.
-    concurrency:
-      group: publish-${{ github.ref }}
-      cancel-in-progress: false
     name: compute the release version and tags
     if: >-
       github.event_name == 'push' &&
@@ -615,10 +624,6 @@ jobs:
           echo "publishing: $tags"
 
   image-build:
-    # Serialized with the other publish-side jobs; see the block comment above.
-    concurrency:
-      group: publish-${{ github.ref }}
-      cancel-in-progress: false
     name: build and push by digest (${{ matrix.arch }})
     needs: [meta, smoke, image-ffmpeg, ffmpeg-arch-parity, capacity, license-compliance, hex-package]
     strategy:
@@ -690,7 +695,8 @@ jobs:
           retention-days: 1
 
   publish:
-    # Serialized with the other publish-side jobs; see the block comment above.
+    # The only job that writes a tag, and so the only one serialized; see the
+    # block comment above for why the group stops here.
     concurrency:
       group: publish-${{ github.ref }}
       cancel-in-progress: false
@@ -853,10 +859,6 @@ jobs:
   # ---------------------------------------------------------------------------
 
   verify-published:
-    # Serialized with the other publish-side jobs; see the block comment above.
-    concurrency:
-      group: publish-${{ github.ref }}
-      cancel-in-progress: false
     name: the published tag pulls and boots natively (${{ matrix.arch }})
     needs: [meta, publish]
     strategy:

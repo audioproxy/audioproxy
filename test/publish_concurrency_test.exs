@@ -7,119 +7,131 @@ defmodule AudioProxy.PublishConcurrencyTest do
   release — is shared state that no `needs:` edge protects. Two pushes landing
   close together run two whole pipelines, each stitching its own per-arch
   digests onto those tags, and without a group the tag names whichever pipeline
-  finished last rather than the newer commit. The immutable `:sha-<12>` tags
-  are unaffected: they name their own commit.
+  finished last rather than the newer commit. The immutable `:sha-<12>` tags are
+  unaffected: they name their own commit.
 
-  The set is derived rather than listed. **A job that cannot run for a pull
-  request is a publish-side job**, because the publish half is gated behind
-  `meta`'s push-only `if:` and everything downstream of a skipped job is
-  skipped too. So the guard asserts a biconditional: every push-only job is
-  serialized, and no job that runs on a pull request is — verification jobs are
-  pure functions of a commit, hold no registry state, and are the bulk of the
-  wall clock, so serializing one would cost a busy day for nothing.
+  `publish` is the only job that writes a tag, so it is the only job in the
+  group — and **the exclusivity is the invariant this file exists to hold.**
+  GitHub allows exactly one *pending* job per concurrency group and cancels the
+  previously pending one whenever another is queued; `cancel-in-progress: false`
+  protects a job that is already running and does nothing for a queued one. So a
+  second grouped job gives one run two ways to want the group at once — a matrix
+  leg and its sibling, or `meta` and `verify-published` — and the eviction that
+  follows lands on whatever is pending, up to and including a *newer* run's
+  `meta`, whose cancellation skips that run's whole publish half and leaves the
+  moving tag on the older commit. That is the bug the group exists to fix,
+  turned deterministic. A well-meant edit that adds `verify-published` "so the
+  verification is serialized too", or that grafts the group onto `meta`, is
+  therefore not a tightening but a regression, and it is the edit this guard is
+  aimed at.
 
-  Two things it cannot check, and both are why the group is written the way it
-  is rather than left to review. `cancel-in-progress` must be `false`: the
-  reflex everywhere else is `true`, and here it would let a new push kill a run
-  mid-`publish` and leave some tags of a release stitched and others not —
-  precisely the partial state the digest-then-stitch split exists to prevent.
-  And the group must be keyed by `github.ref`, so `main` and each release tag
-  get their own queue instead of waiting on each other over disjoint tag sets.
-  A future edit that flips either is a plausible tidy-up with no visible
-  symptom until two pushes collide, which is the definition of what a guard is
-  for.
+  Two properties of the group itself are also asserted, because both are
+  plausible tidy-ups with no visible symptom until two pushes collide.
+  `cancel-in-progress` must stay `false`: `true` is the reflex everywhere else
+  and here it would let a new push kill a run midway through `imagetools create`,
+  leaving some tags of a release stitched and others not — the partial state the
+  digest-then-stitch split exists to prevent. And the key must stay
+  `github.ref`, so `main` and each release tag queue separately over their
+  disjoint tag sets.
 
-  What this does *not* assert is that GitHub honours the key. That is GitHub's
-  behaviour, not ours; what is ours is the workflow declaring it.
+  Two things this deliberately does not assert. That GitHub honours the key —
+  that is GitHub's behaviour, and what is ours is the workflow declaring it. And
+  that publishing happens in *commit order*: it does not, because GitHub queues
+  by arrival at the job, so a run whose build was slow can publish after a newer
+  one. Serialization prevents a torn manifest, not a stale tag.
   """
 
   use ExUnit.Case, async: true
 
   alias AudioProxy.Workflow
 
+  @serialized "publish"
   @group "publish-${{ github.ref }}"
 
-  test "every publish-side job is serialized, on one ref-keyed group" do
-    for key <- publish_side() do
-      concurrency = concurrency(key)
+  test "the job that writes the tags is serialized, on a ref-keyed group" do
+    concurrency = concurrency(@serialized)
 
-      assert concurrency != nil,
-             """
-             The job #{inspect(key)} never runs for a pull request, so it is part \
-             of the publish half and must share the serializing group:
+    assert concurrency != nil,
+           """
+           The job #{inspect(@serialized)} writes every moving tag and must carry:
 
-                 concurrency:
-                   group: #{@group}
-                   cancel-in-progress: false
+               concurrency:
+                 group: #{@group}
+                 cancel-in-progress: false
 
-             Without it, two pushes in flight at once can leave a moving tag on \
-             the older commit.
-             """
+           Without it, two pushes in flight at once can leave a moving tag on the
+           older commit.
+           """
 
-      assert concurrency.group == @group,
-             """
-             The job #{inspect(key)} is in the group #{inspect(concurrency.group)}, \
-             not #{inspect(@group)}.
+    assert concurrency.group == @group,
+           """
+           #{inspect(@serialized)} is in the group #{inspect(concurrency.group)}, \
+           not #{inspect(@group)}.
 
-             Every publish-side job shares one group so the version `meta` \
-             computes and the digests `publish` pushes come from the same point \
-             in the queue, and the key is `github.ref` so `main` and a release \
-             tag queue separately.
-             """
-    end
+           The key must be `github.ref` so that `main` and a release tag queue
+           separately — they touch disjoint tag sets and have no reason to wait
+           on each other.
+           """
   end
 
   test "a publish that has started is never cancelled" do
-    for key <- publish_side() do
-      assert concurrency(key).cancel_in_progress == "false",
-             """
-             The job #{inspect(key)} has cancel-in-progress \
-             #{inspect(concurrency(key).cancel_in_progress)}; it must be `false`.
+    assert concurrency(@serialized).cancel_in_progress == "false",
+           """
+           #{inspect(@serialized)} has cancel-in-progress \
+           #{inspect(concurrency(@serialized).cancel_in_progress)}; it must be `false`.
 
-             `true` is the usual idiom and is wrong here: cancelling a run \
-             mid-publish can leave some tags of a release stitched and others \
-             not. A publish that has begun finishes, and the next run supersedes \
-             it in order.
-             """
-    end
+           `true` is the usual idiom and is wrong here: cancelling a run
+           mid-publish can leave some tags of a release stitched and others not.
+           A publish that has begun finishes, and the next run supersedes it in
+           order.
+           """
   end
 
-  test "the verification jobs are left ungrouped" do
-    jobs = Workflow.jobs()
-
+  test "no other job joins the group" do
     grouped =
-      jobs
-      |> Map.keys()
-      |> Enum.filter(&Workflow.runs_on_pull_request?(&1, jobs))
-      |> Enum.filter(&(concurrency(&1) != nil))
+      Workflow.jobs()
+      |> Enum.filter(fn {_key, block} -> Workflow.concurrency(block) != nil end)
+      |> Enum.map(fn {key, _block} -> key end)
       |> Enum.sort()
 
-    assert grouped == [],
+    assert grouped == [@serialized],
            """
-           These jobs run for a pull request and yet declare a concurrency \
-           group: #{inspect(grouped)}
+           Exactly one job may declare a concurrency group, and it is \
+           #{inspect(@serialized)}. These do: #{inspect(grouped)}
 
-           Verification is exempt on purpose: those jobs write nothing outside \
-           their own run, so serializing them doubles the wall clock of a busy \
-           day and protects nothing.
+           GitHub allows one pending job per group and evicts the previously
+           pending one when another is queued, so a second grouped job lets a run
+           contend with itself and cancel a newer run's `meta` — the stale moving
+           tag this group exists to prevent, made deterministic. If the intent
+           was to serialize verification too, it cannot be done this way.
            """
   end
 
-  test "the publish-side set is the four jobs the docs describe" do
-    # The derivation is structural, so this is the sanity check on the
-    # derivation rather than on the workflow: if a rename or a new job moves
-    # the set, the docs and the block comment in ci.yml name a set that no
-    # longer exists.
-    assert publish_side() == ~w[image-build meta publish verify-published]
-  end
+  test "the serialized job is the only one that moves a tag" do
+    # The exclusivity above is only correct while `publish` really is the sole
+    # writer. `image-build` pushes by digest and names nothing; if a second job
+    # grows an `imagetools create` or a `--tag`, the group is in the wrong place
+    # and every message in this file is misleading.
+    writers =
+      Workflow.jobs()
+      |> Enum.filter(fn {_key, block} ->
+        steps = Workflow.uncommented(block)
 
-  defp publish_side do
-    jobs = Workflow.jobs()
+        String.contains?(steps, "imagetools create") or Regex.match?(~r/^\s+--tag /m, steps)
+      end)
+      |> Enum.map(fn {key, _block} -> key end)
+      |> Enum.sort()
 
-    jobs
-    |> Map.keys()
-    |> Enum.reject(&Workflow.runs_on_pull_request?(&1, jobs))
-    |> Enum.sort()
+    assert writers == [@serialized],
+           """
+           These jobs write image tags: #{inspect(writers)} — expected only \
+           #{inspect(@serialized)}.
+
+           The concurrency group is on `publish` because it is the sole writer of
+           shared registry state. A second writer needs the group too, and two
+           grouped jobs is the failure mode documented above, so this needs a
+           rethink rather than another `concurrency:` block.
+           """
   end
 
   defp concurrency(key) do

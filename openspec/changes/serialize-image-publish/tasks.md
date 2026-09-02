@@ -1,7 +1,7 @@
 ## 1. Serialize publishing
 
-- [x] 1.1 `concurrency: { group: publish-${{ github.ref }}, cancel-in-progress: false }` on `meta`, `image-build`, `publish` and `verify-published`
-- [x] 1.2 Verification jobs left ungrouped, with a comment saying why they are exempt
+- [x] 1.1 `concurrency: { group: publish-${{ github.ref }}, cancel-in-progress: false }` on `publish`, and on no other job. It went on all four publish-side jobs first; the adversarial review's root cause showed that a second member of the group lets a run evict a newer run's queued `meta`, so exclusivity is part of the fix.
+- [x] 1.2 Every other job left ungrouped — verification and the rest of the publish half alike — with a block comment giving the pending-eviction reason rather than only the wall-clock one
 
 ## 2. Verification
 
