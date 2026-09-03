@@ -1,44 +1,20 @@
 defmodule AudioProxy.PublishConcurrencyTest do
   @moduledoc """
-  The `concurrency:` group that serializes publishing, against the jobs
-  `.github/workflows/ci.yml` actually declares.
+  The `concurrency:` group on `publish`, against what `ci.yml` declares.
 
-  A moving tag — `:edge` on every push to `main`, `:latest` and `:X.Y` on a
-  release — is shared state that no `needs:` edge protects. Two pushes landing
-  close together run two whole pipelines, each stitching its own per-arch
-  digests onto those tags, and without a group the tag names whichever pipeline
-  finished last rather than the newer commit. The immutable `:sha-<12>` tags are
-  unaffected: they name their own commit.
+  A moving tag is shared state no `needs:` edge protects, and `publish` is the
+  only job that writes one.
 
-  `publish` is the only job that writes a tag, so it is the only job in the
-  group — and **the exclusivity is the invariant this file exists to hold.**
-  GitHub allows exactly one *pending* job per concurrency group and cancels the
-  previously pending one whenever another is queued; `cancel-in-progress: false`
-  protects a job that is already running and does nothing for a queued one. So a
-  second grouped job gives one run two ways to want the group at once — a matrix
-  leg and its sibling, or `meta` and `verify-published` — and the eviction that
-  follows lands on whatever is pending, up to and including a *newer* run's
-  `meta`, whose cancellation skips that run's whole publish half and leaves the
-  moving tag on the older commit. That is the bug the group exists to fix,
-  turned deterministic. A well-meant edit that adds `verify-published` "so the
-  verification is serialized too", or that grafts the group onto `meta`, is
-  therefore not a tightening but a regression, and it is the edit this guard is
-  aimed at.
+  **The exclusivity is the invariant here.** A group holds one pending job and a
+  new arrival evicts it, and `cancel-in-progress: false` protects only a job
+  already running — so a second member lets one run evict a newer run's queued
+  `meta` and strand the moving tag on the older commit, which is the bug the
+  group exists to fix. An edit adding `verify-published` "so verification is
+  serialized too" reads as a tightening, and is the edit this file is aimed at.
 
-  Two properties of the group itself are also asserted, because both are
-  plausible tidy-ups with no visible symptom until two pushes collide.
-  `cancel-in-progress` must stay `false`: `true` is the reflex everywhere else
-  and here it would let a new push kill a run midway through `imagetools create`,
-  leaving some tags of a release stitched and others not — the partial state the
-  digest-then-stitch split exists to prevent. And the key must stay
-  `github.ref`, so `main` and each release tag queue separately over their
-  disjoint tag sets.
-
-  Two things this deliberately does not assert. That GitHub honours the key —
-  that is GitHub's behaviour, and what is ours is the workflow declaring it. And
-  that publishing happens in *commit order*: it does not, because GitHub queues
-  by arrival at the job, so a run whose build was slow can publish after a newer
-  one. Serialization prevents a torn manifest, not a stale tag.
+  Not asserted: that GitHub honours the key, and that publishing happens in
+  commit order — it does not, since the queue is entered on arrival at the job.
+  `docs/development.md` has the rest.
   """
 
   use ExUnit.Case, async: true
@@ -108,10 +84,7 @@ defmodule AudioProxy.PublishConcurrencyTest do
   end
 
   test "the serialized job is the only one that moves a tag" do
-    # The exclusivity above is only correct while `publish` really is the sole
-    # writer. `image-build` pushes by digest and names nothing; if a second job
-    # grows an `imagetools create` or a `--tag`, the group is in the wrong place
-    # and every message in this file is misleading.
+    # The exclusivity argument holds only while `publish` is the sole writer.
     writers =
       Workflow.jobs()
       |> Enum.filter(fn {_key, block} ->

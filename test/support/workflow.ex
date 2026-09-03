@@ -1,26 +1,15 @@
 defmodule AudioProxy.Workflow do
   @moduledoc """
-  Reads `.github/workflows/ci.yml` as jobs, for the drift guards that assert
-  something about the workflow's shape.
+  Reads `.github/workflows/ci.yml` as jobs, for the guards that assert
+  something about CI's shape.
 
-  Two guards need this now. `AudioProxy.RequiredChecksTest` derives the checks
-  that gate publishing and compares them against the table in
-  `docs/development.md`; `AudioProxy.PublishConcurrencyTest` asserts that the
-  publish-side jobs — and only those — carry the `concurrency:` group that
-  serializes them. Both need the same three facts about a job: its `name:`, its
-  `needs:`, and whether its `if:` restricts it to a push.
+  Line-based rather than a YAML parser, per the dependency policy. Where it
+  cannot answer it raises: asserting against a job it mis-parsed is the drift
+  it exists to catch.
 
-  It is deliberately line-based rather than a YAML parser, per the dependency
-  policy: the workflow is written by hand in a house style this reads reliably,
-  and a guard that needs a new dependency is a guard that does not get written.
-  Where it cannot answer, it raises — asserting against a job it mis-parsed is
-  exactly the drift it exists to catch.
-
-  The rule is the one every other support module carries: a guard that needs to
-  read the workflow reaches for this, and never grows its own regex beside it.
-  `AudioProxy.MarkedTable` exists because the second table guard grew a second
-  parser and the two disagreed; this module is that lesson applied before the
-  fact.
+  Shared because `AudioProxy.MarkedTable` was bought the hard way — a second
+  guard grew a second parser and the two disagreed. A guard reads the workflow
+  through this, never with its own regex.
   """
 
   @arch_token "${{ matrix.arch }}"
@@ -28,13 +17,8 @@ defmodule AudioProxy.Workflow do
   @doc """
   Every job in `ci.yml`, as `%{key => block}`.
 
-  Job keys sit at indent 2 under `jobs:`; everything until the next key is that
-  job's block. Comments between jobs ride along in the preceding block, where
-  nothing below matches them.
-
-  Read when a test runs, not when this module compiles — same idiom and reason
-  as `AudioProxy.LlmsDocsTest`: `mix test --only ffmpeg` still compiles every
-  test file inside the release image's test stage.
+  Read per test rather than at compile time: `mix test --only ffmpeg` still
+  compiles every test file inside the release image's test stage.
   """
   def jobs do
     [_prelude, body] = String.split(source(), "\njobs:\n", parts: 2)
@@ -49,14 +33,8 @@ defmodule AudioProxy.Workflow do
     end)
   end
 
-  @doc "The raw workflow text."
   def source, do: File.read!(".github/workflows/ci.yml")
 
-  @doc """
-  A job's block, raising when the key names a job that is not there — which is
-  either a `needs:` pointing at a job that moved, or this parser no longer
-  reading the workflow.
-  """
   def block!(key, jobs) do
     case Map.fetch(jobs, key) do
       {:ok, block} ->
@@ -68,13 +46,8 @@ defmodule AudioProxy.Workflow do
     end
   end
 
-  @doc """
-  A job's `name:`, or its key when it has none — which is GitHub's fallback
-  too.
-
-  Exactly indent 4: step-level `name:` lines sit deeper or behind a `- `, so
-  they never match.
-  """
+  # Indent 4 exactly: step-level `name:` lines sit deeper, and a job with none
+  # reports under its key, as it does on GitHub.
   def job_name(key, block) do
     case Regex.run(~r/^    name: (.+?)\s*$/m, block) do
       [_line, name] -> name
@@ -82,7 +55,6 @@ defmodule AudioProxy.Workflow do
     end
   end
 
-  @doc "The job keys a job's `needs:` names, in either YAML form."
   def needs(block) do
     if Regex.match?(~r/^    needs:\s*$/m, block) do
       raise "a job writes `needs:` as a block list; this parser reads the inline " <>
@@ -103,15 +75,9 @@ defmodule AudioProxy.Workflow do
     end
   end
 
-  @doc """
-  A block with its comment lines removed.
-
-  A job's block runs to the next job key, so the block comments that sit
-  *between* jobs ride along at the end of the preceding one. That is harmless
-  for the field readers above, which anchor on an indented key, and a trap for
-  anything that greps a block for prose: a comment explaining `imagetools
-  create` reads as a job that runs it. Grep through this.
-  """
+  # A job's block runs to the next job key, so the block comments between jobs
+  # ride along at the end of the preceding one — invisible to the field readers
+  # above, a trap for anything grepping a block for prose.
   def uncommented(block) do
     block
     |> String.split("\n")
@@ -119,20 +85,14 @@ defmodule AudioProxy.Workflow do
     |> Enum.join("\n")
   end
 
-  @doc "The `arch:` legs of a job's matrix, empty when it has none."
   def arches(block) do
     ~r/^\s+- arch: (\S+)$/m
     |> Regex.scan(block)
     |> Enum.map(fn [_line, arch] -> arch end)
   end
 
-  @doc """
-  A job's `concurrency:` group and cancel policy, or `nil` when it declares
-  none.
-
-  Indent 4 for the key and 6 for its two fields, so a `concurrency:` at
-  workflow level or inside a step cannot be mistaken for a job's.
-  """
+  # Indents 4 and 6, so a workflow-level or step-level `concurrency:` cannot be
+  # mistaken for a job's.
   def concurrency(block) do
     case Regex.run(~r/^    concurrency:\n((?:      \S.*\n)+)/m, block) do
       nil ->
@@ -153,9 +113,6 @@ defmodule AudioProxy.Workflow do
     end
   end
 
-  @doc """
-  Everything a job transitively `needs:`.
-  """
   def closure(key, jobs) do
     direct = key |> block!(jobs) |> needs()
 
@@ -164,14 +121,8 @@ defmodule AudioProxy.Workflow do
     end)
   end
 
-  @doc """
-  Whether a job can run for a pull request.
-
-  A job-level `if:` keyed on the push event never does, and neither does
-  anything downstream of such a job — a skipped job skips everything that
-  needs it. `>-` folds the condition across continuation lines, so those are
-  read too.
-  """
+  # Downstream of a push-only job counts too: a skipped job skips everything
+  # that needs it.
   def runs_on_pull_request?(key, jobs) do
     block = block!(key, jobs)
 
@@ -185,7 +136,6 @@ defmodule AudioProxy.Workflow do
 
       [_match, condition] ->
         cond do
-          # Names the pull_request event positively, so it runs for one.
           String.contains?(condition, "github.event_name == 'pull_request'") ->
             false
 
@@ -205,13 +155,8 @@ defmodule AudioProxy.Workflow do
     end
   end
 
-  @doc """
-  The status-check names a job reports.
-
-  GitHub names a matrix job's checks per leg: `name (leg)`. A name that
-  interpolates anything this cannot expand raises rather than asserting a name
-  GitHub will never report.
-  """
+  # GitHub reports a matrix job once per leg, as `name (leg)`. An unexpandable
+  # name raises rather than asserting one GitHub will never report.
   def check_names(key, jobs) do
     block = block!(key, jobs)
     name = job_name(key, block)

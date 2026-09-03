@@ -519,36 +519,17 @@ jobs:
   # Never runs for a pull request. The `if` lives on `meta` alone — a skipped
   # job skips everything downstream.
   #
-  # `publish` carries a `concurrency:` group keyed by ref, and it is the only job
-  # that does. It is the only job that writes a tag, so it is the only shared
-  # state two runs can race over: without the group, two pushes landing close
-  # together each stitch their own digests onto the moving tags and `:edge` ends
-  # on whichever pipeline finished last rather than on the newer commit. The
-  # immutable `:sha-<12>` tags never raced — they name their own commit.
+  # `publish` is the only job with a `concurrency:` group and must stay the only
+  # one: a group holds one pending job and a new arrival evicts it, so a second
+  # member lets one run evict a newer run's queued `meta` and strand `:edge` on
+  # the older commit — the race this exists to prevent. It also serializes the
+  # matrix legs it is put on.
   #
-  # Nothing else may join the group, and that is a correctness constraint rather
-  # than a cost one. GitHub allows exactly one *pending* job per group and
-  # cancels the previously pending one whenever another is queued; the
-  # `cancel-in-progress: false` below buys protection for a job that is already
-  # running and none at all for a queued one. So a second grouped job — a matrix
-  # leg, or `meta` and `verify-published` — gives one run two ways to want the
-  # group at once, and the eviction that follows lands on whatever is pending,
-  # including a *newer* run's `meta`. That is the bug this is meant to fix,
-  # made deterministic. One job in the group means at most one pending entry per
-  # run and nothing to evict.
+  # `cancel-in-progress: false` because killing a run mid-`imagetools create`
+  # leaves a release half-tagged. Keyed by ref so `main` and a release tag queue
+  # separately.
   #
-  # `cancel-in-progress: false` because the reflex `true` would let a new push
-  # kill a run midway through `imagetools create` and leave some tags of a
-  # release stitched and others not — the partial state the digest-then-stitch
-  # split exists to prevent.
-  #
-  # Keyed by `github.ref` so `main` and each release tag queue separately: they
-  # touch disjoint tag sets and have no reason to wait on each other.
-  #
-  # What this does not buy is *ordering*. GitHub queues by arrival at the job, so
-  # a run whose build was slow can still publish after a newer one and leave a
-  # moving tag on the older commit. Serialization prevents a torn manifest, not a
-  # stale tag; see docs/development.md.
+  # This buys interleaving, not ordering; docs/development.md has the rest.
   # ---------------------------------------------------------------------------
 
   meta:
@@ -695,8 +676,6 @@ jobs:
           retention-days: 1
 
   publish:
-    # The only job that writes a tag, and so the only one serialized; see the
-    # block comment above for why the group stops here.
     concurrency:
       group: publish-${{ github.ref }}
       cancel-in-progress: false
