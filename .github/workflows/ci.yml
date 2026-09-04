@@ -518,6 +518,18 @@ jobs:
   #
   # Never runs for a pull request. The `if` lives on `meta` alone — a skipped
   # job skips everything downstream.
+  #
+  # `publish` is the only job with a `concurrency:` group and must stay the only
+  # one: a group holds one pending job and a new arrival evicts it, so a second
+  # member lets one run evict a newer run's queued `meta` and strand `:edge` on
+  # the older commit — the race this exists to prevent. It also serializes the
+  # matrix legs it is put on.
+  #
+  # `cancel-in-progress: false` because killing a run mid-`imagetools create`
+  # leaves a release half-tagged. Keyed by ref so `main` and a release tag queue
+  # separately.
+  #
+  # This buys interleaving, not ordering; docs/development.md has the rest.
   # ---------------------------------------------------------------------------
 
   meta:
@@ -664,6 +676,9 @@ jobs:
           retention-days: 1
 
   publish:
+    concurrency:
+      group: publish-${{ github.ref }}
+      cancel-in-progress: false
     name: publish image to GHCR and package to hex
     needs: [meta, image-build]
     runs-on: ubuntu-latest

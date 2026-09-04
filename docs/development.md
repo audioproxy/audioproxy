@@ -319,6 +319,87 @@ now land in this table as a red `test` job first.
 > editing the branch-protection rule on `main` in the same breath is part of
 > the change, not a follow-up.
 
+### One publish at a time
+
+`publish` carries a `concurrency:` group keyed by `github.ref`, and it is the
+only job in the workflow that carries one:
+
+```yaml
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+```
+
+A moving tag is shared state. `:edge` moves on every push to `main`, and
+`:latest`/`:X.Y` move on a release; the immutable `:sha-<12>` tags do not,
+because they name their own commit. Without a group, two pushes landing close
+together each stitch their own digests onto those tags and the tag ends up
+naming whichever pipeline finished last. Publishing is a four-job pipeline
+with an artifact round-trip in the middle, so that window is minutes rather
+than seconds.
+
+**Exactly one job may be in the group, and that is a correctness constraint,
+not a cost one.** GitHub allows one *pending* job per concurrency group and
+cancels the previously pending one as soon as another is queued:
+
+> By default, any existing `pending` job or workflow in the same concurrency
+> group will be canceled and the new queued job or workflow will take its
+> place.
+
+`cancel-in-progress: false` buys protection for a job that is already
+*running*, and none at all for one that is queued. So a second job in the group
+gives a single run two ways to want it at once, and the eviction lands on
+whatever is pending — including a newer run's `meta`. Concretely, with the
+group on all four publish-side jobs:
+
+1. Run A's `publish` is running and holds the group. Run B is pushed, and
+   B's `meta` queues and goes pending.
+2. A's `publish` finishes; the first `verify-published` leg takes the group.
+3. The second leg queues, finds the group busy, goes pending — and **evicts
+   B's `meta`**.
+4. B's entire publish half skips. `:edge` stays on A, the older commit.
+
+Which is the bug the group exists to prevent, made deterministic instead of
+merely likely. The same mechanism fires within one run: two `image-build`
+matrix legs resolve to the same group string, so they serialize, and a push
+arriving mid-build cancels the pending leg. One job in the group means at most
+one pending entry per run and nothing to evict — and the verification jobs go
+back to running in parallel, which is where the wall clock lives.
+
+If the temptation is ever to add `verify-published` "so verification is
+serialized too", it cannot be done this way.
+
+**`cancel-in-progress` is `false`, and that is the part worth reading twice.**
+The reflex everywhere else is `true` — superseded work is wasted work — and
+here it would be harmful. Cancelling a run midway through `imagetools create`
+can leave some tags of a release stitched and others not, which is precisely
+the partial state the digest-then-stitch split exists to prevent. A publish
+that has begun is allowed to finish.
+
+Keying by ref rather than by workflow gives one queue for `main` and one per
+release tag: they touch disjoint tag sets and have no reason to wait on each
+other.
+
+**What this does not buy is ordering.** GitHub queues by arrival at the job,
+not by commit date. If run A's arm64 build is slow and run B's hits a warm
+cache, B can reach `publish` first and A second, leaving `:edge` on the older
+commit with the serialization working perfectly. What the group prevents is two
+publishes *interleaving* — a torn set of tags, or a manifest stitched from two
+runs' digests — not a stale one. Making the tag monotonic would mean `publish`
+refusing to move a moving tag backwards, which is a separate change.
+
+Nothing tests any of this. The exclusivity is held by the block comment in
+`ci.yml` and by this section, which is a deliberate choice rather than an
+oversight: what a test could check is that four lines of YAML are present, not
+that the platform schedules them as described, and a regex parser over the
+workflow costs more to keep honest than the property is worth. The reason the
+constraint is written down twice, and at length, is that it reads as a
+tightening — the edit to be afraid of is a well-meant one.
+
+The non-atomicity of a multi-`--tag` `imagetools create` is untouched by any of
+this: a call that fails part-way can move some tags and not others. That is
+inherited from the single-step push and is a different problem.
+
 ---
 
 ## Releases

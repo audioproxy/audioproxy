@@ -19,8 +19,9 @@ defmodule AudioProxy.RequiredChecksTest do
 
   The derivation below is a second, deliberately small implementation of
   GitHub's check naming (`name (leg)`), line-based per the dependency policy
-  rather than a YAML parser. Where it cannot expand a name it raises, because
-  asserting a wrong name is exactly the drift it exists to catch.
+  rather than a YAML parser. Where it cannot answer it raises — an unexpandable
+  name, a block-form `needs:`, an `if:` it cannot classify — because asserting
+  against a job it mis-parsed is exactly the drift it exists to catch.
   """
 
   use ExUnit.Case, async: true
@@ -169,6 +170,12 @@ defmodule AudioProxy.RequiredChecksTest do
   end
 
   defp needs(block) do
+    if Regex.match?(~r/^    needs:\s*$/m, block) do
+      raise "a job writes `needs:` as a block list; this parser reads the inline " <>
+              "form only, and returning no dependencies would silently shrink " <>
+              "every derivation built on it"
+    end
+
     case Regex.run(~r/^    needs: (.+?)\s*$/m, block) do
       nil ->
         []
@@ -192,8 +199,27 @@ defmodule AudioProxy.RequiredChecksTest do
   # `>-` folds the condition across continuation lines, so those are read too.
   defp push_only?(block) do
     case Regex.run(~r/^    if:(.*(?:\n {6}\S.*)*)/m, block) do
-      nil -> false
-      [_match, condition] -> String.contains?(condition, "github.event_name == 'push'")
+      nil ->
+        false
+
+      [_match, condition] ->
+        cond do
+          String.contains?(condition, "github.event_name == 'pull_request'") ->
+            false
+
+          String.contains?(condition, "github.event_name == 'push'") ->
+            true
+
+          String.contains?(condition, "github.event_name != 'pull_request'") ->
+            true
+
+          not String.contains?(condition, "github.event_name") ->
+            false
+
+          true ->
+            raise "a job's `if:` tests github.event_name in a form this guard " <>
+                    "cannot classify: #{String.trim(condition)}"
+        end
     end
   end
 
