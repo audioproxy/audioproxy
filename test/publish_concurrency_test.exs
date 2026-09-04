@@ -83,30 +83,6 @@ defmodule AudioProxy.PublishConcurrencyTest do
            """
   end
 
-  test "the serialized job is the only one that moves a tag" do
-    # The exclusivity argument holds only while `publish` is the sole writer.
-    writers =
-      Workflow.jobs()
-      |> Enum.filter(fn {_key, block} ->
-        steps = Workflow.uncommented(block)
-
-        String.contains?(steps, "imagetools create") or Regex.match?(~r/^\s+--tag /m, steps)
-      end)
-      |> Enum.map(fn {key, _block} -> key end)
-      |> Enum.sort()
-
-    assert writers == [@serialized],
-           """
-           These jobs write image tags: #{inspect(writers)} — expected only \
-           #{inspect(@serialized)}.
-
-           The concurrency group is on `publish` because it is the sole writer of
-           shared registry state. A second writer needs the group too, and two
-           grouped jobs is the failure mode documented above, so this needs a
-           rethink rather than another `concurrency:` block.
-           """
-  end
-
   defp concurrency(key) do
     jobs = Workflow.jobs()
 

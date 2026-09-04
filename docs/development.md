@@ -391,11 +391,13 @@ refusing to move a moving tag backwards, which is a separate change.
 The arrangement is held in place by
 [`test/publish_concurrency_test.exs`](../test/publish_concurrency_test.exs),
 which asserts that `publish` carries the ref-keyed group with
-`cancel-in-progress: false`, that **no other job carries a group at all**, and
-that `publish` is still the only job that writes a tag — the last because the
-exclusivity is only correct while it remains the sole writer. What the guard
-cannot assert is that GitHub honours the key; that is GitHub's behaviour, and
-what is ours is the workflow declaring it.
+`cancel-in-progress: false` and that **no other job carries a group at all** —
+that last one because a second member is the regression, and it reads as a
+tightening. What the guard cannot assert is that GitHub honours the key; that is
+GitHub's behaviour, and what is ours is the workflow declaring it. It also rests
+on `publish` remaining the sole writer of a tag, which is stated here rather than
+tested: a second writer would need the group too, and two members is the failure
+above.
 
 The non-atomicity of a multi-`--tag` `imagetools create` is untouched by any of
 this: a call that fails part-way can move some tags and not others. That is

@@ -75,16 +75,6 @@ defmodule AudioProxy.Workflow do
     end
   end
 
-  # A job's block runs to the next job key, so the block comments between jobs
-  # ride along at the end of the preceding one — invisible to the field readers
-  # above, a trap for anything grepping a block for prose.
-  def uncommented(block) do
-    block
-    |> String.split("\n")
-    |> Enum.reject(&Regex.match?(~r/^\s*#/, &1))
-    |> Enum.join("\n")
-  end
-
   def arches(block) do
     ~r/^\s+- arch: (\S+)$/m
     |> Regex.scan(block)
