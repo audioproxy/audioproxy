@@ -48,6 +48,8 @@ GitHub's `concurrency:` is available at workflow level and at job level. Workflo
   one and leave a moving tag on the older commit. The group prevents two
   publishes *interleaving*; it does not make the tag monotonic. Doing that means
   `publish` refusing to move a tag backwards, which is a separate change.
-- [A future edit adds a second job to the group] → this is the regression the
-  guard is aimed at, because it reads as a tightening. `test/publish_concurrency_test.exs`
-  fails on any second `concurrency:` block in the workflow.
+- [A future edit adds a second job to the group] → the real risk, because it
+  reads as a tightening rather than a regression. Carried by the block comment in
+  `ci.yml` and by `docs/development.md`, not by a test: a guard could assert the
+  YAML is present, never that the platform schedules it as described, and a regex
+  parser over the workflow costs more to keep honest than that buys.

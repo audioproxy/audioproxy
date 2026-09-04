@@ -34,9 +34,8 @@ The race predates `add-multi-arch-images`, which is why it was left out of that 
 
 - Modified: `.github/workflows/ci.yml` (a `concurrency:` block on `publish`, and
   a block comment recording why it stops there), `docs/development.md`.
-- Added: `test/publish_concurrency_test.exs`, and `test/support/workflow.ex` —
-  the `ci.yml` parser lifted out of `test/required_checks_test.exs`, now that a
-  second guard reads the workflow.
+- Modified: `test/required_checks_test.exs` — its `ci.yml` parser stopped
+  guessing at two inputs it could not read, both found by adversarial review.
 - Depends on: `add-multi-arch-images` (the four-job publish pipeline this
   serializes).
 - Deferred: making a moving tag monotonic in commit order. Serialization

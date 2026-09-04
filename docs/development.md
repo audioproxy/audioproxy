@@ -388,16 +388,13 @@ publishes *interleaving* — a torn set of tags, or a manifest stitched from two
 runs' digests — not a stale one. Making the tag monotonic would mean `publish`
 refusing to move a moving tag backwards, which is a separate change.
 
-The arrangement is held in place by
-[`test/publish_concurrency_test.exs`](../test/publish_concurrency_test.exs),
-which asserts that `publish` carries the ref-keyed group with
-`cancel-in-progress: false` and that **no other job carries a group at all** —
-that last one because a second member is the regression, and it reads as a
-tightening. What the guard cannot assert is that GitHub honours the key; that is
-GitHub's behaviour, and what is ours is the workflow declaring it. It also rests
-on `publish` remaining the sole writer of a tag, which is stated here rather than
-tested: a second writer would need the group too, and two members is the failure
-above.
+Nothing tests any of this. The exclusivity is held by the block comment in
+`ci.yml` and by this section, which is a deliberate choice rather than an
+oversight: what a test could check is that four lines of YAML are present, not
+that the platform schedules them as described, and a regex parser over the
+workflow costs more to keep honest than the property is worth. The reason the
+constraint is written down twice, and at length, is that it reads as a
+tightening — the edit to be afraid of is a well-meant one.
 
 The non-atomicity of a multi-`--tag` `imagetools create` is untouched by any of
 this: a call that fails part-way can move some tags and not others. That is

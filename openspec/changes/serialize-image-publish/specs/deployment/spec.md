@@ -32,6 +32,8 @@ the job that writes the tags. The platform permits one pending job per group and
 evicts the previously pending one when another is queued, so a second member
 lets one pipeline contend with itself and evict a newer pipeline's queued work.
 
-#### Scenario: A second job joins the group
-- **WHEN** any job other than the publishing job declares the group
-- **THEN** the build fails, naming the jobs that declare it
+#### Scenario: A second job is proposed for the group
+- **WHEN** a change would add the group to any job other than the publishing job
+- **THEN** it is rejected in review as a regression rather than accepted as a
+  tightening, on the reasoning recorded beside the group and in the development
+  documentation
