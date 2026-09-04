@@ -386,7 +386,8 @@ cache, B can reach `publish` first and A second, leaving `:edge` on the older
 commit with the serialization working perfectly. What the group prevents is two
 publishes *interleaving* — a torn set of tags, or a manifest stitched from two
 runs' digests — not a stale one. Making the tag monotonic would mean `publish`
-refusing to move a moving tag backwards, which is a separate change.
+refusing to move a moving tag backwards, which is the `monotonic-moving-tags`
+change.
 
 Nothing tests any of this. The exclusivity is held by the block comment in
 `ci.yml` and by this section, which is a deliberate choice rather than an

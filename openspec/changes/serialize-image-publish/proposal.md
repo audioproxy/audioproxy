@@ -38,8 +38,8 @@ The race predates `add-multi-arch-images`, which is why it was left out of that 
   guessing at two inputs it could not read, both found by adversarial review.
 - Depends on: `add-multi-arch-images` (the four-job publish pipeline this
   serializes).
-- Deferred: making a moving tag monotonic in commit order. Serialization
-  prevents interleaving, not staleness; see `deployment` spec and
-  `docs/development.md`.
+- Deferred to `monotonic-moving-tags`: making a moving tag monotonic in commit
+  order. Serialization prevents interleaving, not staleness; see the `deployment`
+  spec and `docs/development.md`.
 - Position: OSS, small. Worth doing before the next release rather than after —
   the window is widest on a busy `main`.

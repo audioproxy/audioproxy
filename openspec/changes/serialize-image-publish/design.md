@@ -47,7 +47,7 @@ GitHub's `concurrency:` is available at workflow level and at job level. Workflo
   by arrival at the job, so a run whose build was slow can publish after a newer
   one and leave a moving tag on the older commit. The group prevents two
   publishes *interleaving*; it does not make the tag monotonic. Doing that means
-  `publish` refusing to move a tag backwards, which is a separate change.
+  `publish` refusing to move a tag backwards, which is `monotonic-moving-tags`.
 - [A future edit adds a second job to the group] → the real risk, because it
   reads as a tightening rather than a regression. Carried by the block comment in
   `ci.yml` and by `docs/development.md`, not by a test: a guard could assert the
