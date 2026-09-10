@@ -10,7 +10,7 @@ Point it at your audio and ask for a variant by URL: a 30-second preview, a mono
 
 **Full documentation: [docs.audioproxy.dev](https://docs.audioproxy.dev)**, covering how to render, sign, configure, deploy and observe.
 
-> **Status: early, `v0.7.1`.** Transcoding works end to end and you can try it in about a minute. Sources live on a mounted directory or in S3-compatible object storage; HTTPS sources are designed but not yet rendering, per the roadmap below. With a variant store configured, local or `s3://`, completed renders are kept and served back with `Range` support, so a variant is encoded once rather than per request. See the [Roadmap](#roadmap).
+> **Status: early, `v0.7.2`.** Transcoding works end to end and you can try it in about a minute. Sources live on a mounted directory or in S3-compatible object storage; HTTPS sources are designed but not yet rendering, per the roadmap below. With a variant store configured, local or `s3://`, completed renders are kept and served back with `Range` support, so a variant is encoded once rather than per request. See the [Roadmap](#roadmap).
 
 ## Quick start
 
@@ -21,10 +21,10 @@ docker run --rm -p 4000:4000 \
   -e AP_ALLOW_INSECURE=true \
   -e AP_LOCAL_ROOT=/audio \
   -v /path/to/your/audio:/audio:ro \
-  ghcr.io/audioproxy/audioproxy:0.7.1
+  ghcr.io/audioproxy/audioproxy:0.7.2
 ```
 
-> The image published for `0.7.1` is linux/amd64 only, so Apple Silicon needs `--platform linux/amd64` and runs it under emulation. **From the next release every tag is a manifest list carrying linux/amd64 and linux/arm64**, built and smoke-tested on native hardware, and `docker pull` picks the right one on Graviton, Ampere and Apple Silicon alike.
+> Every tag from `0.7.2` on is a manifest list carrying linux/amd64 and linux/arm64, built and smoke-tested on native hardware, so `docker pull` picks the right one on Graviton, Ampere and Apple Silicon alike, with no `--platform` and no emulation. Tags up to `0.7.1` are amd64 only.
 
 Now ask for a variant, from another shell. `SRC` names a file *relative to the directory you mounted*, so `track.wav` means `/path/to/your/audio/track.wav`:
 
@@ -75,10 +75,10 @@ docker run --rm -p 4000:4000 \
   -e AP_SERVE_MODE=proxy \
   -v /path/to/your/audio:/audio:ro \
   -v audioproxy-cache:/var/cache/audio_proxy \
-  ghcr.io/audioproxy/audioproxy:0.7.1
+  ghcr.io/audioproxy/audioproxy:0.7.2
 ```
 
-**Pin a version.** `:0.7.1` and `:sha-<commit>` name an exact image; `:0.7` follows patch releases; `:latest` and `:edge` move under you. Pinning matters more here than for most services, because a different ffmpeg encodes the same URL to different bytes, which is also why a pin bump always cuts a release. The pinned versions are in [VERSIONS.md](VERSIONS.md).
+**Pin a version.** `:0.7.2` and `:sha-<commit>` name an exact image; `:0.7` follows patch releases; `:latest` and `:edge` move under you. Pinning matters more here than for most services, because a different ffmpeg encodes the same URL to different bytes, which is also why a pin bump always cuts a release. The pinned versions are in [VERSIONS.md](VERSIONS.md).
 
 To run it from a checkout instead, for development or to build your own image:
 
@@ -96,7 +96,7 @@ The proxy is also published to hex as an OTP application (`{:audio_proxy, "~> 0.
 
 No dates. It is built in small releases, each one usable, in roughly this order.
 
-**Working now (`v0.7.1`)**
+**Working now (`v0.7.2`)**
 
 - Signed URLs, the full processing-options grammar, and the cache-key rules
 - Expiring URLs: `exp:<unix-seconds>` time-boxes one URL without rotating the key, and because it is not part of the cache key, minting a fresh short-lived URL per page view still resolves to one render
@@ -111,7 +111,7 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 - `GET /info` for source metadata, `GET /ready` for queue-aware readiness, and a Prometheus `GET /metrics` on a bind-restricted listener of its own
 - Video input refused rather than transcoded, enforced rather than intended
 - Optional CORS (`AP_ALLOW_ORIGIN`), off by default
-- A single container, published per release, and the package on hex
+- A single container, published per release as a manifest list for linux/amd64 and linux/arm64, and the package on hex
 
 **After that:** HTTPS sources, for stores that are not S3.
 
