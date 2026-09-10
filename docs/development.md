@@ -424,8 +424,8 @@ equivalent for anyone who needs one, and it is an image.
 
 The two artifacts cannot disagree about what they contain. The publish job
 asserts `mix.exs` matches the tag before it does anything, and both are built
-from that same commit — so `ghcr.io/audioproxy/audioproxy:0.7.1` and
-`audio_proxy 0.7.1` are the same code by construction, not by discipline.
+from that same commit — so `ghcr.io/audioproxy/audioproxy:0.7.2` and
+`audio_proxy 0.7.2` are the same code by construction, not by discipline.
 
 **The image is published first, then the package, then the docs** — three
 steps, and the order is what makes a partial failure recoverable:
@@ -541,21 +541,6 @@ the cache key is the same, and a warm CDN and a cold one will disagree about
 what they serve until the old objects age out. This section is where such a
 line waits between merging and being cut, and an entry is deleted by the
 release that carries it — an empty section is the normal state.
-
-- **Multi-arch images** (`add-multi-arch-images`). Every tag from this release on
-  is a manifest list carrying `linux/amd64` and `linux/arm64`, so a host that
-  was pulling an amd64 image under emulation starts pulling a native arm64 one
-  without changing anything. The two encode the same URL to bytes that may
-  differ — not audibly, and not in duration or format, but they are not the same
-  bytes — so **a fleet running both architectures against one variant bucket can
-  hold either render under a given cache key**, decided by whichever node
-  rendered first. Nothing re-renders and no URL changes meaning; an operator who
-  hashes variants rather than decoding them needs to know, and one who needs
-  byte-stability pins a single architecture. Checked by `verify-published`,
-  which pulls the primary published tag on each architecture and boots it, and
-  by `ffmpeg-arch-parity`, which holds both architectures to the same ffmpeg.
-  (Every tag is checked for both platforms, by `imagetools inspect` in
-  `publish`; it is the pull-and-boot that takes one tag as the sample.)
 
 **Release notes are claims, and claims name their checks.** Before publishing
 notes, every Highlight must point at the automated check that demonstrates it —
