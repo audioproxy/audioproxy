@@ -1,14 +1,14 @@
 {
   "name": "audio_proxy",
   // A compose project rather than a bare Dockerfile build since add-s3-client:
-  // the :minio suite needs a real S3-compatible store alongside the app, and a
+  // the :garage suite needs a real S3-compatible store alongside the app, and a
   // fake that verified signatures would only be a second SigV4 implementation
   // agreeing with the first. docker-compose.yml has the rest of the reasoning,
-  // including why minio publishes no ports.
+  // including why the store publishes no ports.
   "dockerComposeFile": "docker-compose.yml",
   "service": "app",
-  // Both, and stopped together — a worktree's MinIO should not outlive it.
-  "runServices": ["app", "minio"],
+  // Start and stop both services together. The store stops when its worktree stops.
+  "runServices": ["app", "garage"],
   "workspaceFolder": "/workspaces/audio_proxy",
   "remoteUser": "dev",
   // Deps + compile. Runs once, when the container is first created.

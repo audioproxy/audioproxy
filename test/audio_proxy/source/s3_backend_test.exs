@@ -5,7 +5,7 @@ defmodule AudioProxy.Source.S3BackendTest.Unavailable do
   Every request draws a `503` carrying the XML body S3 sends when it is
   shedding load, so `ex_aws` reports `{:http, 503, _}` — the shape the seam
   must not fold into the blind 404. Injected here rather than provoked out of
-  MinIO because a store cannot be asked to have an outage on cue.
+  Garage because a store cannot be asked to have an outage on cue.
   """
 
   @behaviour Plug
@@ -48,7 +48,7 @@ defmodule AudioProxy.Source.S3BackendTest do
   proven; the binary reading one end to end is the container smoke suite's
   job, where both a store and the shipped ffmpeg exist.
 
-  Tagged `:minio` and excluded by default, failing rather than skipping when
+  Tagged `:garage` and excluded by default, failing rather than skipping when
   the store is missing — see `AudioProxy.S3Test`.
   """
 
@@ -60,10 +60,10 @@ defmodule AudioProxy.Source.S3BackendTest do
   import AudioProxy.SignedRequest, except: [conn: 3]
   import Plug.Test
 
-  alias AudioProxy.{ErrorJSON, S3, TestServer}
+  alias AudioProxy.{ErrorJSON, GarageHelper, S3, TestServer}
   alias AudioProxy.Source.S3, as: SourceS3
 
-  @moduletag :minio
+  @moduletag :garage
   @moduletag timeout: 120_000
 
   @fake_opts AudioProxy.FakeFfmpeg.Router.init([])
@@ -72,9 +72,9 @@ defmodule AudioProxy.Source.S3BackendTest do
   @body "RIFF-fake-wav-bytes"
 
   setup_all do
-    endpoint = URI.parse(System.get_env("AP_TEST_MINIO_ENDPOINT", "http://minio:9000"))
+    endpoint = GarageHelper.endpoint()
 
-    ensure_reachable!(endpoint)
+    GarageHelper.ensure_reachable!(endpoint)
     {:ok, endpoint: endpoint}
   end
 
@@ -90,11 +90,11 @@ defmodule AudioProxy.Source.S3BackendTest do
         source_allowlist: [],
         s3: %{
           region: "us-east-1",
-          access_key_id: "minioadmin",
-          secret_access_key: "minioadmin",
+          access_key_id: GarageHelper.access_key_id(),
+          secret_access_key: GarageHelper.secret_access_key(),
           session_token: nil,
           endpoint: endpoint,
-          # MinIO is reached by hostname and port, so `bucket.minio` would need
+          # Garage is reached by hostname and port, so `bucket.garage` would need
           # DNS nobody configured — same constraint as `AudioProxy.S3Test`.
           addressing: :path,
           ca_bundle: nil
@@ -102,7 +102,7 @@ defmodule AudioProxy.Source.S3BackendTest do
       )
     )
 
-    ensure_bucket!()
+    GarageHelper.ensure_bucket!(@bucket)
     reset_coordinators()
     reset_probes()
 
@@ -220,7 +220,7 @@ defmodule AudioProxy.Source.S3BackendTest do
 
   describe "a store that is down is not a store that is empty" do
     setup do
-      # An injected 5xx: everything MinIO would have answered, answered 503
+      # An injected 5xx: everything Garage would have answered, answered 503
       # instead. `ex_aws` reports it as `{:http, 503, _}`, which is the shape
       # the seam must not fold into the blind 404.
       %{port: port} = TestServer.start!(AudioProxy.Source.S3BackendTest.Unavailable)
@@ -302,46 +302,6 @@ defmodule AudioProxy.Source.S3BackendTest do
   ## Fixture
 
   defp unique_key(name), do: "source-backend/#{System.unique_integer([:positive])}/#{name}"
-
-  defp ensure_bucket! do
-    case @bucket |> ExAws.S3.put_bucket("us-east-1") |> ExAws.request(S3.config()) do
-      {:ok, _response} ->
-        :ok
-
-      {:error, {:http_error, 409, %{body: body}}} ->
-        unless body =~ "BucketAlreadyOwnedByYou" or body =~ "BucketAlreadyExists" do
-          raise "could not create the #{@bucket} bucket: #{body}"
-        end
-
-        :ok
-
-      other ->
-        raise "could not create the #{@bucket} bucket: #{inspect(other)}"
-    end
-  end
-
-  defp ensure_reachable!(endpoint) do
-    url = URI.to_string(%{endpoint | path: "/minio/health/live"})
-
-    case :httpc.request(
-           :get,
-           {String.to_charlist(url), []},
-           [connect_timeout: 2_000, timeout: 5_000],
-           []
-         ) do
-      {:ok, {{_version, status, _reason}, _headers, _body}} when status in 200..299 ->
-        :ok
-
-      other ->
-        raise """
-        MinIO is not reachable at #{URI.to_string(endpoint)} (#{inspect(other)}).
-
-        These tests are tagged :minio and excluded by default; running them
-        requires a store. See docs/development.md, or set
-        AP_TEST_MINIO_ENDPOINT.
-        """
-    end
-  end
 
   defp fetch(url) do
     {:ok, {{_version, status, _reason}, _headers, body}} =

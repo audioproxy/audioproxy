@@ -12,7 +12,7 @@ This page collects working configurations. For what the variables mean, see
 
 ## What is tested and what is not
 
-**MinIO is the only store this project tests against.** The `:minio` suite runs
+**Garage is the only store this project tests against.** The `:garage` suite runs
 in CI and in the devcontainer, and it exercises the same code path most
 providers here use: path-style addressing against a custom endpoint, SigV4
 signing, multipart upload, ranged reads.
@@ -21,8 +21,8 @@ Everything on this page is derived from each provider's own documentation, not
 from a test run against it.
 
 **Virtual-hosted addressing is asserted, not exercised.** Neither Tigris nor
-AWS is reachable from CI, and MinIO is reached by hostname and port, so
-`bucket.minio` would need DNS nobody configured. The suite therefore pins the
+AWS is reachable from CI, and Garage is reached by hostname and port, so
+`bucket.garage` would need DNS nobody configured. The suite therefore pins the
 virtual-hosted decision by inspecting the URL that would go on the wire — for a
 signed request and for a presigned URL, checking that the two agree — rather
 than by fetching anything. That catches a misconfigured addressing style
@@ -45,13 +45,20 @@ endpoint from the environment, creates its own bucket, and cleans up after
 itself:
 
 ```bash
-AP_TEST_MINIO_ENDPOINT=https://s3.fr-par.scw.cloud mix test --only minio
+AP_TEST_GARAGE_ENDPOINT=https://s3.fr-par.scw.cloud mix test --only garage
 ```
 
-It will need credentials in the environment too, and a couple of tests assume
-the `minioadmin` fixture user, so expect to read the failures rather than
+It will need credentials in the environment too, and the tests use the fixed
+key in `AudioProxy.GarageHelper`, so expect to read the failures rather than
 trust a clean pass. It is still the fastest way to find out whether a store
 accepts what we send.
+
+Garage differs from AWS in two places the suite touches, and both are
+tolerated rather than hidden. It answers an expired presigned URL with `400`,
+where AWS and MinIO answer `403`. And it accepts multipart parts below 5 MiB,
+where AWS refuses them with `EntityTooSmall`. So the suite cannot catch a small
+variant going multipart by the store refusing it. The single-`PutObject` test
+checks the ETag shape instead, which holds on any store.
 
 ## Backblaze B2
 
@@ -198,7 +205,7 @@ a provider not listed here.
    than at first render.
 
 No provider on this page is known to diverge on any of the three. That is not
-the same as tested: MinIO is what CI runs against, here as everywhere else on
+the same as tested: Garage is what CI runs against, here as everywhere else on
 this page.
 
 ## Two providers, or two credentials
@@ -261,7 +268,7 @@ provider* above: the boot probe writes and deletes under
 `.audio-proxy-boot-probe/`, so `DeleteObject` is not optional even though
 nothing on the request path deletes anything.
 
-CI exercises this against MinIO for sources and a request-recording endpoint
+CI exercises this against Garage for sources and a request-recording endpoint
 for the store — enough to pin that store requests carry the store's identity
 and go to the store's endpoint, and that a source request is still verified by
 a real store. No two-real-provider combination is tested, here as everywhere

@@ -12,7 +12,7 @@ defmodule AudioProxy.S3Test do
   Those are exactly the things a stub would agree with us about and a store
   will not.
 
-  Tagged `:minio`, excluded by default, and it fails rather than skips when
+  Tagged `:garage`, excluded by default, and it fails rather than skips when
   the store is missing — a green run against nothing is a lie about coverage.
   See `docs/development.md`.
   """
@@ -21,17 +21,17 @@ defmodule AudioProxy.S3Test do
 
   import AudioProxy.ConfigHelper
 
-  alias AudioProxy.S3
+  alias AudioProxy.{GarageHelper, S3}
 
-  @moduletag :minio
+  @moduletag :garage
   @moduletag timeout: 120_000
 
   @bucket "audio-proxy-test"
 
   setup_all do
-    endpoint = URI.parse(System.get_env("AP_TEST_MINIO_ENDPOINT", "http://minio:9000"))
+    endpoint = GarageHelper.endpoint()
 
-    ensure_reachable!(endpoint)
+    GarageHelper.ensure_reachable!(endpoint)
     {:ok, endpoint: endpoint}
   end
 
@@ -40,11 +40,11 @@ defmodule AudioProxy.S3Test do
       presign_ttl: 900,
       s3: %{
         region: "us-east-1",
-        access_key_id: "minioadmin",
-        secret_access_key: "minioadmin",
+        access_key_id: GarageHelper.access_key_id(),
+        secret_access_key: GarageHelper.secret_access_key(),
         session_token: nil,
         endpoint: endpoint,
-        # MinIO is reached by hostname and port; `bucket.minio` would need DNS
+        # Garage is reached by hostname and port; `bucket.garage` would need DNS
         # nobody configured. Which is also why this file cannot cover
         # virtual-hosted addressing — see `AudioProxy.S3AddressingTest`.
         addressing: :path,
@@ -52,7 +52,7 @@ defmodule AudioProxy.S3Test do
       }
     })
 
-    ensure_bucket!()
+    GarageHelper.ensure_bucket!(@bucket)
     :ok
   end
 
@@ -109,7 +109,7 @@ defmodule AudioProxy.S3Test do
 
     test "a multi-part stream round-trips byte-for-byte" do
       # Over the 5 MiB minimum part size, so ex_aws genuinely runs the
-      # multipart protocol and MinIO has to reassemble it.
+      # multipart protocol and Garage has to reassemble it.
       key = unique_key("multipart.bin")
       chunks = for index <- 1..150, do: :binary.copy(<<rem(index, 256)>>, 64_000)
       expected = IO.iodata_to_binary(chunks)
@@ -417,7 +417,11 @@ defmodule AudioProxy.S3Test do
       {:ok, url} = S3.presign_get(@bucket, key, expires_in: 1)
       Process.sleep(1_500)
 
-      assert {403, _body} = fetch(url)
+      {status, _body} = fetch(url)
+
+      assert status in [400, 403],
+             "expected the store to refuse an expired URL, got #{status}. " <>
+               "AWS and MinIO answer 403, Garage 400; the claim is the refusal, not the code"
     end
 
     test "the expiry override wins over AP_PRESIGN_TTL" do
@@ -504,52 +508,6 @@ defmodule AudioProxy.S3Test do
   defp read(key, range \\ nil) do
     assert {:ok, stream} = S3.get_stream(@bucket, key, range)
     stream |> Enum.to_list() |> IO.iodata_to_binary()
-  end
-
-  # 200 the first time; every run after, the store reports the bucket as
-  # already owned. Anything else is a real failure — wrong credentials, a
-  # store that will not accept writes — and is raised here rather than left to
-  # surface as a confusing assertion failure three tests later.
-  defp ensure_bucket! do
-    case @bucket |> ExAws.S3.put_bucket("us-east-1") |> ExAws.request(S3.config()) do
-      {:ok, _response} ->
-        :ok
-
-      {:error, {:http_error, status, %{body: body}}} when status in [409] ->
-        unless body =~ "BucketAlreadyOwnedByYou" or body =~ "BucketAlreadyExists" do
-          raise "could not create the #{@bucket} bucket: #{body}"
-        end
-
-        :ok
-
-      other ->
-        raise "could not create the #{@bucket} bucket: #{inspect(other)}"
-    end
-  end
-
-  # `:httpc` directly, which is also what `AudioProxy.S3.HttpClient` drives —
-  # so a fetch here is the same stack the proxy uses, minus the signing.
-  defp ensure_reachable!(endpoint) do
-    url = URI.to_string(%{endpoint | path: "/minio/health/live"})
-
-    case :httpc.request(
-           :get,
-           {String.to_charlist(url), []},
-           [connect_timeout: 2_000, timeout: 5_000],
-           []
-         ) do
-      {:ok, {{_version, status, _reason}, _headers, _body}} when status in 200..299 ->
-        :ok
-
-      other ->
-        raise """
-        MinIO is not reachable at #{URI.to_string(endpoint)} (#{inspect(other)}).
-
-        These tests are tagged :minio and excluded by default; running them
-        requires a store. See docs/development.md, or set
-        AP_TEST_MINIO_ENDPOINT.
-        """
-    end
   end
 
   defp fetch(url) do

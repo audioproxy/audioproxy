@@ -20,7 +20,7 @@ defmodule AudioProxy.ConfigHelper do
   while the two stored profiles still agree. That is the fallback
   `AudioProxy.Config.build!/1` applies to an environment carrying no
   `AP_VARIANT_S3_*`: unset means the store runs on the source's configuration.
-  Without it, a test that pointed `:s3` at MinIO would have every *store*
+  Without it, a test that pointed `:s3` at Garage would have every *store*
   operation sign with the empty store profile and answer `:not_configured` — a
   break in a test with nothing wrong with it.
 

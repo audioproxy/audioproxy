@@ -3,8 +3,8 @@ defmodule AudioProxy.CapturingStore do
   A second S3 endpoint that answers plausibly and records who asked.
 
   The split-configuration suite needs two *different* endpoints reachable from
-  one test, and the devcontainer runs one MinIO. It also needs to assert
-  something MinIO cannot be asked: **which identity signed each request**. A
+  one test, and the devcontainer runs one Garage. It also needs to assert
+  something Garage cannot be asked: **which identity signed each request**. A
   store that verifies a signature can only say yes or no; this one keeps the
   `Authorization` header, so a test can name the access key that arrived and
   fail on the wrong one.
@@ -16,7 +16,7 @@ defmodule AudioProxy.CapturingStore do
   that produced it. What it proves is *routing and identity*: that store
   requests went to the store's endpoint carrying the store's credential, which
   is exactly the claim a single-endpoint suite cannot make. The signature the
-  source side produces is still verified, by MinIO, in the same test.
+  source side produces is still verified, by Garage, in the same test.
 
   ## Using it
 
@@ -25,7 +25,7 @@ defmodule AudioProxy.CapturingStore do
 
       assert CapturingStore.access_keys() == ["STOREKEYEXAMPLE"]
 
-  Path-style addressing only, for the reason `AudioProxy.MinioHelper` gives:
+  Path-style addressing only, for the reason `AudioProxy.GarageHelper` gives:
   the listener is on `127.0.0.1`, and `bucket.127.0.0.1` is not a name.
   """
 

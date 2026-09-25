@@ -1,14 +1,7 @@
-defmodule AudioProxy.MinioHelper do
+defmodule AudioProxy.GarageHelper do
   @moduledoc """
-  Pointing the config at the MinIO the `:minio` suite runs against, and making
+  Pointing the config at the store the `:garage` suite runs against, and making
   sure a bucket is there.
-
-  `AudioProxy.S3Test` predates this and keeps its own copies — it is the suite
-  that tests the client itself, and its fixtures do more (part listings,
-  multipart inspection) than anything here needs. What this exists for is the
-  suites *above* the client: the variant-store parity run and the end-to-end
-  redirect check, which both want the same three lines of setup and neither of
-  which is about S3 in itself.
 
   Every function raises rather than skipping when the store is absent. A green
   run against nothing is a lie about coverage — see `test/test_helper.exs`.
@@ -18,14 +11,28 @@ defmodule AudioProxy.MinioHelper do
 
   alias AudioProxy.{Config, ConfigHelper, S3}
 
-  @doc "The endpoint the `:minio` suite talks to, defaulting to the devcontainer's."
+  @doc "The endpoint the `:garage` suite talks to, defaulting to the devcontainer's."
   @spec endpoint() :: URI.t()
   def endpoint do
-    URI.parse(System.get_env("AP_TEST_MINIO_ENDPOINT", "http://minio:9000"))
+    URI.parse(System.get_env("AP_TEST_GARAGE_ENDPOINT", "http://garage:3900"))
   end
 
   @doc """
-  Puts the MinIO credentials into the config and proves the store is up.
+  The access key id of the test store.
+
+  **A fixed test value, not a secret.** The devcontainer, CI and
+  `bin/smoke-image` start the store with this value. No code in `lib/` reads
+  it. Garage requires the `GK` + 24 hex format.
+  """
+  @spec access_key_id() :: String.t()
+  def access_key_id, do: "GK000000000000000000000000"
+
+  @doc "The secret for `access_key_id/0`. It is also a fixed test value."
+  @spec secret_access_key() :: String.t()
+  def secret_access_key, do: String.duplicate("0", 64)
+
+  @doc """
+  Puts the store credentials into the config and proves the store is up.
 
   `overrides` is merged over the config afterwards, which is where a caller
   puts its `:variant_store` or a different `:serve_mode`.
@@ -41,11 +48,11 @@ defmodule AudioProxy.MinioHelper do
           presign_ttl: 900,
           s3: %{
             region: "us-east-1",
-            access_key_id: "minioadmin",
-            secret_access_key: "minioadmin",
+            access_key_id: access_key_id(),
+            secret_access_key: secret_access_key(),
             session_token: nil,
             endpoint: endpoint,
-            # MinIO is reached by hostname and port, so `bucket.minio` would
+            # The store is reached by hostname and port, so `bucket.garage` would
             # want DNS nobody configured. Virtual-hosted addressing is
             # `AudioProxy.S3AddressingTest`'s to cover.
             addressing: :path,
@@ -96,10 +103,18 @@ defmodule AudioProxy.MinioHelper do
     {status, headers, body}
   end
 
-  # `:httpc` directly, which is also what `AudioProxy.S3.HttpClient` drives — so
-  # a probe here is the same stack the proxy uses, minus the signing.
-  defp ensure_reachable!(endpoint) do
-    url = URI.to_string(%{endpoint | path: "/minio/health/live"})
+  @doc """
+  Raises an error if nothing answers HTTP at `endpoint`.
+
+  The probe uses `:httpc`. `AudioProxy.S3.HttpClient` uses the same stack, with
+  signatures.
+  """
+  @spec ensure_reachable!(URI.t()) :: :ok
+  def ensure_reachable!(endpoint) do
+    # Any HTTP response shows that a store is listening. Stores refuse unsigned
+    # requests, so the status gives no information. The probe ignores the status.
+    # Thus it works with each provider (docs/s3-providers.md).
+    url = URI.to_string(%{endpoint | path: "/"})
 
     case :httpc.request(
            :get,
@@ -107,16 +122,16 @@ defmodule AudioProxy.MinioHelper do
            [connect_timeout: 2_000, timeout: 5_000],
            []
          ) do
-      {:ok, {{_version, status, _reason}, _headers, _body}} when status in 200..299 ->
+      {:ok, {{_version, _status, _reason}, _headers, _body}} ->
         :ok
 
       other ->
         raise """
-        MinIO is not reachable at #{URI.to_string(endpoint)} (#{inspect(other)}).
+        The S3 store is not reachable at #{URI.to_string(endpoint)} (#{inspect(other)}).
 
-        These tests are tagged :minio and excluded by default; running them
+        These tests are tagged :garage and excluded by default; running them
         requires a store. See docs/development.md, or set
-        AP_TEST_MINIO_ENDPOINT.
+        AP_TEST_GARAGE_ENDPOINT.
         """
     end
   end
