@@ -12,7 +12,7 @@ The consumer evidence is specific rather than general. peaks.js 4.0.0 refuses on
 
 - Make `f:peaks` output directly loadable by peaks.js, through `dataUri` with no client-side conversion.
 - Keep the two widths provably the same waveform, so choosing one is a resolution decision and never a correctness one.
-- Leave every cache key that exists today pointing at the same bytes.
+- Keep the bytes for every existing peaks URL unchanged. The cache key changes once (see Migration Plan).
 
 **Non-Goals:**
 
@@ -44,7 +44,11 @@ The consumer evidence is specific rather than general. peaks.js 4.0.0 refuses on
 
 ## Migration Plan
 
-Nothing to migrate. Every peaks URL rendered before this ships omits `pk_bits`, and the default resolves to the bytes those URLs already produced, so no cached variant is invalidated and no stored object becomes unreachable.
+The default `pk_bits:16` is materialized into the canonical options string, as `ch`, `pts` and `pk_fmt` are under `f:peaks`. That string is the cache-key input, so every peaks cache key changes once when this ships. The bytes behind each URL do not change.
+
+The consequence is a one-time miss per cached peaks variant. The first request after the deploy renders again and writes back under the new key. The objects under the old keys are no longer reachable and stay in the variant bucket until a lifecycle rule or an operator removes them. Peaks objects are small, and a render is a decode and a reduction, so the cost is bounded.
+
+*Alternative considered:* omitting the default from the canonical string, which keeps every existing key. Rejected in favour of one rule for all peaks defaults: a key that is materialized for `ch`, `pts` and `pk_fmt` but omitted for `pk_bits` is an exception that the next option would copy or forget.
 
 The gem cannot emit the new key until its own change lands, and will raise on it meanwhile, which is the correct failure rather than a silent one.
 

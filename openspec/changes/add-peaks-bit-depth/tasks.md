@@ -17,7 +17,7 @@
 - [ ] 3.1 Replace `@bits` with the width carried by the parsed options, so the JSON object reports what it actually contains
 - [ ] 3.2 Narrow the 16-bit pairs at the serialization boundary under `pk_bits:8`, using the rule established in 1.2, clamped to −128..127
 - [ ] 3.3 Replace `@dat_flags` with a value derived from the width, bit 0 set for 8-bit
-- [ ] 3.4 Test that both serializations agree at both widths, and that the 8-bit `dat` body is exactly half the 16-bit body with an identical 24-byte header
+- [ ] 3.4 Test that both serializations agree at both widths, and that the 8-bit `dat` body is exactly half the 16-bit body with a 24-byte header that differs only in the flags field
 - [ ] 3.5 Test that each 8-bit value is its 16-bit counterpart narrowed, so the two widths are one waveform at two resolutions
 
 ## 4. The claim that started this

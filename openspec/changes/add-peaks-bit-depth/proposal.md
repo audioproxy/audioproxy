@@ -36,4 +36,4 @@ None. This extends two existing ones.
 
 **Downstream.** `audioproxy-rails` needs the key in `KEYS` and an alias (`peak_bits`), which is its own change in that repo rather than a note here. Nothing in the gem breaks meanwhile: an unknown key raises there, so the gem simply cannot emit `pk_bits` until it lands.
 
-**Cache.** No existing variant changes. Every URL rendered before this ships omits `pk_bits`, and the default materializes to the same bytes those URLs already produced.
+**Cache.** The bytes behind every existing peaks URL are unchanged. The cache key is not: the default `pk_bits:16` is materialized into the canonical options string, like `ch`, `pts` and `pk_fmt`. Each cached peaks variant therefore misses once after the deploy and renders again under its new key. The old objects stay in the variant bucket until they are removed. The release notes must say so.
