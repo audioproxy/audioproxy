@@ -117,6 +117,7 @@ defmodule AudioProxy.Options do
   @bit_depth_tokens Map.new(@bit_depths, fn {token, atom} -> {atom, token} end)
 
   @peak_formats %{"json" => :json, "dat" => :dat}
+  @peak_bits %{"8" => 8, "16" => 16}
   @peak_format_tokens Map.new(@peak_formats, fn {token, atom} -> {atom, token} end)
 
   # Millisecond precision cap (design): three decimal places, so float
@@ -129,6 +130,7 @@ defmodule AudioProxy.Options do
   @default_peak_count 800
   @default_peak_format :json
   @default_peak_channels 1
+  @default_peak_bits 16
   @default_norm {-16.0, -1.5, 11.0}
 
   # Lossy encoders gain nothing above 48 kHz; §3.1 caps them there.
@@ -151,7 +153,7 @@ defmodule AudioProxy.Options do
 
   # The two classes, as the lists everything else derives from: `normalize/1`
   # walks the variant list, `parse_segment/3` checks membership in the union.
-  @variant_keys ~w(bd br cb ch dl enhance f fade gain norm pk_fmt pts q sr t)
+  @variant_keys ~w(bd br cb ch dl enhance f fade gain norm pk_bits pk_fmt pts q sr t)
   @request_keys ~w(exp)
   @keys Enum.sort(@variant_keys ++ @request_keys)
 
@@ -191,6 +193,7 @@ defmodule AudioProxy.Options do
   @type format :: :mp3 | :opus | :ogg | :aac | :m4a | :flac | :wav | :peaks
   @type bit_depth :: :bd16 | :bd24 | :bd32f
   @type peak_format :: :json | :dat
+  @type peak_bits :: 8 | 16
 
   @typedoc "An enhancement preset: a name for a pinned filter chain."
   @type enhance :: :voice
@@ -226,6 +229,7 @@ defmodule AudioProxy.Options do
           enhance: enhance() | nil,
           peak_count: pos_integer() | nil,
           peak_format: peak_format() | nil,
+          peak_bits: peak_bits() | nil,
           download: String.t() | nil,
           cache_buster: String.t() | nil,
           expires_at: pos_integer() | nil
@@ -246,6 +250,7 @@ defmodule AudioProxy.Options do
             enhance: nil,
             peak_count: nil,
             peak_format: nil,
+            peak_bits: nil,
             download: nil,
             cache_buster: nil,
             expires_at: nil
@@ -285,7 +290,7 @@ defmodule AudioProxy.Options do
   `br` needs a lossy format, and `q` needs a format with a quality scale and a
   value inside that codec's range; `bd` needs
   a lossless format, and `bd:32f` needs `f:wav`; `f:peaks` refuses encoding and
-  loudness options; `pts`/`pk_fmt` need `f:peaks`; `sr` is capped at 48 kHz for
+  loudness options; `pts`/`pk_fmt`/`pk_bits` need `f:peaks`; `sr` is capped at 48 kHz for
   lossy formats; a fade must fit inside a bounded trim, and a fade-out needs
   that trim to be bounded at all.
   """
@@ -326,6 +331,18 @@ defmodule AudioProxy.Options do
   def peak_format(%__MODULE__{peak_format: format}), do: format || @default_peak_format
 
   @doc """
+  The width of each serialized peak value. Meaningful under `f:peaks` only.
+
+  16 by default. `pk_bits:8` exists because peaks.js reads only 8-bit data.
+
+      iex> {:ok, opts} = AudioProxy.Options.parse("f:peaks")
+      iex> AudioProxy.Options.peak_bits(opts)
+      16
+  """
+  @spec peak_bits(t()) :: peak_bits()
+  def peak_bits(%__MODULE__{peak_bits: bits}), do: bits || @default_peak_bits
+
+  @doc """
   How many channels a peaks render reduces.
 
   Unlike every other format, `f:peaks` does not follow the source when `ch` is
@@ -344,7 +361,7 @@ defmodule AudioProxy.Options do
   Renders `opts` as its canonical options string — the cache-key input.
 
   Keys are sorted lexicographically, applicable defaults are materialized
-  (`f`, and `ch`/`pts`/`pk_fmt` under `f:peaks`, and the `norm` targets when
+  (`f`, and `ch`/`pts`/`pk_fmt`/`pk_bits` under `f:peaks`, and the `norm` targets when
   `norm` is present), and numbers are rendered minimally (`30`, not `30.0`).
 
   Only `variant_keys/0` are walked, so a request option is absent from the
@@ -563,6 +580,13 @@ defmodule AudioProxy.Options do
     end
   end
 
+  defp parse_value("pk_bits", value) do
+    case Map.fetch(@peak_bits, value) do
+      {:ok, bits} -> {:ok, peak_bits: bits}
+      :error -> {:error, :invalid_value}
+    end
+  end
+
   # `dl` and `cb` are opaque — still percent-encoded here, and part of the
   # cache key verbatim — but control bytes are refused: see @control_char_re.
   # The first request option (see "Two classes of option"). A timestamp in the
@@ -744,6 +768,7 @@ defmodule AudioProxy.Options do
     cond do
       opts.peak_count -> peaks_only_error("pts", opts)
       opts.peak_format -> peaks_only_error("pk_fmt", opts)
+      opts.peak_bits -> peaks_only_error("pk_bits", opts)
       true -> :ok
     end
   end
@@ -883,6 +908,13 @@ defmodule AudioProxy.Options do
   defp render_key("pk_fmt", opts) do
     "pk_fmt:" <> Map.fetch!(@peak_format_tokens, opts.peak_format)
   end
+
+  defp render_key("pk_bits", %{format: :peaks} = opts) do
+    "pk_bits:" <> Integer.to_string(peak_bits(opts))
+  end
+
+  defp render_key("pk_bits", %{peak_bits: nil}), do: nil
+  defp render_key("pk_bits", opts), do: "pk_bits:" <> Integer.to_string(opts.peak_bits)
 
   defp render_key("dl", %{download: nil}), do: nil
   defp render_key("dl", opts), do: "dl:" <> opts.download

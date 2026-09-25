@@ -176,6 +176,31 @@ defmodule AudioProxy.OptionsTest do
               }} = Options.parse("f:opus/pk_fmt:dat")
     end
 
+    # Refused outside peaks for the reason `pk_fmt` is: the width cannot change
+    # an encoded file, so accepting it would give one output two cache keys.
+    test "pk_bits requires f:peaks" do
+      for {options, segment, related} <- [
+            {"f:mp3/pk_bits:8", "pk_bits:8", "f:mp3"},
+            {"f:wav/pk_bits:16", "pk_bits:16", "f:wav"}
+          ] do
+        assert {:error,
+                %OptionError{segment: ^segment, reason: :requires_peaks_format, related: ^related}} =
+                 Options.parse(options)
+      end
+    end
+
+    test "pk_bits takes 8 or 16 and nothing else" do
+      assert {:ok, %{peak_bits: 8}} = Options.parse("f:peaks/pk_bits:8")
+      assert {:ok, %{peak_bits: 16}} = Options.parse("f:peaks/pk_bits:16")
+
+      for value <- ~w(24 0 x) do
+        segment = "pk_bits:" <> value
+
+        assert {:error, %OptionError{segment: ^segment, reason: :invalid_value}} =
+                 Options.parse("f:peaks/" <> segment)
+      end
+    end
+
     test "sr is capped at 48 kHz for lossy formats only" do
       assert {:error,
               %OptionError{
@@ -310,13 +335,25 @@ defmodule AudioProxy.OptionsTest do
     end
 
     test "materializes the peaks defaults only under f:peaks" do
-      assert Options.normalize_string("f:peaks") == {:ok, "ch:1/f:peaks/pk_fmt:json/pts:800"}
+      assert Options.normalize_string("f:peaks") ==
+               {:ok, "ch:1/f:peaks/pk_bits:16/pk_fmt:json/pts:800"}
+
       assert Options.normalize_string("f:mp3") == {:ok, "f:mp3"}
+    end
+
+    test "the default pk_bits and an explicit pk_bits:16 are one cache key" do
+      assert Options.normalize_string("f:peaks/pts:800") ==
+               Options.normalize_string("f:peaks/pts:800/pk_bits:16")
+
+      assert {:ok, "ch:1/f:peaks/pk_bits:8/pk_fmt:json/pts:800"} =
+               Options.normalize_string("f:peaks/pk_bits:8")
     end
 
     test "the peaks mono default and an explicit ch:1 are one cache key" do
       assert Options.normalize_string("f:peaks") == Options.normalize_string("f:peaks/ch:1")
-      assert {:ok, "ch:2/f:peaks/pk_fmt:json/pts:800"} = Options.normalize_string("f:peaks/ch:2")
+
+      assert {:ok, "ch:2/f:peaks/pk_bits:16/pk_fmt:json/pts:800"} =
+               Options.normalize_string("f:peaks/ch:2")
     end
 
     test "materializes the norm targets when norm is present" do
@@ -477,7 +514,8 @@ defmodule AudioProxy.OptionsTest do
     end
 
     test "the options peaks do respect are still accepted" do
-      assert {:ok, _} = Options.parse("f:peaks/t:10:5/ch:1/pts:2000/pk_fmt:dat/dl:p.json/cb:v2")
+      assert {:ok, _} =
+               Options.parse("f:peaks/t:10:5/ch:1/pts:2000/pk_fmt:dat/pk_bits:8/dl:p.json/cb:v2")
     end
 
     # The rule is "can this option change the picture", not "is it a filter".
@@ -488,7 +526,7 @@ defmodule AudioProxy.OptionsTest do
       assert {:ok, %Options{format: :peaks, enhance: :voice}} =
                Options.parse("f:peaks/enhance:voice")
 
-      assert {:ok, "ch:1/enhance:voice/f:peaks/pk_fmt:json/pts:800"} =
+      assert {:ok, "ch:1/enhance:voice/f:peaks/pk_bits:16/pk_fmt:json/pts:800"} =
                Options.normalize_string("f:peaks/enhance:voice")
     end
 
@@ -502,10 +540,10 @@ defmodule AudioProxy.OptionsTest do
       assert {:ok, %Options{format: :peaks, norm: {-16.0, -1.5, 11.0}}} =
                Options.parse("f:peaks/norm:ebu")
 
-      assert {:ok, "ch:1/f:peaks/gain:-6/pk_fmt:json/pts:800"} =
+      assert {:ok, "ch:1/f:peaks/gain:-6/pk_bits:16/pk_fmt:json/pts:800"} =
                Options.normalize_string("f:peaks/gain:-6")
 
-      assert {:ok, "ch:1/f:peaks/norm:ebu:-16:-1.5:11/pk_fmt:json/pts:800"} =
+      assert {:ok, "ch:1/f:peaks/norm:ebu:-16:-1.5:11/pk_bits:16/pk_fmt:json/pts:800"} =
                Options.normalize_string("f:peaks/norm:ebu")
     end
   end

@@ -1,16 +1,16 @@
 ## 1. Establish the compatibility target
 
-- [ ] 1.1 Generate a reference fixture with `audiowaveform -b 8` and `-b 16` from one of the test sources, and record its header bytes and first pairs in the test that will pin them
-- [ ] 1.2 Determine audiowaveform's own narrowing rule for negative values (truncate toward zero versus arithmetic shift) by comparing the two fixtures, and write it down in the test rather than in a comment
-- [ ] 1.3 Confirm whether the version-2 flags field carries anything besides bit 0, so the field is written deliberately once it stops being a constant
+- [x] 1.1 Generate a reference fixture with `audiowaveform -b 8` and `-b 16` from one of the test sources, and record its header bytes and first pairs in the test that will pin them
+- [x] 1.2 Determine audiowaveform's own narrowing rule for negative values (truncate toward zero versus arithmetic shift) by comparing the two fixtures, and write it down in the test rather than in a comment
+- [x] 1.3 Confirm whether the version-2 flags field carries anything besides bit 0, so the field is written deliberately once it stops being a constant
 
 ## 2. Options
 
-- [ ] 2.1 Add `pk_bits` to the parser with values `8` and `16`, defaulting to `16`
-- [ ] 2.2 Materialize the default into the normalized options string, as `ch` is materialized for peaks, so the segment's presence cannot split one variant across two cache keys
-- [ ] 2.3 Refuse `pk_bits` on every format other than `f:peaks`, reporting the peaks rule rather than an incidental format rule
-- [ ] 2.4 Property-test the round trip: parse → normalize → cache key → identical ffmpeg args and identical serialization, for both widths
-- [ ] 2.5 Correct the stale `processing-options` scenario that lists `gain` and `norm` among the options refused under `f:peaks`, and add a test proving both are accepted, since the master spec and the implementation currently disagree
+- [x] 2.1 Add `pk_bits` to the parser with values `8` and `16`, defaulting to `16`
+- [x] 2.2 Materialize the default into the normalized options string, as `ch` is materialized for peaks, so the segment's presence cannot split one variant across two cache keys
+- [x] 2.3 Refuse `pk_bits` on every format other than `f:peaks`, reporting the peaks rule rather than an incidental format rule
+- [x] 2.4 Property-test the round trip: parse → normalize → cache key → identical ffmpeg args and identical serialization, for both widths
+- [x] 2.5 Correct the stale `processing-options` scenario that lists `gain` and `norm` among the options refused under `f:peaks`, and add a test proving both are accepted, since the master spec and the implementation currently disagree
 
 ## 3. Serialization
 
@@ -29,7 +29,7 @@
 
 - [ ] 5.1 Update `docs/audio-proxy-api-v1.md` §3.3 with the `pk_bits` row, the default, and the cache-key materialization
 - [ ] 5.2 Correct §3.3's statement that `bits` is always 16
-- [ ] 5.3 Add the `pk_bits` row to the `llms-full.txt` options table, which `test/llms_docs_test.exs` compares against `AudioProxy.Options.keys/0` and which will fail until it is there
+- [x] 5.3 Add the `pk_bits` row to the `llms-full.txt` options table, which `test/llms_docs_test.exs` compares against `AudioProxy.Options.keys/0` and which will fail until it is there
 - [ ] 5.4 Fix the false claim in `llms-full.txt` that peaks output "drops straight into peaks.js", which is what this change makes true and is currently not
 - [ ] 5.5 Note in the release notes debt section that the documentation site's peaks guide is now behind, and open the drift issue there rather than editing it from here
 

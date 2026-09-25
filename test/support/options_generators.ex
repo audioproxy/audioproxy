@@ -205,9 +205,10 @@ defmodule AudioProxy.OptionsGenerators do
   defp peaks("peaks") do
     gen all(
           count <- maybe(map(integer(1..8_000), &["pts:#{&1}"])),
-          peak_format <- maybe(map(member_of(~w(json dat)), &["pk_fmt:#{&1}"]))
+          peak_format <- maybe(map(member_of(~w(json dat)), &["pk_fmt:#{&1}"])),
+          peak_bits <- maybe(map(member_of(~w(8 16)), &["pk_bits:#{&1}"]))
         ) do
-      count ++ peak_format
+      count ++ peak_format ++ peak_bits
     end
   end
 
