@@ -27,10 +27,10 @@
 
 ## 5. Contract and documentation
 
-- [ ] 5.1 Update `docs/audio-proxy-api-v1.md` §3.3 with the `pk_bits` row, the default, and the cache-key materialization
-- [ ] 5.2 Correct §3.3's statement that `bits` is always 16
+- [x] 5.1 Update `docs/audio-proxy-api-v1.md` §3.3 with the `pk_bits` row, the default, and the cache-key materialization
+- [x] 5.2 Correct §3.3's statement that `bits` is always 16
 - [x] 5.3 Add the `pk_bits` row to the `llms-full.txt` options table, which `test/llms_docs_test.exs` compares against `AudioProxy.Options.keys/0` and which will fail until it is there
-- [ ] 5.4 Fix the false claim in `llms-full.txt` that peaks output "drops straight into peaks.js", which is what this change makes true and is currently not
+- [x] 5.4 Fix the false claim in `llms-full.txt` that peaks output "drops straight into peaks.js", which is what this change makes true and is currently not
 - [ ] 5.5 Note in the release notes debt section that the documentation site's peaks guide is now behind, and open the drift issue there rather than editing it from here
 
 ## 6. Downstream

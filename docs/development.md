@@ -551,6 +551,18 @@ what they serve until the old objects age out. This section is where such a
 line waits between merging and being cut, and an entry is deleted by the
 release that carries it — an empty section is the normal state.
 
+- **Every peaks cache key changes once (`add-peaks-bit-depth`).** The new
+  `pk_bits` option materializes its default, `pk_bits:16`, into the canonical
+  options string. So every `f:peaks` URL has a new cache key, although its bytes
+  do not change. Each cached peaks variant misses once after the upgrade and
+  renders again. The objects under the old keys stay in the variant bucket until
+  a lifecycle rule or an operator removes them. *What bumps what* makes a
+  cache-key change major, but this one ships in a minor release: no deployment
+  had a peaks cache to orphan when it merged. Check: `AudioProxy.OptionsTest`,
+  "the default pk_bits and an explicit pk_bits:16 are one cache key". Also note
+  that `pk_bits:8` makes peaks output loadable by peaks.js, checked byte for
+  byte against audiowaveform in `AudioProxy.PeaksEndpointFfmpegTest`.
+
 **Release notes are claims, and claims name their checks.** Before publishing
 notes, every Highlight must point at the automated check that demonstrates it —
 a smoke assertion, a tagged suite, a named test. A feature no check exercises

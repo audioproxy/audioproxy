@@ -172,7 +172,7 @@ Four rules to build against:
 
 ### Waveform peaks
 
-`f:peaks` returns [audiowaveform](https://github.com/bbc/audiowaveform)-compatible data, so it drops straight into peaks.js. `pk_fmt:json` is `application/json`:
+`f:peaks` returns [audiowaveform](https://github.com/bbc/audiowaveform)-compatible data. peaks.js reads only 8-bit data, so a URL for peaks.js adds `pk_bits:8`, and then the response loads directly through its `dataUri` or `waveformData` options. `pk_fmt:json` is `application/json`:
 
 ```json
 {
@@ -186,9 +186,9 @@ Four rules to build against:
 }
 ```
 
-`data` holds `length × 2 × channels` signed 16-bit integers: a minimum and a maximum per pixel per channel, interleaved. `bits` is always 16 and `length` always exactly `pts`. `pk_fmt:dat` is the same numbers as `application/octet-stream` — audiowaveform's binary layout, a little-endian header of version, flags, sample rate, samples-per-pixel, length and channel count, then the values as `int16`. It is roughly a fifth the size.
+`data` holds `length × 2 × channels` signed integers of the width `bits` names: a minimum and a maximum per pixel per channel, interleaved. `bits` is 16 by default and 8 under `pk_bits:8`, where each value is the 16-bit value divided by 256 and truncated toward zero. `length` is always exactly `pts`. `pk_fmt:dat` is the same numbers as `application/octet-stream`: audiowaveform's binary layout, a little-endian header of version, flags, sample rate, samples-per-pixel, length and channel count, then the values as `int16`, or `int8` under `pk_bits:8` (flags is then 1). It is roughly a fifth the size.
 
-Peaks respect `t`, `ch` and `fade` and ignore everything about encoding. Pick `pts` to match the pixel width you will draw at.
+Peaks respect `t`, `ch`, `fade`, `gain`, `norm` and `enhance`, and refuse `br`, `q`, `sr` and `bd` with a `422`. Pick `pts` to match the pixel width you will draw at.
 
 ## Cache keys
 
