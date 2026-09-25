@@ -278,6 +278,12 @@ defmodule AudioProxy.PeaksTest do
       assert Peaks.new(10, narrow, 8_000) |> Peaks.finish() |> Map.fetch!(:bits) == 8
     end
 
+    test "any other width is refused when the reducer is built" do
+      assert_raise ArgumentError, ~r/bits must be 8 or 16, got: 7/, fn ->
+        Peaks.new(10, count: 2, bits: 7)
+      end
+    end
+
     test "carries the probed sample rate into the output" do
       {:ok, opts} = Options.parse("f:peaks")
 

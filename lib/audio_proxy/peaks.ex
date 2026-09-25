@@ -76,7 +76,7 @@ defmodule AudioProxy.Peaks do
   @type result :: %{
           version: 2,
           channels: 1 | 2,
-          sample_rate: pos_integer(),
+          sample_rate: non_neg_integer(),
           samples_per_pixel: pos_integer(),
           bits: 8 | 16,
           length: pos_integer(),
@@ -115,6 +115,13 @@ defmodule AudioProxy.Peaks do
   def new(frames, opts) when is_integer(frames) and frames >= 0 do
     count = Keyword.fetch!(opts, :count)
     channels = Keyword.get(opts, :channels, 1)
+    bits = Keyword.get(opts, :bits, 16)
+
+    # Fail here, not in finish/1, where the cause is far from the call.
+    unless bits in [8, 16] do
+      raise ArgumentError, "bits must be 8 or 16, got: #{inspect(bits)}"
+    end
+
     # At least one: a source shorter than `pts` frames still gets one frame per
     # pixel, and the pixels past its end are the padding described above.
     samples_per_pixel = max(ceil_div(frames, count), 1)
@@ -124,7 +131,7 @@ defmodule AudioProxy.Peaks do
       channels: channels,
       sample_rate: Keyword.get(opts, :sample_rate, 0),
       samples_per_pixel: samples_per_pixel,
-      bits: Keyword.get(opts, :bits, 16),
+      bits: bits,
       acc: empty(channels),
       remaining: samples_per_pixel
     }

@@ -346,15 +346,30 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
 
       assert for(<<v::little-signed-8 <- first>>, do: v) == [-47, 47, -47, 47, -47, 47, -47, 47]
       assert byte_size(body) == 24 + 100 * 2 * 2
-      assert sha256(body) == @reference_8_sha256
+      assert sha256(body) == @reference_8_sha256, reference_drift_message(8)
     end
 
     test "the 16-bit dat is byte-identical to audiowaveform's own -b 16 output", %{port: port} do
       body = "/pk_bits:16" |> reference_path() |> render(port) |> body()
 
       assert byte_size(body) == 24 + 100 * 2 * 2 * 2
-      assert sha256(body) == @reference_16_sha256
+      assert sha256(body) == @reference_16_sha256, reference_drift_message(16)
     end
+  end
+
+  defp reference_drift_message(bits) do
+    """
+    The pk_bits:#{bits} dat no longer matches audiowaveform's pinned output.
+
+    If the 8-bit and the 16-bit tests both fail, the source changed: a new
+    ffmpeg build generates reference.wav differently. That is a pin bump, not
+    a pk_bits bug. Regenerate both references from the new reference.wav with
+    the audiowaveform command in the comment above @reference_8_sha256, and
+    update both digests.
+
+    If only the 8-bit test fails, the narrowing is wrong. The 16-bit output
+    still matches audiowaveform, so the defect is in the 8-bit path.
+    """
   end
 
   describe "peaks in the cache" do
