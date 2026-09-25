@@ -188,6 +188,17 @@ signature verification plug → options parser (options string = normalized cach
 - **Typing:** Elixir ≥ 1.20 — the built-in set-theoretic checker plus `mix compile --warnings-as-errors` in CI is the type gate; no Dialyzer/dialyxir. Write `@type t` / `@spec` on public seams only (`Options`, `Source`, `Signature`, `Command`, the `S3` behaviour) for ExDoc/LSP; skip private plumbing. Migrate to native typed structs/contracts when they land (1.21+).
 - **A comment explains why; the code already says what.** Before writing one, ask whether a competent reader gets it from the code — if so, delete it. ``# Indent 4 exactly, so step-level `name:` lines never match`` earns its place; `# Job keys sit at indent 2, everything until the next key is that job's block` does not. The failure mode is not clutter, it is drift: a comment that narrates the code becomes a second copy of the documentation, ages against it, and is believed. `serialize-image-publish` shipped 30 lines of block comment above the publish jobs, a 35-line moduledoc and a paragraph over every parser function, all of it re-stating `docs/development.md` and the function bodies; cut to why-only it came to 11 lines, 15, and a line each, and nothing was lost. **The long-form argument lives in `docs/`, and the comment points there** — one line naming the reason, then the file.
 
+  **Write comments in ASD-STE100 Simplified Technical English.** The rules that matter most here:
+
+  - Write a maximum of 20 words in a sentence. Write only one topic in each sentence.
+  - Use the active voice and the present tense.
+  - Use one word for one meaning. Use the same word for the same thing every time.
+  - Do not use idioms, metaphors, phrasal verbs or rhetorical questions.
+  - Write full sentences with articles. Do not use semicolons or dashes to join two statements. Write two sentences.
+  - Technical names (module names, flags, config keys, status codes) are permitted as they are.
+
+  `# Garage returns 400 for an expired URL. AWS and MinIO return 403.` is correct. `# Garage, as it happens, has its own opinion about which 4xx an expired URL deserves.` is not. The rule applies to comments, moduledocs and `@doc`. It does not apply to assertion and `raise` messages. Those messages can use the words that they need (see below).
+
   Two things this rule does not touch. **An assertion or `raise` message is output, not a comment**, and is read by someone with no context at the moment it fires; those stay as long as they need to be, and this project's guards deliberately spend words there. And **a moduledoc still states the module's reason for existing** — why it is shared, what it must not become — because that is exactly the why nothing else records.
 
 - **Slices are sized for review.** Target well under ~500 changed LOC per PR, tests included — the slices merged so far ran past 1000, which is too much to review confidently. When planning, prefer more, smaller changes split along module seams (contract vs. backends, mechanism vs. HTTP wiring, happy path vs. hardening). When implementing, a change heading past the target gets split or lands as stacked PRs rather than growing the diff.
