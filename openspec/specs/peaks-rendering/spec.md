@@ -10,8 +10,9 @@ min/max pairs, so the PCM — tens of megabytes for a long source — is folded
 chunk by chunk and dropped rather than retained.
 
 The wire formats are [audiowaveform](https://github.com/bbc/audiowaveform)'s
-JSON and `.dat`, adopted outright so peaks.js and that ecosystem read the
-response as it comes off the wire. Because bucket boundaries are a function of
+JSON and `.dat`, adopted outright so that ecosystem reads the response as it
+comes off the wire. peaks.js reads only the 8-bit form, which `pk_bits:8`
+selects. Because bucket boundaries are a function of
 the total sample count, a peaks render is a leading `ffprobe` *and then* a
 decode; it shares `source-info`'s probe argv and contract mapping, so the
 duration the proxy reports and the duration it buckets by cannot drift.
@@ -36,20 +37,32 @@ The system SHALL reduce `f:peaks` from the decoded samples of the variant the sa
 - **THEN** the request is refused with `422` naming the segment, because an option that cannot change the picture would hand one result two cache keys
 
 ### Requirement: JSON peaks output
-The system SHALL serve `pk_fmt:json` (default) as an audiowaveform-compatible JSON object: `version`, `channels`, `sample_rate`, `samples_per_pixel`, `bits`, `length`, and interleaved min/max integer `data`. `bits` SHALL always be 16.
+The system SHALL serve `pk_fmt:json` (default) as an audiowaveform-compatible JSON object: `version`, `channels`, `sample_rate`, `samples_per_pixel`, `bits`, `length`, and interleaved min/max integer `data`. `bits` SHALL report the value of `pk_bits`, which defaults to 16.
 
 #### Scenario: Schema shape
 - **WHEN** a JSON peaks response is decoded
-- **THEN** all listed fields are present, `length == pts`, and `data` holds `length × 2 × channels` integers within the signed 16-bit range
+- **THEN** all listed fields are present, `length == pts`, and `data` holds `length × 2 × channels` integers within the signed range named by `bits`
+
+#### Scenario: Eight-bit values are reported as such
+- **WHEN** `f:peaks/pk_bits:8` is requested
+- **THEN** the object reports `bits: 8` and every value in `data` lies within −128..127, so a reader that validates the field against the data is not lied to
 
 ### Requirement: Binary peaks output
-The system SHALL serve `pk_fmt:dat` as the compact binary format: audiowaveform's version-2 `.dat` layout, a little-endian header of version, flags, sample rate, samples-per-pixel, length and channel count, followed by `int16` min/max pairs.
+The system SHALL serve `pk_fmt:dat` as the compact binary format: audiowaveform's version-2 `.dat` layout, a little-endian header of version, flags, sample rate, samples-per-pixel, length and channel count, followed by min/max pairs whose width follows `pk_bits` — `int16` by default, `int8` under `pk_bits:8`.
 
-The 8-bit variant the format permits SHALL NOT be offered: it would be a second cache key for a coarser picture of the same audio.
+The header's flags field SHALL carry the width the way audiowaveform's own format does, so a reader that already handles both widths needs no out-of-band knowledge of which one it was given.
 
 #### Scenario: Round-trip consistency
 - **WHEN** the same variant is rendered as `json` and `dat`
 - **THEN** decoding the binary yields the same pair values as the JSON `data`, and the header fields match their JSON counterparts
+
+#### Scenario: Eight-bit binary is half the payload
+- **WHEN** the same `pts` and `ch` are rendered as `pk_bits:16` and `pk_bits:8` in `dat`
+- **THEN** both carry a 24-byte header that differs only in the flags field (1 for 8-bit, 0 for 16-bit), and the 8-bit body is exactly half the size of the 16-bit body
+
+#### Scenario: The narrower picture is a reduction of the wider one
+- **WHEN** the same variant is rendered at both widths
+- **THEN** each 8-bit value equals its 16-bit counterpart scaled down by 256 and clamped to the signed 8-bit range, so the two are the same waveform at two resolutions rather than two independent reductions
 
 ### Requirement: A source no waveform can be drawn from is refused
 The system SHALL answer **415** when the probe succeeds but describes something unpeakable — a source with no audio stream, or one whose duration cannot be determined — rather than reporting a server failure for a condition that is permanent and belongs to the source.

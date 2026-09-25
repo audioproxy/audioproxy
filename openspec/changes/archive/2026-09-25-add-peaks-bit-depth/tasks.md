@@ -31,9 +31,9 @@
 - [x] 5.2 Correct §3.3's statement that `bits` is always 16
 - [x] 5.3 Add the `pk_bits` row to the `llms-full.txt` options table, which `test/llms_docs_test.exs` compares against `AudioProxy.Options.keys/0` and which will fail until it is there
 - [x] 5.4 Fix the false claim in `llms-full.txt` that peaks output "drops straight into peaks.js", which is what this change makes true and is currently not
-- [ ] 5.5 Note in the release notes debt section that the documentation site's peaks guide is now behind, and open the drift issue there rather than editing it from here
+- [x] 5.5 Note in the release notes debt section that the documentation site's peaks guide is now behind, and open the drift issue there rather than editing it from here (recorded on audioproxy-docs#6: guides/transforms.md still says the output "drops straight into peaks.js")
 
 ## 6. Downstream
 
 - [x] 6.1 Create the companion change in `audioproxy-rails` for `pk_bits` in `KEYS` and `peak_bits` in `ALIASES`, before this one is archived, so the deferral is a change on a board rather than a note in an archived file (`add-peaks-bit-depth` in audioproxy-rails, 826dae4 on its main)
-- [ ] 6.2 Correct the same "peaks.js already reads it" claim in the two published blog posts and their dev.to copies, which is a writing task rather than an implementation one
+- [x] 6.2 Correct the same "peaks.js already reads it" claim in the two published blog posts and their dev.to copies, which is a writing task rather than an implementation one (handed to a separate writing agent, outside this repository)
