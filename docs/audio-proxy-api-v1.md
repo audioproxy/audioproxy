@@ -130,11 +130,14 @@ The gate does not run on a cache hit, because a hit is immutable bytes that alre
 |---|---|---|
 | `pts` | integer | Number of min/max pairs (default 800) |
 | `pk_fmt` | `json` \| `dat` | JSON or compact binary; both are [audiowaveform](https://github.com/bbc/audiowaveform)'s formats (default `json`) |
+| `pk_bits` | `8` \| `16` | Width of each value (default `16`). peaks.js reads only 8-bit data, so a peaks.js client asks for `pk_bits:8`. The default is materialized into the cache key |
 | `ch` | `1` \| `2` | **Default 1**, unlike every other format — peaks downmix rather than follow the source. `ch:2` gives per-channel pairs. The default is materialized into the cache key |
 
 Peaks respect `t`, `ch`, `fade`, `enhance`, `gain` and `norm`: a waveform is drawn under the audio a listener hears, so anything that changes the samples changes the picture. The rule is exactly that question, and the options it refuses are the ones that cannot answer yes — `br`, `q` and `bd` are encoder settings and peaks are never encoded, and `sr` cannot move a pixel either, because bucket boundaries are a fraction of the total sample count rather than a duration. Each is a `422` naming the segment, rather than being ignored: an option that cannot change the output would hand one result two cache keys. Cheap enough to render eagerly alongside any audio variant later, but v1 renders on request.
 
-Both serializations carry the same numbers: `version` 2, `channels`, `sample_rate`, `samples_per_pixel`, `bits` (always 16), `length` (always exactly `pts`), and `length × 2 × channels` signed 16-bit values — a minimum and a maximum per pixel per channel, interleaved. `pk_fmt:json` is `application/json` with those field names; `pk_fmt:dat` is `application/octet-stream`, a little-endian header of version, flags, sample rate, samples-per-pixel, length and channel count, then the values as `int16`.
+Both serializations carry the same numbers: `version` 2, `channels`, `sample_rate`, `samples_per_pixel`, `bits` (the value of `pk_bits`), `length` (always exactly `pts`), and `length × 2 × channels` signed values of that width, a minimum and a maximum per pixel per channel, interleaved. `pk_fmt:json` is `application/json` with those field names; `pk_fmt:dat` is `application/octet-stream`, a little-endian header of version, flags, sample rate, samples-per-pixel, length and channel count, then the values as `int16`, or as `int8` under `pk_bits:8`. The flags field is 1 for 8-bit values and 0 for 16-bit values, as in audiowaveform's own format.
+
+The two widths are one waveform at two resolutions. The reduction always runs at 16 bits, and each 8-bit value is its 16-bit counterpart divided by 256, truncated toward zero. That is the rule `audiowaveform -b 8` uses, and a `pk_bits:8` render of a given source is byte-identical to audiowaveform's own 8-bit file.
 
 Peaks are a *format*, so they participate in the cache key, the write-back and the HIT redirect exactly as audio variants do.
 

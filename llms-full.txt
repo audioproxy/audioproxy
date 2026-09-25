@@ -116,6 +116,7 @@ Options are `/`-separated `key:value` segments between the signature and the sou
 | `norm` | `ebu[:I[:TP[:LRA]]]` | EBU R128 loudness normalization. Targets default to `-16:-1.5:11`; ranges are I −70–−5, TP −9–0, LRA 1–50. Emits a resample back to the source's rate, because single-pass `loudnorm` outputs 192 kHz; the rate of the variant is therefore unchanged. Single-pass: good for previews, not for masters |
 | `enhance` | `voice` | Enhancement preset: high-pass, denoise, de-ess, compress, limit — applied ahead of every other filter, and peak-limited so the preset cannot clip a source that did not. Independent of `norm`, and the two combine. A preset value is pinned to its chain forever — see *Presets are pinned* |
 | `pts` | integer, 1–100000 | Peaks only: number of min/max pairs. Default `800` |
+| `pk_bits` | `8` \| `16` | Peaks only: width of each value. Default `16`. Use `8` for peaks.js |
 | `pk_fmt` | `json` \| `dat` | Peaks only: serialization. Default `json` |
 | `dl` | filename | Sets `Content-Disposition: attachment`. Opaque, kept percent-encoded, control bytes refused |
 | `cb` | opaque string | Cache-buster; participates in the cache key. Control bytes refused |
@@ -135,7 +136,7 @@ Each is a `422` naming the offending segment:
 - `br` requires a lossy format (`mp3`, `opus`, `ogg`, `aac`, `m4a`).
 - `q` requires a format whose encoder has a quality scale, and a value inside that codec's range.
 - `bd` requires a lossless format (`flac`, `wav`); `bd:32f` requires `f:wav`.
-- `pts` and `pk_fmt` require `f:peaks`.
+- `pts`, `pk_fmt` and `pk_bits` require `f:peaks`.
 - `f:peaks` refuses `br`, `q`, `bd` and `sr` — peaks are computed from the decoded source, so an option that cannot change the picture would hand identical bytes two cache keys. `br`, `q` and `bd` are encoder settings and peaks are never encoded; `sr` cannot move a pixel either, because bucket boundaries are a fraction of the total sample count rather than a duration. Everything that *does* change the samples applies: `t`, `ch`, `fade`, `enhance`, `gain` and `norm`, so a waveform matches the audio playing under it.
 - `enhance` takes a name from a closed vocabulary (`voice` today). Anything else — including a name a future release might mint, like `voice2` — is refused rather than passed through.
 - `sr` above 48000 is refused for lossy formats.
@@ -171,7 +172,7 @@ Four rules to build against:
 
 ### Waveform peaks
 
-`f:peaks` returns [audiowaveform](https://github.com/bbc/audiowaveform)-compatible data, so it drops straight into peaks.js. `pk_fmt:json` is `application/json`:
+`f:peaks` returns [audiowaveform](https://github.com/bbc/audiowaveform)-compatible data. peaks.js reads only 8-bit data, so a URL for peaks.js adds `pk_bits:8`, and then the response loads directly through its `dataUri` or `waveformData` options. `pk_fmt:json` is `application/json`:
 
 ```json
 {
@@ -185,9 +186,9 @@ Four rules to build against:
 }
 ```
 
-`data` holds `length × 2 × channels` signed 16-bit integers: a minimum and a maximum per pixel per channel, interleaved. `bits` is always 16 and `length` always exactly `pts`. `pk_fmt:dat` is the same numbers as `application/octet-stream` — audiowaveform's binary layout, a little-endian header of version, flags, sample rate, samples-per-pixel, length and channel count, then the values as `int16`. It is roughly a fifth the size.
+`data` holds `length × 2 × channels` signed integers of the width `bits` names: a minimum and a maximum per pixel per channel, interleaved. `bits` is 16 by default and 8 under `pk_bits:8`, where each value is the 16-bit value divided by 256 and truncated toward zero. `length` is always exactly `pts`. `pk_fmt:dat` is the same numbers as `application/octet-stream`: audiowaveform's binary layout, a little-endian header of version, flags, sample rate, samples-per-pixel, length and channel count, then the values as `int16`, or `int8` under `pk_bits:8` (flags is then 1). It is roughly a fifth the size.
 
-Peaks respect `t`, `ch` and `fade` and ignore everything about encoding. Pick `pts` to match the pixel width you will draw at.
+Peaks respect `t`, `ch`, `fade`, `gain`, `norm` and `enhance`, and refuse `br`, `q`, `sr` and `bd` with a `422`. Pick `pts` to match the pixel width you will draw at.
 
 ## Cache keys
 
@@ -195,7 +196,7 @@ Peaks respect `t`, `ch` and `fade` and ignore everything about encoding. Pick `p
 lowercase-hex(SHA-256(normalized-options ‖ "\n" ‖ canonical-source))
 ```
 
-Normalization is what makes this deterministic: keys are sorted lexicographically, applicable defaults are materialized (`f` always; the `norm` targets when `norm` is present; `ch`, `pts` and `pk_fmt` under `f:peaks`), and every number is rendered minimally (`30`, never `30.0`). So `f:opus/br:96` and `br:96/f:opus` are one variant with one key, while any genuine difference — `cb` included — yields a different one. `exp` is the one exception, and a deliberate one: it never enters the normalized string, so two URLs differing only in their expiry are one variant.
+Normalization is what makes this deterministic: keys are sorted lexicographically, applicable defaults are materialized (`f` always; the `norm` targets when `norm` is present; `ch`, `pts`, `pk_fmt` and `pk_bits` under `f:peaks`), and every number is rendered minimally (`30`, never `30.0`). So `f:opus/br:96` and `br:96/f:opus` are one variant with one key, while any genuine difference — `cb` included — yields a different one. `exp` is the one exception, and a deliberate one: it never enters the normalized string, so two URLs differing only in their expiry are one variant.
 
 Normalization is syntactic, not semantic: `t:0`, `fade:0:0` and `gain:0` are identity renders that keep their own keys, and therefore cost duplicate cache objects.
 

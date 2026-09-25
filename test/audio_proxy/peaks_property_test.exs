@@ -52,6 +52,43 @@ defmodule AudioProxy.PeaksPropertyTest do
     end
   end
 
+  # The narrow picture is the wide one, narrowed. It is never a second,
+  # independent reduction. Thus choosing a width is a resolution decision only.
+  property "8-bit peaks are the 16-bit peaks divided by 256, truncated" do
+    check all(
+            samples <- list_of(integer(-32_768..32_767), min_length: 1, max_length: 200),
+            channels <- member_of([1, 2]),
+            count <- integer(1..64)
+          ) do
+      frames = div(length(samples), channels)
+      opts = [count: count, channels: channels]
+
+      wide = reduce([pcm_of(samples)], frames, opts)
+      narrow = reduce([pcm_of(samples)], frames, [bits: 8] ++ opts)
+
+      assert narrow.bits == 8
+      assert narrow.data == Enum.map(wide.data, &div(&1, 256))
+      assert Enum.all?(narrow.data, &(&1 in -128..127))
+    end
+  end
+
+  property "json and dat carry the same values at both widths" do
+    check all(
+            samples <- list_of(integer(-32_768..32_767), min_length: 1, max_length: 200),
+            channels <- member_of([1, 2]),
+            count <- integer(1..64),
+            bits <- member_of([8, 16])
+          ) do
+      frames = div(length(samples), channels)
+      result = reduce([pcm_of(samples)], frames, count: count, channels: channels, bits: bits)
+
+      <<_header::binary-size(24), body::binary>> = Peaks.to_dat(result)
+      from_dat = for <<value::little-signed-size(bits) <- body>>, do: value
+
+      assert from_dat == JSON.decode!(Peaks.to_json(result))["data"]
+    end
+  end
+
   property "the shape of the output is fixed by pts and ch alone" do
     check all(
             samples <- list_of(integer(-32_768..32_767), max_length: 200),

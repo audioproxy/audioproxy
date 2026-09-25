@@ -22,7 +22,7 @@ The header's flags field SHALL carry the width the way audiowaveform's own forma
 
 #### Scenario: Eight-bit binary is half the payload
 - **WHEN** the same `pts` and `ch` are rendered as `pk_bits:16` and `pk_bits:8` in `dat`
-- **THEN** both carry the same 24-byte header, and the 8-bit body is exactly half the size of the 16-bit body
+- **THEN** both carry a 24-byte header that differs only in the flags field (1 for 8-bit, 0 for 16-bit), and the 8-bit body is exactly half the size of the 16-bit body
 
 #### Scenario: The narrower picture is a reduction of the wider one
 - **WHEN** the same variant is rendered at both widths

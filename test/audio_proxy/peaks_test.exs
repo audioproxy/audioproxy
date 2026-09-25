@@ -210,6 +210,54 @@ defmodule AudioProxy.PeaksTest do
     end
   end
 
+  describe "eight-bit output" do
+    # -300 and -256 are negative and not all multiples of 256. Truncation and an
+    # arithmetic shift give different results for them, so these values pin
+    # audiowaveform's rule. -32768 and 32767 are the two ends of the range.
+    setup do
+      samples = [-300, 255, -256, 32_767, -32_768, 1]
+
+      %{
+        wide: reduce(samples, 6, count: 3, sample_rate: 8_000),
+        narrow: reduce(samples, 6, count: 3, sample_rate: 8_000, bits: 8)
+      }
+    end
+
+    test "JSON reports bits 8 and holds the narrowed values", %{narrow: narrow} do
+      decoded = narrow |> Peaks.to_json() |> JSON.decode!()
+
+      assert decoded["bits"] == 8
+      assert decoded["data"] == [-1, 0, -1, 127, -128, 0]
+    end
+
+    test "each value is its 16-bit counterpart divided by 256, truncated toward zero",
+         %{wide: wide, narrow: narrow} do
+      assert narrow.data == Enum.map(wide.data, &div(&1, 256))
+      assert Enum.all?(narrow.data, &(&1 in -128..127))
+    end
+
+    test "dat sets flag bit 0 and writes int8 values", %{narrow: narrow} do
+      assert <<2::little-signed-32, flags::little-unsigned-32, _::binary-size(16), body::binary>> =
+               Peaks.to_dat(narrow)
+
+      assert flags == 1
+      assert for(<<value::little-signed-8 <- body>>, do: value) == narrow.data
+    end
+
+    test "the 8-bit dat has half the 16-bit body, and the headers differ only in flags",
+         %{wide: wide, narrow: narrow} do
+      <<version::binary-size(4), wide_flags::little-unsigned-32, rest16::binary-size(16),
+        body16::binary>> = Peaks.to_dat(wide)
+
+      <<^version::binary-size(4), narrow_flags::little-unsigned-32, rest8::binary-size(16),
+        body8::binary>> = Peaks.to_dat(narrow)
+
+      assert {wide_flags, narrow_flags} == {0, 1}
+      assert rest8 == rest16
+      assert byte_size(body8) * 2 == byte_size(body16)
+    end
+  end
+
   describe "new/3 — configured from options" do
     test "reads pts, the mono default, and an explicit ch:2" do
       {:ok, plain} = Options.parse("f:peaks")
@@ -220,6 +268,20 @@ defmodule AudioProxy.PeaksTest do
 
       assert Peaks.new(1_000, stereo, 44_100) |> Peaks.finish() |> Map.take([:length, :channels]) ==
                %{length: 4, channels: 2}
+    end
+
+    test "reads pk_bits, and defaults to 16" do
+      {:ok, plain} = Options.parse("f:peaks")
+      {:ok, narrow} = Options.parse("f:peaks/pk_bits:8")
+
+      assert Peaks.new(10, plain, 8_000) |> Peaks.finish() |> Map.fetch!(:bits) == 16
+      assert Peaks.new(10, narrow, 8_000) |> Peaks.finish() |> Map.fetch!(:bits) == 8
+    end
+
+    test "any other width is refused when the reducer is built" do
+      assert_raise ArgumentError, ~r/bits must be 8 or 16, got: 7/, fn ->
+        Peaks.new(10, count: 2, bits: 7)
+      end
     end
 
     test "carries the probed sample rate into the output" do
