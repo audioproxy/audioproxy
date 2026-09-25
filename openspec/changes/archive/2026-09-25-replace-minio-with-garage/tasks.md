@@ -32,4 +32,4 @@
 
 ## 6. Verify
 
-- [ ] 6.1 Push and confirm the CI `test` job and the image verification jobs are green
+- [x] 6.1 Push and confirm the CI `test` job and the image verification jobs are green (PR #96: every check green, merged as 8933879)
