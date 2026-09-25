@@ -37,9 +37,9 @@ Probe results against `dxflrs/garage:v2.4.1`, single node, `s3_region = "us-east
 
 **Region pinned to `us-east-1`** through `s3_region`, so the region every test already signs with does not change. Garage's default region is `garage`, and a SigV4 region mismatch is refused, which would fail every test for a reason unrelated to what each one checks.
 
-**Health from the admin API.** The `/minio/health/live` probe in the helper and in CI becomes `GET :3903/health`. The admin port is published only where the S3 port is (CI's `docker run`); in compose, nothing is published, as before.
+**Health differs per consumer.** CI polls the admin API at `:3903/health`. The compose healthcheck runs `/garage status`, because the image has no shell and no `curl`. The helper's probe accepts any HTTP response from the S3 port. A vendor health path would break the documented use of the suite against other providers (`docs/s3-providers.md`). `bin/smoke-image` treats a successful signed `list-buckets` as ready, because a health endpoint can answer before the key exists.
 
-**Credentials in `StoreHelper`, once.** `access_key_id/0` and `secret_access_key/0`, stated as fixed test values. The five files that write the pair today reference those instead; `s3_split_store_test.exs` keeps its second, deliberately different identity, which exists to be told apart from this one.
+**Credentials in `GarageHelper`, once.** `access_key_id/0` and `secret_access_key/0`, stated as fixed test values. The five files that write the pair today reference those instead. `s3_test.exs` and `source/s3_backend_test.exs` also drop their private copies of `ensure_bucket!` and `ensure_reachable!`, which named MinIO. `s3_split_store_test.exs` keeps its second, deliberately different identity, which exists to be told apart from this one.
 
 **The expired-URL assertion accepts `400` or `403`**, like the unsigned-request test beside it already accepts `401` or `403`. The claim under test is that the store refuses, so that the signature and not a public bucket granted access; which 4xx a store uses for an expired signature is its own business. Clients follow a redirect to the store directly, so the proxy never maps this status.
 

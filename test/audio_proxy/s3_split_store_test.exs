@@ -3,24 +3,24 @@ defmodule AudioProxy.S3SplitStoreTest do
   Sources on one store, variants on another, end to end.
 
   Two claims, and neither can be made against a single endpoint. That **source
-  requests go to the source's store under the source's identity**, which MinIO
+  requests go to the source's store under the source's identity**, which Garage
   verifies by signature — a wrong credential there is a refused request, not an
   assertion. And that **store requests go somewhere else entirely under an
   identity of their own**, which is what `AudioProxy.CapturingStore` is for:
-  MinIO can say a signature is valid, but it cannot be asked *whose* it was.
+  Garage can say a signature is valid, but it cannot be asked *whose* it was.
 
   The two halves check each other. If a store operation ever borrowed the
-  source profile, the capture would record MinIO's access key and fail here; if
-  a source operation borrowed the store profile, MinIO would refuse the
+  source profile, the capture would record Garage's access key and fail here; if
+  a source operation borrowed the store profile, Garage would refuse the
   signature and the render would 502. So a single wrong profile in either
   direction fails this file, which is the property the split exists to have.
 
   The encoder is `AudioProxy.FakeFfmpeg`, for the reason
   `AudioProxy.Source.S3BackendTest` gives: what changed is which credentials
   sign which request, and ffmpeg has no opinion about that. The source *stat*
-  and the *presign* handed to it are both real requests against MinIO.
+  and the *presign* handed to it are both real requests against Garage.
 
-  Tagged `:minio`, excluded by default, failing rather than skipping when the
+  Tagged `:garage`, excluded by default, failing rather than skipping when the
   store is absent.
   """
 
@@ -33,9 +33,9 @@ defmodule AudioProxy.S3SplitStoreTest do
   import AudioProxy.SignedRequest, except: [conn: 3]
   import Plug.Test
 
-  alias AudioProxy.{CapturingStore, MinioHelper, S3, VariantStore}
+  alias AudioProxy.{CapturingStore, GarageHelper, S3, VariantStore}
 
-  @moduletag :minio
+  @moduletag :garage
   @moduletag timeout: 120_000
 
   @fake_opts AudioProxy.FakeFfmpeg.Router.init([])
@@ -45,16 +45,16 @@ defmodule AudioProxy.S3SplitStoreTest do
 
   @body "RIFF-fake-wav-bytes"
 
-  # The test store's key, and the only real credential in this file. A capture
-  # signed with it is a store request that used the source's identity.
-  @source_key_id MinioHelper.access_key_id()
+  # The key of the test store. It is the only real credential in this file. A
+  # captured request with this key is a store request with the source identity.
+  @source_key_id GarageHelper.access_key_id()
 
   # The store's, which no store verifies: the capture records it, and its whole
   # job is to be *distinguishable* from the one above.
   @store_key_id "STOREKEYEXAMPLE"
 
   setup do
-    endpoint = MinioHelper.endpoint()
+    endpoint = GarageHelper.endpoint()
     %{endpoint: store_endpoint} = CapturingStore.start!()
 
     put_config(
@@ -67,7 +67,7 @@ defmodule AudioProxy.S3SplitStoreTest do
         s3: %{
           region: "us-east-1",
           access_key_id: @source_key_id,
-          secret_access_key: MinioHelper.secret_access_key(),
+          secret_access_key: GarageHelper.secret_access_key(),
           session_token: nil,
           endpoint: endpoint,
           addressing: :path,
@@ -85,11 +85,11 @@ defmodule AudioProxy.S3SplitStoreTest do
       )
     )
 
-    MinioHelper.ensure_bucket!(@source_bucket)
+    GarageHelper.ensure_bucket!(@source_bucket)
     reset_coordinators()
     reset_probes()
 
-    # Written with the *source* profile, which is the one that can reach MinIO.
+    # Written with the *source* profile, which is the one that can reach Garage.
     key = "split-store/#{System.unique_integer([:positive])}/piece.wav"
     :ok = S3.put_stream(@source_bucket, key, [@body])
 
@@ -126,7 +126,7 @@ defmodule AudioProxy.S3SplitStoreTest do
     end
 
     test "and the two identities are independent knobs", %{key: key} do
-      # The direction the capture cannot see. MinIO verifies signatures, so the
+      # The direction the capture cannot see. Garage verifies signatures, so the
       # 200 above is already proof that the source side signed with the
       # source's credential — nothing else would have been let in. What is left
       # to show is that the two do not move together: breaking the source

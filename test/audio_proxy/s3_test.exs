@@ -12,7 +12,7 @@ defmodule AudioProxy.S3Test do
   Those are exactly the things a stub would agree with us about and a store
   will not.
 
-  Tagged `:minio`, excluded by default, and it fails rather than skips when
+  Tagged `:garage`, excluded by default, and it fails rather than skips when
   the store is missing — a green run against nothing is a lie about coverage.
   See `docs/development.md`.
   """
@@ -21,17 +21,17 @@ defmodule AudioProxy.S3Test do
 
   import AudioProxy.ConfigHelper
 
-  alias AudioProxy.{MinioHelper, S3}
+  alias AudioProxy.{GarageHelper, S3}
 
-  @moduletag :minio
+  @moduletag :garage
   @moduletag timeout: 120_000
 
   @bucket "audio-proxy-test"
 
   setup_all do
-    endpoint = MinioHelper.endpoint()
+    endpoint = GarageHelper.endpoint()
 
-    MinioHelper.ensure_reachable!(endpoint)
+    GarageHelper.ensure_reachable!(endpoint)
     {:ok, endpoint: endpoint}
   end
 
@@ -40,11 +40,11 @@ defmodule AudioProxy.S3Test do
       presign_ttl: 900,
       s3: %{
         region: "us-east-1",
-        access_key_id: MinioHelper.access_key_id(),
-        secret_access_key: MinioHelper.secret_access_key(),
+        access_key_id: GarageHelper.access_key_id(),
+        secret_access_key: GarageHelper.secret_access_key(),
         session_token: nil,
         endpoint: endpoint,
-        # MinIO is reached by hostname and port; `bucket.minio` would need DNS
+        # Garage is reached by hostname and port; `bucket.garage` would need DNS
         # nobody configured. Which is also why this file cannot cover
         # virtual-hosted addressing — see `AudioProxy.S3AddressingTest`.
         addressing: :path,
@@ -52,7 +52,7 @@ defmodule AudioProxy.S3Test do
       }
     })
 
-    MinioHelper.ensure_bucket!(@bucket)
+    GarageHelper.ensure_bucket!(@bucket)
     :ok
   end
 
@@ -109,7 +109,7 @@ defmodule AudioProxy.S3Test do
 
     test "a multi-part stream round-trips byte-for-byte" do
       # Over the 5 MiB minimum part size, so ex_aws genuinely runs the
-      # multipart protocol and MinIO has to reassemble it.
+      # multipart protocol and Garage has to reassemble it.
       key = unique_key("multipart.bin")
       chunks = for index <- 1..150, do: :binary.copy(<<rem(index, 256)>>, 64_000)
       expected = IO.iodata_to_binary(chunks)

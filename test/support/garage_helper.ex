@@ -1,6 +1,6 @@
-defmodule AudioProxy.MinioHelper do
+defmodule AudioProxy.GarageHelper do
   @moduledoc """
-  Pointing the config at the store the `:minio` suite runs against, and making
+  Pointing the config at the store the `:garage` suite runs against, and making
   sure a bucket is there.
 
   Every function raises rather than skipping when the store is absent. A green
@@ -11,23 +11,23 @@ defmodule AudioProxy.MinioHelper do
 
   alias AudioProxy.{Config, ConfigHelper, S3}
 
-  @doc "The endpoint the `:minio` suite talks to, defaulting to the devcontainer's."
+  @doc "The endpoint the `:garage` suite talks to, defaulting to the devcontainer's."
   @spec endpoint() :: URI.t()
   def endpoint do
-    URI.parse(System.get_env("AP_TEST_MINIO_ENDPOINT", "http://minio:3900"))
+    URI.parse(System.get_env("AP_TEST_GARAGE_ENDPOINT", "http://garage:3900"))
   end
 
   @doc """
-  The access key id the test store boots with.
+  The access key id of the test store.
 
   **A fixed test value, not a secret.** The devcontainer, CI and
-  `bin/smoke-image` start the store with it, and nothing in `lib/` reads it.
-  Garage requires the `GK` + 24 hex format.
+  `bin/smoke-image` start the store with this value. No code in `lib/` reads
+  it. Garage requires the `GK` + 24 hex format.
   """
   @spec access_key_id() :: String.t()
   def access_key_id, do: "GK000000000000000000000000"
 
-  @doc "The secret paired with `access_key_id/0`. Same caveat: a fixed test value."
+  @doc "The secret for `access_key_id/0`. It is also a fixed test value."
   @spec secret_access_key() :: String.t()
   def secret_access_key, do: String.duplicate("0", 64)
 
@@ -52,7 +52,7 @@ defmodule AudioProxy.MinioHelper do
             secret_access_key: secret_access_key(),
             session_token: nil,
             endpoint: endpoint,
-            # The store is reached by hostname and port, so `bucket.minio` would
+            # The store is reached by hostname and port, so `bucket.garage` would
             # want DNS nobody configured. Virtual-hosted addressing is
             # `AudioProxy.S3AddressingTest`'s to cover.
             addressing: :path,
@@ -104,16 +104,16 @@ defmodule AudioProxy.MinioHelper do
   end
 
   @doc """
-  Raises unless something answers HTTP at `endpoint`.
+  Raises an error if nothing answers HTTP at `endpoint`.
 
-  Uses `:httpc`, the stack `AudioProxy.S3.HttpClient` drives, so the probe
-  exercises what the proxy uses, minus signing.
+  The probe uses `:httpc`. `AudioProxy.S3.HttpClient` uses the same stack, with
+  signatures.
   """
   @spec ensure_reachable!(URI.t()) :: :ok
   def ensure_reachable!(endpoint) do
-    # Any HTTP response means a store is listening. Stores refuse unsigned
-    # requests, so the status carries no information. Ignoring it keeps the
-    # probe provider-neutral (docs/s3-providers.md).
+    # Any HTTP response shows that a store is listening. Stores refuse unsigned
+    # requests, so the status gives no information. The probe ignores the status.
+    # Thus it works with each provider (docs/s3-providers.md).
     url = URI.to_string(%{endpoint | path: "/"})
 
     case :httpc.request(
@@ -129,9 +129,9 @@ defmodule AudioProxy.MinioHelper do
         raise """
         The S3 store is not reachable at #{URI.to_string(endpoint)} (#{inspect(other)}).
 
-        These tests are tagged :minio and excluded by default; running them
+        These tests are tagged :garage and excluded by default; running them
         requires a store. See docs/development.md, or set
-        AP_TEST_MINIO_ENDPOINT.
+        AP_TEST_GARAGE_ENDPOINT.
         """
     end
   end

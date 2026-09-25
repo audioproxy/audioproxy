@@ -1,7 +1,7 @@
-# Shared by the :minio suite, the devcontainer and bin/smoke-image, so region
-# and ports cannot drift between them.
+# The :garage suite, the devcontainer and bin/smoke-image share this file.
+# Thus the region and the ports are the same everywhere.
 #
-# rpc_secret is a fixed test value, not a secret: this node never joins a
+# rpc_secret is a fixed test value, not a secret. This node never joins a
 # cluster.
 
 metadata_dir = "/var/lib/garage/meta"
@@ -13,8 +13,8 @@ rpc_public_addr = "127.0.0.1:3901"
 rpc_secret = "0000000000000000000000000000000000000000000000000000000000000000"
 
 [s3_api]
-# Garage defaults to region "garage". Tests sign for us-east-1, and SigV4
-# refuses a region mismatch.
+# The Garage default region is "garage". The tests sign for us-east-1. SigV4
+# refuses a request for a different region.
 s3_region = "us-east-1"
 api_bind_addr = "[::]:3900"
 

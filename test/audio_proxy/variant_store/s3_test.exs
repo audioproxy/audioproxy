@@ -8,16 +8,16 @@ defmodule AudioProxy.VariantStore.S3Test do
   `AudioProxy.VariantStore.ParityS3Test`, which runs the identical assertions
   against `file://`.
 
-  Tagged `:minio`; see `docs/development.md`.
+  Tagged `:garage`; see `docs/development.md`.
   """
 
   use ExUnit.Case, async: false
 
   import ExUnit.CaptureLog
 
-  alias AudioProxy.{Config, MinioHelper, S3, VariantStore}
+  alias AudioProxy.{Config, GarageHelper, S3, VariantStore}
 
-  @moduletag :minio
+  @moduletag :garage
   @moduletag timeout: 120_000
 
   @bucket "audio-proxy-variants"
@@ -29,8 +29,8 @@ defmodule AudioProxy.VariantStore.S3Test do
   }
 
   setup do
-    MinioHelper.configure!(%{variant_store: {:s3, @bucket}, serve_mode: :proxy})
-    MinioHelper.ensure_bucket!(@bucket)
+    GarageHelper.configure!(%{variant_store: {:s3, @bucket}, serve_mode: :proxy})
+    GarageHelper.ensure_bucket!(@bucket)
     :ok
   end
 
@@ -54,7 +54,7 @@ defmodule AudioProxy.VariantStore.S3Test do
       :ok = VariantStore.put_stream(key, ["OggS…"], @metadata)
 
       assert {:ok, url} = VariantStore.presign(key, expires_in: 60)
-      assert {200, headers, "OggS…"} = MinioHelper.fetch(url)
+      assert {200, headers, "OggS…"} = GarageHelper.fetch(url)
 
       assert headers["content-type"] == "audio/ogg"
       assert headers["cache-control"] == "public, max-age=31536000, immutable"
@@ -113,7 +113,7 @@ defmodule AudioProxy.VariantStore.S3Test do
       :ok = VariantStore.put_stream(key, ["redirect me"], @metadata)
 
       assert {:ok, url} = VariantStore.presign(key, expires_in: 60)
-      assert {200, _headers, "redirect me"} = MinioHelper.fetch(url)
+      assert {200, _headers, "redirect me"} = GarageHelper.fetch(url)
     end
 
     test "the requested TTL reaches the signature" do
@@ -229,9 +229,9 @@ defmodule AudioProxy.VariantStore.S3Test do
   defp env do
     %{
       "AP_VARIANT_STORE" => "s3://#{@bucket}",
-      "AP_S3_ENDPOINT" => URI.to_string(MinioHelper.endpoint()),
-      "AWS_ACCESS_KEY_ID" => MinioHelper.access_key_id(),
-      "AWS_SECRET_ACCESS_KEY" => MinioHelper.secret_access_key(),
+      "AP_S3_ENDPOINT" => URI.to_string(GarageHelper.endpoint()),
+      "AWS_ACCESS_KEY_ID" => GarageHelper.access_key_id(),
+      "AWS_SECRET_ACCESS_KEY" => GarageHelper.secret_access_key(),
       "AWS_REGION" => "us-east-1"
     }
   end

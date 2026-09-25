@@ -144,7 +144,7 @@ defmodule AudioProxy.VariantStore do
   # — `AP_VARIANT_STORE` is a URL, and every scheme maps to a module above — so
   # it is not configuration surface. It is the seam the serving path is tested
   # through, without a store: the `s3://` backend can presign for real, but
-  # only against a running MinIO, and the redirect branch's own behaviour —
+  # only against a running Garage, and the redirect branch's own behaviour —
   # the `no-store`, the TTL it passes down, the proxy-instead fallback when a
   # presign fails — is not S3's to demonstrate.
   def backend_for({:module, module}) when is_atom(module), do: module

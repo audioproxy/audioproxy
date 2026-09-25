@@ -40,10 +40,11 @@ jobs:
 
       - run: mix compile --warnings-as-errors
 
-      # The :minio suite needs a store that verifies signatures. Same digest and
-      # config as .devcontainer/docker-compose.yml. `docker run`, not
-      # `services:`: services start before checkout, so the config file does not
-      # exist yet, and they cannot take a command.
+      # The :garage suite needs a store that verifies signatures. This step
+      # uses the same digest and config as .devcontainer/docker-compose.yml.
+      # It uses `docker run` because a `services:` container starts before
+      # checkout. At that time, the config file does not exist. A service
+      # also cannot take a command.
       - name: Start the S3 store
         run: |
           set -euo pipefail
@@ -70,11 +71,11 @@ jobs:
           exit 1
 
       # `--include integration` adds the socket-binding tests; `--include
-      # minio` adds the ones needing the store above. :ffmpeg stays excluded
+      # garage` adds the ones needing the store above. :ffmpeg stays excluded
       # (that tag has its own job below).
-      - run: mix test --include integration --include minio
+      - run: mix test --include integration --include garage
         env:
-          AP_TEST_MINIO_ENDPOINT: http://127.0.0.1:3900
+          AP_TEST_GARAGE_ENDPOINT: http://127.0.0.1:3900
 
   # ---------------------------------------------------------------------------
   # Image verification, once per published architecture on native runners. QEMU

@@ -16,7 +16,7 @@ The `:minio` suite exists because signing is only verified by a store that can r
 - Replace `minio/mc` in `bin/smoke-image` with `amazon/aws-cli`, pinned, for the fixture upload and the listing.
 - Give the suite's store credentials one home in the support layer. The fixed `minioadmin` pair is written out in five test files today, and Garage's key format (`GK` + 24 hex, a 64-hex secret) means every copy changes anyway.
 - Loosen the one assertion that encodes a MinIO-specific status: an expired presigned URL is refused with `400` by Garage and `403` by AWS and MinIO. The requirement is that the store refuses, not which 4xx it picks.
-- Rename what names the product rather than the role: the `:minio` tag becomes `:s3_store`, `AP_TEST_MINIO_ENDPOINT` becomes `AP_TEST_S3_ENDPOINT`, `AudioProxy.MinioHelper` becomes `AudioProxy.StoreHelper`, and the compose service becomes `s3`. Doing it now keeps the next store swap from being a rename as well.
+- Rename to the store the suite now runs: the `:minio` tag becomes `:garage`, `AP_TEST_MINIO_ENDPOINT` becomes `AP_TEST_GARAGE_ENDPOINT`, `AudioProxy.MinioHelper` becomes `AudioProxy.GarageHelper`, and the compose service becomes `garage`. A name that says which store runs is more honest than a generic one. A future store swap renames again, and this change shows the cost of that is small.
 - Update `docs/development.md`, `docs/s3-providers.md` and the MinIO mentions in `CLAUDE.md`.
 
 ## Capabilities

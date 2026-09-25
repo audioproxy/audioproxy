@@ -9,19 +9,19 @@ defmodule AudioProxy.VariantStore.ParityS3Test do
 
   There is no fake store, for the reason `AudioProxy.S3Test` gives at length —
   a stub cannot verify a signature, so it agrees with whatever we send it.
-  Tagged `:minio`, excluded by default, and it fails rather than skips when the
+  Tagged `:garage`, excluded by default, and it fails rather than skips when the
   store is missing. See `docs/development.md`.
   """
 
   use ExUnit.Case, async: false
 
-  alias AudioProxy.MinioHelper
+  alias AudioProxy.GarageHelper
 
   # Before `use AudioProxy.VariantStoreParity`, and it has to be: a moduletag
   # is read when each test *registers*, so one written below the macro that
   # defines the tests tags nothing, and the whole parity run would try to reach
   # a store on every default `mix test`.
-  @moduletag :minio
+  @moduletag :garage
   @moduletag timeout: 120_000
 
   use AudioProxy.VariantStoreParity
@@ -29,8 +29,8 @@ defmodule AudioProxy.VariantStore.ParityS3Test do
   @bucket "audio-proxy-variants"
 
   setup do
-    MinioHelper.configure!(%{variant_store: {:s3, @bucket}, serve_mode: :proxy})
-    MinioHelper.ensure_bucket!(@bucket)
+    GarageHelper.configure!(%{variant_store: {:s3, @bucket}, serve_mode: :proxy})
+    GarageHelper.ensure_bucket!(@bucket)
     :ok
   end
 end

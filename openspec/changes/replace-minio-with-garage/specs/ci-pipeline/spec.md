@@ -5,7 +5,7 @@ The workflow SHALL run the store-tagged tests against a real S3-compatible store
 
 #### Scenario: The store suite runs in CI
 - **WHEN** the default test job runs
-- **THEN** the store is started and healthy before `mix test --include integration --include s3_store` begins, and a store that fails to start fails the job rather than skipping the suite
+- **THEN** the store is started and healthy before `mix test --include integration --include garage` begins, and a store that fails to start fails the job rather than skipping the suite
 
 #### Scenario: One image, three consumers
 - **WHEN** the store image or its configuration changes

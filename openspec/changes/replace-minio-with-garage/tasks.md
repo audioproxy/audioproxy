@@ -1,7 +1,7 @@
 ## 1. Store configuration
 
 - [x] 1.1 Add `test/support/garage.toml` (single node, sqlite, `s3_region = "us-east-1"`, S3 on 3900, admin on 3903), its `rpc_secret` marked as a fixed test value
-- [x] 1.2 Replace the `minio` compose service with `s3` running `dxflrs/garage:v2.4.1@sha256:9c96caa2…` with `--single-node --default-access-key`, the config mounted, `/var/lib/garage` on tmpfs, and a healthcheck against the admin `/health`; update `runServices` in `devcontainer.json`
+- [x] 1.2 Replace the `minio` compose service with one running `dxflrs/garage:v2.4.1@sha256:9c96caa2…` with `--single-node --default-access-key`, the config mounted, `/var/lib/garage` on tmpfs, and `/garage status` as the healthcheck (the image has no shell); update `runServices` in `devcontainer.json`
 - [x] 1.3 Replace CI's `Start MinIO` step with the same image and config via `docker run`, polling `:3903/health`
 
 ## 2. Test support
@@ -18,8 +18,10 @@
 
 ## 4. Rename (own commit)
 
-- [ ] 4.1 `:minio` → `:s3_store` in `test_helper.exs` and every tagged file; `AP_TEST_MINIO_ENDPOINT` → `AP_TEST_S3_ENDPOINT` in the helper, compose and CI; `AudioProxy.MinioHelper` → `AudioProxy.StoreHelper`
-- [ ] 4.2 Check `grep -rni minio` outside `deps`, `_build` and archived changes returns only operator-facing mentions (example endpoints, `docs/s3-providers.md` provider notes)
+- [x] 4.0 Rewrite this change's comments in ASD-STE100 Simplified Technical English, per the rule added to `CLAUDE.md` in this change
+
+- [x] 4.1 `:minio` → `:garage` in `test_helper.exs` and every tagged file; `AP_TEST_MINIO_ENDPOINT` → `AP_TEST_GARAGE_ENDPOINT` in the helper, compose and CI; `AudioProxy.MinioHelper` → `AudioProxy.GarageHelper`; compose service `minio` → `garage`
+- [x] 4.2 Check `grep -rni minio` outside `deps`, `_build` and archived changes returns only operator-facing mentions (example endpoints, `docs/s3-providers.md` provider notes)
 
 ## 5. Documentation
 

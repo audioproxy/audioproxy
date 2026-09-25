@@ -3,7 +3,7 @@ defmodule AudioProxy.S3AddressingTest do
   What URL each addressing style actually produces, on both call sites.
 
   Untagged and storeless on purpose. Neither Tigris nor AWS is reachable from
-  CI, and MinIO — the one store the suite can talk to — is happy with
+  CI, and Garage — the one store the suite can talk to — is happy with
   path-style, which is exactly the configuration that already worked. So the
   virtual-hosted decision cannot be pinned by a round trip here at all.
 
@@ -88,7 +88,7 @@ defmodule AudioProxy.S3AddressingTest do
     # means: the request path takes `config[:port]`, while `presigned_url/5`
     # goes through `ExAws.S3.Utils.sanitized_port_component/1`, which elides 80
     # and 443 and appends the rest. Every other fixture here uses 443, so
-    # without this the elision is all that is covered — and the MinIO suite
+    # without this the elision is all that is covered — and the Garage suite
     # reaches port 9000 only path-style.
     setup do: configure(:virtual, URI.parse("http://store.test:9000"))
 

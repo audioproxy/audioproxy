@@ -10,7 +10,7 @@ defmodule AudioProxy.VariantCacheS3Test do
   proxied HIT would have sent, with no proxy in the path to correct them.
 
   That is one claim and it needs a store, a signature the store verifies, and
-  the same request served both ways to compare. Tagged `:minio`; see
+  the same request served both ways to compare. Tagged `:garage`; see
   `docs/development.md`.
   """
 
@@ -21,9 +21,9 @@ defmodule AudioProxy.VariantCacheS3Test do
   import Plug.Conn
   import Plug.Test
 
-  alias AudioProxy.{CacheKey, MinioHelper, VariantStore}
+  alias AudioProxy.{CacheKey, GarageHelper, VariantStore}
 
-  @moduletag :minio
+  @moduletag :garage
   @moduletag timeout: 120_000
   # The store is S3; the *source* scheme still has to be enabled for the URL to
   # parse at all, and the directory stays empty on purpose — see the setup.
@@ -44,7 +44,7 @@ defmodule AudioProxy.VariantCacheS3Test do
   @rest "/f:opus/br:96/plain/local://cached.wav"
 
   setup %{tmp_dir: tmp_dir} do
-    MinioHelper.configure!(%{
+    GarageHelper.configure!(%{
       key: key(),
       salt: salt(),
       allow_insecure: false,
@@ -53,7 +53,7 @@ defmodule AudioProxy.VariantCacheS3Test do
       serve_mode: :redirect
     })
 
-    MinioHelper.ensure_bucket!(@bucket)
+    GarageHelper.ensure_bucket!(@bucket)
 
     # Stored directly, and under a source that does not exist: a HIT is checked
     # before the stat, so this asserts the cache path and nothing else.
@@ -90,7 +90,7 @@ defmodule AudioProxy.VariantCacheS3Test do
   test "following the Location delivers the variant, byte for byte" do
     assert [location] = get_resp_header(request(@rest), "location")
 
-    assert {200, headers, body} = MinioHelper.fetch(location)
+    assert {200, headers, body} = GarageHelper.fetch(location)
     assert body == @variant
     assert headers["content-length"] == "1000"
   end
@@ -100,7 +100,7 @@ defmodule AudioProxy.VariantCacheS3Test do
     # tell which one served it, because §5 makes the serve mode an operator's
     # choice rather than part of the contract.
     assert [location] = get_resp_header(request(@rest), "location")
-    assert {200, redirected, _body} = MinioHelper.fetch(location)
+    assert {200, redirected, _body} = GarageHelper.fetch(location)
 
     put_config(%{serve_mode: :proxy})
     proxied = request(@rest)
