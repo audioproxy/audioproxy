@@ -49,24 +49,25 @@ EXPECTED_FFMPEG_MAJOR = File.read(File.join(REPO_ROOT, "VERSIONS.md"))
 KEY = SecureRandom.hex(32)
 SALT = SecureRandom.hex(16)
 
-# The store the `s3://` source check runs against. Pinned to the same MinIO
-# release CI starts for the `:minio` suite, so the two levels are not testing
-# against different stores and calling it one guarantee. `mc` is MinIO's own
-# client and is used only to create the bucket and put the fixture — the proxy
-# does its own signing, which is the thing under test.
-MINIO_IMAGE = "minio/minio:RELEASE.2025-04-22T22-12-26Z"
-MC_IMAGE = "minio/mc:RELEASE.2025-04-16T18-13-26Z"
+# The store for the `s3://` checks. CI and the devcontainer use the same Garage
+# digest and config. Thus all levels test the same store. The AWS CLI only
+# creates buckets, uploads the fixture and lists objects. The proxy signs its
+# own requests. These requests are the subject of the test.
+STORE_IMAGE = "dxflrs/garage:v2.4.1@sha256:9c96caa2612d3411acc5b0e6701fb238dbfba33e533a6d7d3d811a4b12d0d020"
+STORE_CONFIG = File.join(REPO_ROOT, "test/support/garage.toml")
+CLI_IMAGE = "amazon/aws-cli:2.37.3"
 S3_BUCKET = "masters"
 # The variant cache's own bucket. Separate from the source bucket on purpose:
 # a deployment that shares one would hide a backend writing where it reads.
 S3_VARIANT_BUCKET = "variants"
-S3_ACCESS_KEY = "minioadmin"
-S3_SECRET_KEY = "minioadmin"
-# Reached by container alias on a suite-private network, so it is the same
-# hostname inside the proxy container and inside `mc`. Path-style addressing
-# follows from the custom endpoint by default, which is what MinIO needs —
-# `masters.minio` would want DNS nobody configured.
-S3_URL = "http://minio:9000"
+# Fixed test values. AudioProxy.GarageHelper uses the same values. Garage
+# requires this key format.
+S3_ACCESS_KEY = "GK000000000000000000000000"
+S3_SECRET_KEY = "0" * 64
+# The store has a container alias on a private network. Thus the proxy and the
+# CLI use the same hostname. A custom endpoint uses path-style addressing by
+# default. The store needs that, because `masters.garage` needs DNS.
+S3_URL = "http://garage:3900"
 
 FIXTURE_SECONDS = 5
 # ffmpeg's mp3 encoder pads the last frame, so an exact match is the wrong
@@ -339,7 +340,7 @@ end
 # claim about S3 now has a check to point at, per docs/development.md's
 # "release notes are claims, and claims name their checks".
 #
-# What only this level can show, and the ExUnit `:minio` suite cannot: the
+# What only this level can show, and the ExUnit `:garage` suite cannot: the
 # ffmpeg *this image ships* opening a presigned URL and ranging it over the
 # network. Everything below the URL — signing, addressing, error translation —
 # is already pinned by `AudioProxy.S3Test` against the same store.
@@ -347,26 +348,18 @@ def check_s3_source(fixtures)
   network = "audio-proxy-smoke-#{SecureRandom.hex(4)}"
   sh!("docker", "network", "create", network)
 
-  minio = docker_run(
-    "--network", network, "--network-alias", "minio",
-    "-e", "MINIO_ROOT_USER=#{S3_ACCESS_KEY}",
-    "-e", "MINIO_ROOT_PASSWORD=#{S3_SECRET_KEY}",
-    MINIO_IMAGE, "server", "/data"
-  )
+  store = start_store(network)
 
-  ready = wait_until(timeout: 60) { mc(network, "mc alias set store #{S3_URL} #{S3_ACCESS_KEY} #{S3_SECRET_KEY}") }
-  check "MinIO becomes reachable" do
+  ready = wait_until(timeout: 60) { s3cli(network, "s3api", "list-buckets") }
+  check "the S3 store becomes reachable" do
     ready
   end
 
-  # `mc` rather than a hand-rolled SigV4 PUT: signing is `ex_aws`'s job in this
-  # project and re-implementing it in the smoke suite would be a second
-  # implementation to keep correct, testing itself.
-  uploaded = mc(network, <<~SH, mount: fixtures)
-    mc alias set store #{S3_URL} #{S3_ACCESS_KEY} #{S3_SECRET_KEY} &&
-    mc mb --ignore-existing store/#{S3_BUCKET} &&
-    mc cp "/fixtures/tone one.wav" "store/#{S3_BUCKET}/tone one.wav"
-  SH
+  # Use a CLI, not a hand-written SigV4 PUT. Signing is the job of `ex_aws`. A
+  # second implementation here tests only itself.
+  uploaded = s3cli(network, "s3api", "create-bucket", "--bucket", S3_BUCKET) &&
+             s3cli(network, "s3", "cp", "/fixtures/tone one.wav", "s3://#{S3_BUCKET}/tone one.wav",
+                   mount: fixtures)
   check "the fixture uploads to the #{S3_BUCKET} bucket" do
     uploaded
   end
@@ -418,8 +411,8 @@ def check_s3_source(fixtures)
     # And the row this slice added, demonstrated rather than asserted: with the
     # store gone, no source can be reported as missing — including one nothing
     # has rendered, so nothing in flight can answer it from a linger.
-    docker_rm(minio)
-    minio = nil
+    docker_rm(store)
+    store = nil
 
     outage = File.join(out, "outage.json")
     headers, = curl("http://127.0.0.1:#{port}/insecure/f:mp3/plain/s3://#{S3_BUCKET}/unrequested.wav", outage)
@@ -445,7 +438,7 @@ ensure
   # on every raise between `start_server` and here. The outer `ensure` reaps the
   # container eventually; nothing reaps the network.
   docker_rm(cid) if cid
-  docker_rm(minio) if minio
+  docker_rm(store) if store
   sh("docker", "network", "rm", network) if network
 end
 
@@ -458,7 +451,7 @@ end
 # v0.3.0's notes announced an S3 variant bucket and redirect serving while
 # Config still refused `s3://` at boot. Both claims now have a check.
 #
-# What only this level can show, and the ExUnit `:minio` suite cannot: that the
+# What only this level can show, and the ExUnit `:garage` suite cannot: that the
 # cache survives the container. The redirect container is a *second* container
 # reading a bucket the first one filled, which is the whole difference between
 # this store and the `file://` one.
@@ -466,19 +459,14 @@ def check_s3_variant_store(fixtures)
   network = "audio-proxy-smoke-#{SecureRandom.hex(4)}"
   sh!("docker", "network", "create", network)
 
-  minio = docker_run(
-    "--network", network, "--network-alias", "minio",
-    "-e", "MINIO_ROOT_USER=#{S3_ACCESS_KEY}",
-    "-e", "MINIO_ROOT_PASSWORD=#{S3_SECRET_KEY}",
-    MINIO_IMAGE, "server", "/data"
-  )
+  store = start_store(network)
 
-  ready = wait_until(timeout: 60) { mc(network, alias_set) }
-  check "MinIO becomes reachable" do
+  ready = wait_until(timeout: 60) { s3cli(network, "s3api", "list-buckets") }
+  check "the S3 store becomes reachable" do
     ready
   end
 
-  created = mc(network, "#{alias_set} && mc mb --ignore-existing store/#{S3_VARIANT_BUCKET}")
+  created = s3cli(network, "s3api", "create-bucket", "--bucket", S3_VARIANT_BUCKET)
   check "the #{S3_VARIANT_BUCKET} bucket is created" do
     created
   end
@@ -514,15 +502,12 @@ def check_s3_variant_store(fixtures)
         headers.any? { |h| h.downcase.start_with?("transfer-encoding: chunked") }
     end
 
-    # The write-back is a subscriber to the render, not part of the response, so
-    # it finishes after the last byte reaches the client. Polling the bucket is
-    # the honest way to wait for it.
-    # `test -n "$(…)"` rather than piping to `grep`: the mc image carries mc, a
-    # shell, and very little else — `grep` is not in it, so a grep-based probe
-    # fails every poll and reports an empty bucket that is not empty. Caught
-    # because the HIT below passed while this said the object had never landed.
+    # The boot probe deletes its own object. Thus any key shows that the tee is
+    # complete. The CLI prints `None` for an empty listing.
     stored = wait_until(timeout: 60) do
-      mc(network, %(#{alias_set} > /dev/null && test -n "$(mc ls store/#{S3_VARIANT_BUCKET})"))
+      keys, ok = s3cli_output(network, "s3api", "list-objects-v2", "--bucket", S3_VARIANT_BUCKET,
+                              "--query", "Contents[].Key", "--output", "text")
+      ok && !["", "None"].include?(keys.strip)
     end
     check "the render is teed to the bucket" do
       stored
@@ -585,16 +570,12 @@ ensure
   # Ordering and placement as in check_s3_source: containers off the network
   # before the network goes, all of it here rather than on the happy path.
   docker_rm(cid) if cid
-  docker_rm(minio) if minio
+  docker_rm(store) if store
   sh("docker", "network", "rm", network) if network
 end
 
-# The `mc` preamble every invocation needs, kept in one place because it carries
-# the credentials and repeating it invites them drifting apart.
-def alias_set = "mc alias set store #{S3_URL} #{S3_ACCESS_KEY} #{S3_SECRET_KEY}"
-
 # ffprobe from a container on the store's network, so a presigned URL naming
-# `minio` resolves. The image's own ffprobe, which is the binary under test.
+# `garage` resolves. The image's own ffprobe, which is the binary under test.
 def probe_duration_url(network, url)
   out = sh!("docker", "run", "--rm", "--network", network, "--entrypoint", "ffprobe", IMAGE,
             "-v", "error", "-show_entries", "format=duration",
@@ -602,16 +583,31 @@ def probe_duration_url(network, url)
   Float(out.strip)
 end
 
-# One `mc` invocation on the store's network. Returns whether it succeeded, so
-# it doubles as the readiness probe: MinIO answering an `alias set` is a better
-# "up" signal than a health endpoint that returns before the object API does.
-def mc(network, script, mount: nil)
-  args = ["docker", "run", "--rm", "--network", network]
-  args += ["-v", "#{mount}:/fixtures:ro"] if mount
-  args += ["--entrypoint", "sh", MC_IMAGE, "-c", script]
-
-  sh(*args).last
+# The flags supply the layout and the key. Thus the store needs no setup step.
+def start_store(network)
+  docker_run(
+    "--network", network, "--network-alias", "garage",
+    "--tmpfs", "/var/lib/garage",
+    "-v", "#{STORE_CONFIG}:/etc/garage.toml:ro",
+    "-e", "GARAGE_DEFAULT_ACCESS_KEY=#{S3_ACCESS_KEY}",
+    "-e", "GARAGE_DEFAULT_SECRET_KEY=#{S3_SECRET_KEY}",
+    STORE_IMAGE, "/garage", "server", "--single-node", "--default-access-key"
+  )
 end
+
+# Returns [stdout, ok?]. Only this function gives credentials to the CLI. It is
+# also the readiness probe. A health endpoint can answer before the key exists.
+# A signed request succeeds only after that.
+def s3cli_output(network, *args, mount: nil)
+  cmd = ["docker", "run", "--rm", "--network", network,
+         "-e", "AWS_ACCESS_KEY_ID=#{S3_ACCESS_KEY}",
+         "-e", "AWS_SECRET_ACCESS_KEY=#{S3_SECRET_KEY}",
+         "-e", "AWS_DEFAULT_REGION=us-east-1"]
+  cmd += ["-v", "#{mount}:/fixtures:ro"] if mount
+  sh(*cmd, CLI_IMAGE, "--endpoint-url", S3_URL, *args)
+end
+
+def s3cli(network, *args, mount: nil) = s3cli_output(network, *args, mount: mount).last
 
 # The `:ro` flag is the documented posture, and it has to be tested by something
 # that would otherwise succeed. Doing this from the server container proves

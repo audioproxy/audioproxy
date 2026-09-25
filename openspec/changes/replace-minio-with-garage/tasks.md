@@ -13,8 +13,8 @@
 
 ## 3. Image smoke test
 
-- [ ] 3.1 Switch `bin/smoke-image` to the Garage image and config, and replace `mc` with `amazon/aws-cli:2.37.3` for bucket creation, the fixture upload and the listing
-- [ ] 3.2 Run `bin/smoke-image` locally against a freshly built image
+- [x] 3.1 Switch `bin/smoke-image` to the Garage image and config, and replace `mc` with `amazon/aws-cli:2.37.3` for bucket creation, the fixture upload and the listing
+- [x] 3.2 Run `bin/smoke-image` locally against a freshly built image (every S3 check passes. `OCI version label is set` fails, which predates this change: the script reads the version with a regex that `mix.exs` stopped matching in 96e5200)
 
 ## 4. Rename (own commit)
 
