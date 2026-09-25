@@ -22,8 +22,8 @@
 
 ## 4. The claim that started this
 
-- [ ] 4.1 Add an end-to-end test that a `pk_bits:8` JSON response satisfies peaks.js's own acceptance rule: `bits == 8` and every value within the signed 8-bit range
-- [ ] 4.2 Verify a `pk_bits:8` `dat` response against the reference fixture from 1.1
+- [x] 4.1 Add an end-to-end test that a `pk_bits:8` JSON response satisfies peaks.js's own acceptance rule: `bits == 8` and every value within the signed 8-bit range
+- [x] 4.2 Verify a `pk_bits:8` `dat` response against the reference fixture from 1.1
 
 ## 5. Contract and documentation
 

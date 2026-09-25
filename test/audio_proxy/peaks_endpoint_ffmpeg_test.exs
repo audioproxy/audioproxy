@@ -85,6 +85,15 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
       frequency: 40
     )
 
+    # The source of the audiowaveform reference below: 8000 stereo frames, so
+    # pts:100 gives exactly 80 samples per pixel, as `audiowaveform -z 80` does.
+    Fixtures.sine(Path.join(root, "reference.wav"),
+      amplitude: 0.37,
+      duration: 1,
+      frequency: 440,
+      rate: 8_000
+    )
+
     {:ok, root: root}
   end
 
@@ -308,6 +317,46 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
     end
   end
 
+  # Generated from reference.wav with audiowaveform 1.11.1:
+  #   audiowaveform -i reference.wav -o ref.dat -b <8|16> -z 80 --split-channels
+  # A stereo source is necessary. audiowaveform writes a v1 header for mono.
+  #
+  # audiowaveform narrows with truncation toward zero: -12124 becomes -47. An
+  # arithmetic shift gives -48. The narrowed values below pin that rule.
+  @reference_8_sha256 "d2bd40de577dac6d9d899959e210a1b7a4a59a17e2a377902d56a5738912a45f"
+  @reference_16_sha256 "9755c7e0033fd226ac86d45e37fc4c27d03533ee855dc406fb95ec12821de3a9"
+  @reference_path "/f:peaks/pts:100/ch:2/pk_fmt:dat/plain/local://reference.wav"
+
+  describe "pk_bits:8, the width peaks.js reads" do
+    # peaks.js refuses data unless `bits` is 8. This is its acceptance rule.
+    test "the JSON reports bits 8 and every value is a signed 8-bit integer", %{port: port} do
+      peaks = json("/f:peaks/pts:64/pk_bits:8/plain/local://sine.wav", port)
+
+      assert peaks["bits"] == 8
+      assert length(peaks["data"]) == 64 * 2
+      assert Enum.all?(peaks["data"], &(&1 in -128..127))
+      assert Enum.max(peaks["data"]) > 100, "a 0.9 sine must reach near the top of the range"
+    end
+
+    test "the 8-bit dat is byte-identical to audiowaveform's own -b 8 output", %{port: port} do
+      body = "/pk_bits:8" |> reference_path() |> render(port) |> body()
+
+      assert <<2::little-32, 1::little-32, 8000::little-32, 80::little-32, 100::little-32,
+               2::little-32, first::binary-size(8), _rest::binary>> = body
+
+      assert for(<<v::little-signed-8 <- first>>, do: v) == [-47, 47, -47, 47, -47, 47, -47, 47]
+      assert byte_size(body) == 24 + 100 * 2 * 2
+      assert sha256(body) == @reference_8_sha256
+    end
+
+    test "the 16-bit dat is byte-identical to audiowaveform's own -b 16 output", %{port: port} do
+      body = "/pk_bits:16" |> reference_path() |> render(port) |> body()
+
+      assert byte_size(body) == 24 + 100 * 2 * 2 * 2
+      assert sha256(body) == @reference_16_sha256
+    end
+  end
+
   describe "peaks in the cache" do
     test "the second request for the same peaks URL is a HIT", %{port: port} do
       rest = "/f:peaks/pts:32/plain/local://sine.wav"
@@ -390,6 +439,12 @@ defmodule AudioProxy.PeaksEndpointFfmpegTest do
   ## Helpers
 
   defp json(rest, port), do: rest |> render(port) |> body() |> JSON.decode!()
+
+  # Inserts the width segment before `/plain`, so each test names its width.
+  defp reference_path(segment),
+    do: String.replace(@reference_path, "/plain", segment <> "/plain")
+
+  defp sha256(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
 
   # A MISS is chunked and a HIT is not — §5's two framings — so a test that
   # compares the two has to read both. Anything else would be comparing a
