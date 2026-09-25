@@ -35,5 +35,5 @@
 
 ## 6. Downstream
 
-- [ ] 6.1 Create the companion change in `audioproxy-rails` for `pk_bits` in `KEYS` and `peak_bits` in `ALIASES`, before this one is archived, so the deferral is a change on a board rather than a note in an archived file
+- [x] 6.1 Create the companion change in `audioproxy-rails` for `pk_bits` in `KEYS` and `peak_bits` in `ALIASES`, before this one is archived, so the deferral is a change on a board rather than a note in an archived file (`add-peaks-bit-depth` in audioproxy-rails, 826dae4 on its main)
 - [ ] 6.2 Correct the same "peaks.js already reads it" claim in the two published blog posts and their dev.to copies, which is a writing task rather than an implementation one
