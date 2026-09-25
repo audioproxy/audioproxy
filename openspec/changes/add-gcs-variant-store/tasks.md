@@ -7,7 +7,7 @@
 
 ## 2. Tests
 
-- [ ] 2.1 MISS → tee → HIT round-trip against the S3 fake/MinIO via `AP_GCS_ENDPOINT` (`@tag :minio`), both redirect and proxy modes
+- [ ] 2.1 MISS → tee → HIT round-trip against the S3 fake/Garage via `AP_GCS_ENDPOINT` (`@tag :garage`), both redirect and proxy modes
 - [ ] 2.2 Cross-provider: sources on the shared profile's endpoint, store on the GCS profile's — one render, two origins, asserted per side
 - [ ] 2.3 Metadata round-trip (content type, cache control) through a `gcs://` store object
 - [ ] 2.4 Boot: `gcs://` store without the group aborts naming it; writability probe runs under the profile

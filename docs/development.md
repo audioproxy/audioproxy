@@ -56,40 +56,47 @@ excluded by default but run in CI; locally:
 mix test --include integration
 ```
 
-Tests tagged `:minio` need a real S3-compatible store. `AudioProxy.S3` is a
+Tests tagged `:garage` need a real S3-compatible store. `AudioProxy.S3` is a
 thin layer over `ex_aws_s3`, so what is worth testing is *our* half — the
 config overrides, the addressing decision, the error translation, the
 metadata round trip, the single-`PutObject` fast path and the part grouping
 `ex_aws` does not do. A stub would agree with us about all of it; a store
 does not.
 
-In the devcontainer MinIO is already running as a compose service at
-`minio:9000`, so this just works:
+The store is [Garage](https://garagehq.deuxfleurs.fr/), which replaced MinIO
+when MinIO stopped publishing container images. In the devcontainer it runs as
+a compose service at `garage:3900`, so this just works:
 
 ```bash
-mix test --only minio
+mix test --only garage
 ```
 
-Anywhere else, point the suite at a store you started yourself:
+Anywhere else, start the same image with the same config file and point the
+suite at it:
 
 ```bash
-docker run -d --name minio -p 9000:9000 \
-  -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-  minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+docker run -d --name garage -p 3900:3900 --tmpfs /var/lib/garage \
+  -v "$PWD/test/support/garage.toml:/etc/garage.toml:ro" \
+  -e GARAGE_DEFAULT_ACCESS_KEY=GK000000000000000000000000 \
+  -e GARAGE_DEFAULT_SECRET_KEY=0000000000000000000000000000000000000000000000000000000000000000 \
+  dxflrs/garage:v2.4.1 /garage server --single-node --default-access-key
 
-AP_TEST_MINIO_ENDPOINT=http://127.0.0.1:9000 mix test --only minio
+AP_TEST_GARAGE_ENDPOINT=http://127.0.0.1:3900 mix test --only garage
 ```
 
-Credentials are fixed at `minioadmin`/`minioadmin` and the bucket
-(`audio-proxy-test`) is created by the suite. It **fails rather than skips**
-when MinIO is unreachable: these tests are excluded by default, so anything
-that asked for them wants them run, and a green run against nothing is a lie
-about coverage.
+`--single-node` sets up the layout and `--default-access-key` creates the key
+from the environment, so the store needs no setup step. The credentials are
+fixed test values, defined once in `AudioProxy.GarageHelper`, and the suite
+creates its own bucket (`audio-proxy-test`). The config file pins the region
+to `us-east-1`, because Garage's default region is `garage` and every test
+signs for `us-east-1`. The suite **fails rather than skips** when the store is
+unreachable: these tests are excluded by default, so anything that asked for
+them wants them run, and a green run against nothing is a lie about coverage.
 
 **No two of the three tags go on the same test.** They are exclusion filters, and
 including one overrides the others' exclusion, so a test carrying two would be
 dragged into a job that cannot satisfy it — the `test` CI job has no ffmpeg,
-and `--only minio` on a laptop has no store. A socket-binding test that
+and `--only garage` on a laptop has no store. A socket-binding test that
 also needs the real encoder is therefore tagged `:ffmpeg` only —
 `AudioProxy.RenderEndpointFfmpegTest` is the one that does. Everything else
 about the streaming path runs against a stand-in encoder
@@ -137,17 +144,17 @@ The fixture directory is mounted `:ro` throughout, which is the posture the
 README tells operators to use rather than an incidental detail — write access to
 `AP_LOCAL_ROOT` is write access to what the proxy will serve.
 
-It also renders an **`s3://` source**, against a MinIO container on a
-suite-private network: the fixture is uploaded with `mc`, the proxy signs its
+It also renders an **`s3://` source**, against a Garage container on a
+suite-private network: the fixture is uploaded with the AWS CLI, the proxy signs its
 own presigned URL, and the shipped ffmpeg opens that URL and ranges it over the
 network. Then the store is removed and a source that is plainly there answers
-`502` rather than `404`. Both are here rather than only in the `:minio` ExUnit
+`502` rather than `404`. Both are here rather than only in the `:garage` ExUnit
 suite for the reason [Releases](#releases) gives: v0.3.0's notes announced S3
 rendering that no check exercised, and a release gate that cannot see S3 cannot
 catch that.
 
 The **`s3://` variant store** gets the same treatment, and one assertion no unit
-suite can make: a render is teed into a MinIO bucket, the same URL comes back as
+suite can make: a render is teed into a Garage bucket, the same URL comes back as
 a `HIT` with a declared length and `Accept-Ranges`, and then the container that
 rendered it is *removed* and a second one — in `redirect` mode against the same
 bucket — answers `302` to a presigned store URL that the shipped ffprobe decodes
@@ -164,10 +171,10 @@ would never get that far.
 
 | Job | Needs | Runs | Notes |
 |---|---|---|---|
-| `test` | — | `mix format --check-formatted`, `mix compile --warnings-as-errors`, starts MinIO, then `mix test --include integration --include minio` | No external *binaries* — the untagged + `:integration` suite must pass on a bare runner |
+| `test` | — | `mix format --check-formatted`, `mix compile --warnings-as-errors`, starts Garage, then `mix test --include integration --include garage` | No external *binaries* — the untagged + `:integration` suite must pass on a bare runner |
 | `image-ffmpeg` (×2) | `test` | Builds the `test` and `runtime` stages, then `mix test --only ffmpeg` inside the image | Asserts the two stages carry the *same* ffmpeg build, and that its major matches [`VERSIONS.md`](../VERSIONS.md). Once per architecture; each leg records the full ffmpeg version as an artifact |
 | `ffmpeg-arch-parity` | `image-ffmpeg` | Compares the two recorded ffmpeg versions | The architectures must ship the *same* Debian ffmpeg, not merely the same major. See [`VERSIONS.md`](../VERSIONS.md) for what to do the day they diverge |
-| `smoke` (×2) | `test` | Builds the release image, runs [`bin/smoke-image`](../bin/smoke-image) | Boot, health, an end-to-end render off a read-only mount, an `s3://` render against MinIO (and `502` once the store is gone), an `s3://` variant store served proxied and then redirected from a second container, a signed percent-escaped URL over h2c, config validation, SIGTERM during a render |
+| `smoke` (×2) | `test` | Builds the release image, runs [`bin/smoke-image`](../bin/smoke-image) | Boot, health, an end-to-end render off a read-only mount, an `s3://` render against Garage (and `502` once the store is gone), an `s3://` variant store served proxied and then redirected from a second container, a signed percent-escaped URL over h2c, config validation, SIGTERM during a render |
 | `capacity` | `test` | Runs [`bin/capacity-matrix --verify`](../bin/capacity-matrix), then builds the release image and runs [`bin/check-capacity`](../bin/check-capacity) twice | Drives a concurrent workload (two-hour source included) and asserts cgroup `memory.peak` stays inside the model [`docs/capacity.md`](capacity.md) publishes; the second run is the guard's own red-path check. The `--verify` step needs no image and checks the other direction — that every cell of that document's decision matrix really is the largest concurrency its column's memory limit holds |
 | `hex-package` | `test` | Runs [`bin/check-hex-package`](../bin/check-hex-package) | Builds the tarball, asserts it holds the allowlist and nothing else (LICENSE, `llms.txt`, `llms-full.txt` present; `openspec/`, `test/`, `examples/`, `Dockerfile`, `.github/` absent at any depth), unpacks it outside the checkout and compiles it, then builds the docs and asserts every documented link resolves. Runs on pull requests, because a published hex version is permanent |
 | `license-compliance` (×2) | `test` | Builds the release image and reads its notices back | Asserts every installed package ships a `/usr/share/doc/*/copyright`, that `SOURCES.txt` matches this image's own dpkg, and that a sample of its source URLs resolves. Once per architecture, because `SOURCES.txt` is generated inside the image and lists that architecture's packages |
@@ -202,12 +209,14 @@ Dockerfile instead, which is why `VERSIONS.md` has to be bumped alongside
 `.tool-versions` — the two are not wired together, and nothing but that file's
 procedure keeps them in step.
 
-Later slices extend this workflow rather than adding parallel ones — MinIO from
-`add-s3-client`, the arm64 matrix from `add-multi-arch-images` — so there stays
-one workflow to require. Both have landed. MinIO arrived as a `docker run` in
-the `test` job rather than as a `services:` container, for the reason the
-comment beside it gives: the image needs a command (`server /data`) and the
-services block has nowhere to put one.
+Later slices extend this workflow rather than adding parallel ones (the S3
+store from `add-s3-client`, the arm64 matrix from `add-multi-arch-images`), so
+there stays one workflow to require. Both have landed. The store runs as a
+`docker run` in the `test` job rather than as a `services:` container, for the
+reason the comment beside it gives: a service starts before checkout, so the
+config file it mounts does not exist yet, and a service cannot take a command.
+It was MinIO until `replace-minio-with-garage`, when MinIO stopped publishing
+images.
 
 ### Two architectures
 
@@ -619,12 +628,17 @@ the product, so the `:ffmpeg`-tagged tests need the real binaries.
 
 Since `add-s3-client` the devcontainer is a **compose project**
 ([`.devcontainer/docker-compose.yml`](../.devcontainer/docker-compose.yml)):
-an `app` service built from that Dockerfile, and a `minio` service for the
-`:minio` suite. The devcontainer CLI derives the compose project name from
+an `app` service built from that Dockerfile, and a `garage` service for the
+`:garage` suite. The devcontainer CLI derives the compose project name from
 the workspace folder, so each worktree gets its own `app` *and* its own
-`minio` with no shared state. MinIO publishes no host port for exactly that
-reason — only `app` reaches it, over the compose network at `minio:9000` — so
-parallel worktrees cannot collide on 9000.
+`garage` with no shared state. The store publishes no host port for exactly
+that reason: only `app` reaches it, over the compose network at
+`garage:3900`, so parallel worktrees cannot collide on 3900.
+
+A worktree created before `replace-minio-with-garage` still has a `minio`
+service in its compose project. After rebasing onto `main`, recreate it:
+`docker compose -p <project> down --remove-orphans`, then `devcontainer up`
+(or `wt hook post-create`).
 
 The binstubs are host/container dual-purpose — they branch on the `DEVCONTAINER`
 env var so they never recurse through `devcontainer exec`:

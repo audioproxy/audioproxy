@@ -16,7 +16,7 @@
 
 - [ ] 3.1 Parse/canonical/bounds property tests mirroring `Source.S3`'s; cache-key round-trip; `gcs://b/k` ≠ `s3://b/k` identity
 - [ ] 3.2 Profile independence: shared group at one fake endpoint, `AP_GCS_ENDPOINT` at another; each scheme's requests hit its own origin
-- [ ] 3.3 End-to-end render from a `gcs://` source with `AP_GCS_ENDPOINT` pointed at the suite's S3 fake/MinIO (`@tag :minio`)
+- [ ] 3.3 End-to-end render from a `gcs://` source with `AP_GCS_ENDPOINT` pointed at the suite's S3 fake/Garage (`@tag :garage`)
 - [ ] 3.4 Boot validation: partial group aborts naming variables; unconfigured group → 500 on request
 - [ ] 3.5 Manual smoke against live GCS interop (HEAD + presigned render), result recorded in the PR description — CI cannot assert Google's endpoint
 

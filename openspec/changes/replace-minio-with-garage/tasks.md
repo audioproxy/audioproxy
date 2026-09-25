@@ -25,10 +25,10 @@
 
 ## 5. Documentation
 
-- [ ] 5.1 `docs/development.md`: the store section (compose service, manual `docker run`, credentials, tag), the CI job table, and a note that in-flight worktrees need `devcontainer up` after rebasing
-- [ ] 5.2 `docs/s3-providers.md`: the store the suite tests against, and the Garage differences (expired-URL status, no minimum part size) as a provider note
-- [ ] 5.3 `CLAUDE.md`: the MinIO mentions in the test-support section (`CapturingStore` rules)
-- [ ] 5.4 Update the `add-gcs-source-backend` and `add-gcs-variant-store` tasks that name MinIO and `@tag :minio`
+- [x] 5.1 `docs/development.md`: the store section (compose service, manual `docker run`, credentials, tag), the CI job table, and a note that in-flight worktrees need `devcontainer up` after rebasing
+- [x] 5.2 `docs/s3-providers.md`: the store the suite tests against, and the Garage differences (expired-URL status, no minimum part size) as a provider note
+- [x] 5.3 `CLAUDE.md`: the MinIO mentions in the test-support section (`CapturingStore` rules)
+- [x] 5.4 Update the `add-gcs-source-backend` and `add-gcs-variant-store` tasks that name MinIO and `@tag :minio`
 
 ## 6. Verify
 

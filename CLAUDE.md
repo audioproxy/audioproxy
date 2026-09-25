@@ -387,7 +387,7 @@ One rule, and it was bought rather than reasoned:
   nothing.
 
 `AudioProxy.CapturingStore` owns the second S3 endpoint, for the suites that
-need two at once — the split source/store configuration, where one MinIO
+need two at once — the split source/store configuration, where one Garage
 cannot be both sides:
 
 | Function | Holds |
@@ -403,9 +403,9 @@ Two rules, and the first is the reason this is allowed to exist at all:
   ever agrees with the code that produced it, and that reasoning is unchanged.
   What this endpoint proves is *routing and identity* — that store requests
   went to the store's endpoint carrying the store's credential — which is
-  precisely the claim MinIO cannot make, because a store that verifies a
+  precisely the claim Garage cannot make, because a store that verifies a
   signature can only answer yes or no, never whose it was. The signature the
-  source side produces is still verified, by MinIO, in the same test.
+  source side produces is still verified, by Garage, in the same test.
 - **The empty store is the default.** The interesting path is a miss followed
   by a write-back, so `head/1` reports nothing until a test asks for a hit. A
   store that answered every HEAD with a variant would make a MISS render
