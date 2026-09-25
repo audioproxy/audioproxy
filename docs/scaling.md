@@ -274,7 +274,7 @@ The image already ships a `HEALTHCHECK` against `/health`, so the common case ne
 ```yaml
 services:
   proxy:
-    image: ghcr.io/audioproxy/audioproxy:0.7.2
+    image: ghcr.io/audioproxy/audioproxy:0.8.0
     deploy:
       replicas: 3
 ```

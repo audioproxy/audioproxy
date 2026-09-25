@@ -10,7 +10,7 @@ Point it at your audio and ask for a variant by URL: a 30-second preview, a mono
 
 **Full documentation: [docs.audioproxy.dev](https://docs.audioproxy.dev)**, covering how to render, sign, configure, deploy and observe.
 
-> **Status: early, `v0.7.2`.** Transcoding works end to end and you can try it in about a minute. Sources live on a mounted directory or in S3-compatible object storage; HTTPS sources are designed but not yet rendering, per the roadmap below. With a variant store configured, local or `s3://`, completed renders are kept and served back with `Range` support, so a variant is encoded once rather than per request. See the [Roadmap](#roadmap).
+> **Status: early, `v0.8.0`.** Transcoding works end to end and you can try it in about a minute. Sources live on a mounted directory or in S3-compatible object storage; HTTPS sources are designed but not yet rendering, per the roadmap below. With a variant store configured, local or `s3://`, completed renders are kept and served back with `Range` support, so a variant is encoded once rather than per request. See the [Roadmap](#roadmap).
 
 ## Quick start
 
@@ -21,7 +21,7 @@ docker run --rm -p 4000:4000 \
   -e AP_ALLOW_INSECURE=true \
   -e AP_LOCAL_ROOT=/audio \
   -v /path/to/your/audio:/audio:ro \
-  ghcr.io/audioproxy/audioproxy:0.7.2
+  ghcr.io/audioproxy/audioproxy:0.8.0
 ```
 
 > Every tag from `0.7.2` on is a manifest list carrying linux/amd64 and linux/arm64, built and smoke-tested on native hardware, so `docker pull` picks the right one on Graviton, Ampere and Apple Silicon alike, with no `--platform` and no emulation. Tags up to `0.7.1` are amd64 only.
@@ -75,10 +75,10 @@ docker run --rm -p 4000:4000 \
   -e AP_SERVE_MODE=proxy \
   -v /path/to/your/audio:/audio:ro \
   -v audioproxy-cache:/var/cache/audio_proxy \
-  ghcr.io/audioproxy/audioproxy:0.7.2
+  ghcr.io/audioproxy/audioproxy:0.8.0
 ```
 
-**Pin a version.** `:0.7.2` and `:sha-<commit>` name an exact image; `:0.7` follows patch releases; `:latest` and `:edge` move under you. Pinning matters more here than for most services, because a different ffmpeg encodes the same URL to different bytes, which is also why a pin bump always cuts a release. The pinned versions are in [VERSIONS.md](VERSIONS.md).
+**Pin a version.** `:0.8.0` and `:sha-<commit>` name an exact image; `:0.8` follows patch releases; `:latest` and `:edge` move under you. Pinning matters more here than for most services, because a different ffmpeg encodes the same URL to different bytes, which is also why a pin bump always cuts a release. The pinned versions are in [VERSIONS.md](VERSIONS.md).
 
 To run it from a checkout instead, for development or to build your own image:
 
@@ -96,7 +96,7 @@ The proxy is also published to hex as an OTP application (`{:audio_proxy, "~> 0.
 
 No dates. It is built in small releases, each one usable, in roughly this order.
 
-**Working now (`v0.7.2`)**
+**Working now (`v0.8.0`)**
 
 - Signed URLs, the full processing-options grammar, and the cache-key rules
 - Expiring URLs: `exp:<unix-seconds>` time-boxes one URL without rotating the key, and because it is not part of the cache key, minting a fresh short-lived URL per page view still resolves to one render
@@ -106,7 +106,7 @@ No dates. It is built in small releases, each one usable, in roughly this order.
 - Sources on a mounted directory or in S3, read by ffmpeg through a presigned URL, so a trim fetches only the bytes it needs
 - A variant store on a local directory or in S3, so the cache survives a restart and is shared between nodes, and with it `AP_SERVE_MODE=redirect`. The store can carry its own `AP_VARIANT_S3_*` credentials and endpoint, so sources and variants may live with different providers or under different principals
 - `HEAD` on a signed URL answers what its `GET` would, header for header, so a client can size a variant, learn whether it can seek, and read the cache verdict — without downloading a byte and without starting a render
-- `f:peaks`, waveform min/max data in audiowaveform's JSON and binary formats, drawn from the variant the same URL would play — `enhance`, `gain` and `norm` move the picture, so a waveform under a normalized player is normalized too
+- `f:peaks`, waveform min/max data in audiowaveform's JSON and binary formats, at 16 bits or, with `pk_bits:8`, at the 8 bits peaks.js reads, drawn from the variant the same URL would play — `enhance`, `gain` and `norm` move the picture, so a waveform under a normalized player is normalized too
 - A cap on simultaneous renders with a bounded wait queue, so a burst queues and then sheds rather than thrashing the machine. The queue also carries admission classes, so background work can be made to yield to a live listener; nothing here sets one yet, and the queue is plain FIFO until something does
 - `GET /info` for source metadata, `GET /ready` for queue-aware readiness, and a Prometheus `GET /metrics` on a bind-restricted listener of its own
 - Video input refused rather than transcoded, enforced rather than intended
