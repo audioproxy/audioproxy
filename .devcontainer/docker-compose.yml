@@ -3,11 +3,10 @@
 # cannot verify a signature without becoming a second SigV4 implementation
 # agreeing with the first.
 #
-# One project per worktree. The devcontainer CLI derives the compose project
-# name from the workspace folder, so parallel worktrees get their own `app`
-# *and* their own `minio` with no shared state and no port collisions — which
-# is why minio publishes nothing to the host. Only `app` reaches it, over the
-# compose network, at the fixed name `minio:9000`.
+# One project per worktree: the devcontainer CLI names the project after the
+# workspace folder, so each worktree gets its own `app` and its own store. The
+# store publishes no ports, so worktrees cannot collide. Only `app` reaches it,
+# at `minio:3900` on the compose network.
 
 services:
   app:
@@ -27,28 +26,33 @@ services:
       # bin/agent-* branch on this to tell "inside the container" from "on the
       # host", so they never recurse through devcontainer exec.
       DEVCONTAINER: "1"
-      # Where the :minio suite looks. Not AP_S3_ENDPOINT: that would configure
-      # the *application* to use MinIO for every run, and the dev server has no
-      # business pointing at a test store it did not ask for.
-      AP_TEST_MINIO_ENDPOINT: http://minio:9000
+      # Where the :minio suite looks. Not AP_S3_ENDPOINT, which would point the
+      # dev server at the test store too.
+      AP_TEST_MINIO_ENDPOINT: http://minio:3900
     depends_on:
       minio:
         condition: service_healthy
 
   minio:
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
-    command: server /data
+    # MinIO stopped publishing images. CI and bin/smoke-image run this same
+    # digest and config file.
+    image: dxflrs/garage:v2.4.1@sha256:9c96caa2612d3411acc5b0e6701fb238dbfba33e533a6d7d3d811a4b12d0d020
+    command: ["/garage", "server", "--single-node", "--default-access-key"]
+    # Must match AudioProxy.MinioHelper's credentials.
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    # Deliberately no `ports:` — see the header. Nothing outside the compose
-    # network needs it, and publishing 9000 would collide across worktrees.
+      GARAGE_DEFAULT_ACCESS_KEY: GK000000000000000000000000
+      GARAGE_DEFAULT_SECRET_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+    volumes:
+      - ../test/support/garage.toml:/etc/garage.toml:ro
+    # No `ports:`. Only `app` needs the store, and a published 3900 would
+    # collide across worktrees.
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      # The image has no shell, so the binary is the probe.
+      test: ["CMD", "/garage", "status"]
       interval: 3s
       timeout: 3s
       retries: 20
       start_period: 5s
     # Test fixtures only; a container restart is meant to lose them.
     tmpfs:
-      - /data
+      - /var/lib/garage

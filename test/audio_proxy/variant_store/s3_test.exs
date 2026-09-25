@@ -230,8 +230,8 @@ defmodule AudioProxy.VariantStore.S3Test do
     %{
       "AP_VARIANT_STORE" => "s3://#{@bucket}",
       "AP_S3_ENDPOINT" => URI.to_string(MinioHelper.endpoint()),
-      "AWS_ACCESS_KEY_ID" => "minioadmin",
-      "AWS_SECRET_ACCESS_KEY" => "minioadmin",
+      "AWS_ACCESS_KEY_ID" => MinioHelper.access_key_id(),
+      "AWS_SECRET_ACCESS_KEY" => MinioHelper.secret_access_key(),
       "AWS_REGION" => "us-east-1"
     }
   end

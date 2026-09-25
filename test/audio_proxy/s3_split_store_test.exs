@@ -45,10 +45,9 @@ defmodule AudioProxy.S3SplitStoreTest do
 
   @body "RIFF-fake-wav-bytes"
 
-  # MinIO's, and the only credential in this file that is real. Anything the
-  # capture receives signed with it is a store request that reached for the
-  # source's identity.
-  @source_key_id "minioadmin"
+  # The test store's key, and the only real credential in this file. A capture
+  # signed with it is a store request that used the source's identity.
+  @source_key_id MinioHelper.access_key_id()
 
   # The store's, which no store verifies: the capture records it, and its whole
   # job is to be *distinguishable* from the one above.
@@ -68,7 +67,7 @@ defmodule AudioProxy.S3SplitStoreTest do
         s3: %{
           region: "us-east-1",
           access_key_id: @source_key_id,
-          secret_access_key: "minioadmin",
+          secret_access_key: MinioHelper.secret_access_key(),
           session_token: nil,
           endpoint: endpoint,
           addressing: :path,

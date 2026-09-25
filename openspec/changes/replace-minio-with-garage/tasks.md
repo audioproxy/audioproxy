@@ -1,15 +1,15 @@
 ## 1. Store configuration
 
-- [ ] 1.1 Add `test/support/garage.toml` (single node, sqlite, `s3_region = "us-east-1"`, S3 on 3900, admin on 3903), its `rpc_secret` marked as a fixed test value
-- [ ] 1.2 Replace the `minio` compose service with `s3` running `dxflrs/garage:v2.4.1@sha256:9c96caa2…` with `--single-node --default-access-key`, the config mounted, `/var/lib/garage` on tmpfs, and a healthcheck against the admin `/health`; update `runServices` in `devcontainer.json`
-- [ ] 1.3 Replace CI's `Start MinIO` step with the same image and config via `docker run`, polling `:3903/health`
+- [x] 1.1 Add `test/support/garage.toml` (single node, sqlite, `s3_region = "us-east-1"`, S3 on 3900, admin on 3903), its `rpc_secret` marked as a fixed test value
+- [x] 1.2 Replace the `minio` compose service with `s3` running `dxflrs/garage:v2.4.1@sha256:9c96caa2…` with `--single-node --default-access-key`, the config mounted, `/var/lib/garage` on tmpfs, and a healthcheck against the admin `/health`; update `runServices` in `devcontainer.json`
+- [x] 1.3 Replace CI's `Start MinIO` step with the same image and config via `docker run`, polling `:3903/health`
 
 ## 2. Test support
 
-- [ ] 2.1 Point `MinioHelper` at Garage: endpoint default, health probe path, and `access_key_id/0` / `secret_access_key/0` as the credentials' one home
-- [ ] 2.2 Replace the literal credential pair in `s3_test.exs`, `source/s3_backend_test.exs`, `variant_store/s3_test.exs` and `s3_split_store_test.exs` with the helper's, keeping the split-store test's second identity distinct
-- [ ] 2.3 Accept `400` or `403` for the expired presigned URL in `s3_test.exs`, with the reason in the assertion message
-- [ ] 2.4 Run `mix test --include integration --include minio` in the devcontainer; record any further Garage difference in `design.md` with how it was resolved
+- [x] 2.1 Point `MinioHelper` at Garage: endpoint default, health probe path, and `access_key_id/0` / `secret_access_key/0` as the credentials' one home; the private `ensure_bucket!`/`ensure_reachable!` copies in `s3_test.exs` and `source/s3_backend_test.exs` now call it, and the probe accepts any HTTP answer so it stays provider-neutral
+- [x] 2.2 Replace the literal credential pair in `s3_test.exs`, `source/s3_backend_test.exs`, `variant_store/s3_test.exs` and `s3_split_store_test.exs` with the helper's, keeping the split-store test's second identity distinct
+- [x] 2.3 Accept `400` or `403` for the expired presigned URL in `s3_test.exs`, with the reason in the assertion message
+- [x] 2.4 Run `mix test --include integration --include minio` in the devcontainer; record any further Garage difference in `design.md` with how it was resolved (none: 98 store tests, 1267 overall, green on the first run)
 
 ## 3. Image smoke test
 

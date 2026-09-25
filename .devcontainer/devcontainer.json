@@ -4,10 +4,10 @@
   // the :minio suite needs a real S3-compatible store alongside the app, and a
   // fake that verified signatures would only be a second SigV4 implementation
   // agreeing with the first. docker-compose.yml has the rest of the reasoning,
-  // including why minio publishes no ports.
+  // including why the store publishes no ports.
   "dockerComposeFile": "docker-compose.yml",
   "service": "app",
-  // Both, and stopped together — a worktree's MinIO should not outlive it.
+  // Both, and stopped together — a worktree's store should not outlive it.
   "runServices": ["app", "minio"],
   "workspaceFolder": "/workspaces/audio_proxy",
   "remoteUser": "dev",

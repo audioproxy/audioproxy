@@ -40,31 +40,33 @@ jobs:
 
       - run: mix compile --warnings-as-errors
 
-      # MinIO backs the :minio suite, which is where the S3 layer is checked
-      # against a store that actually verifies signatures. Started with
-      # `docker run` rather than as a `services:` container because the minio
-      # image needs a command (`server /data`) and the services block has
-      # nowhere to put one.
-      - name: Start MinIO
+      # The :minio suite needs a store that verifies signatures. Same digest and
+      # config as .devcontainer/docker-compose.yml. `docker run`, not
+      # `services:`: services start before checkout, so the config file does not
+      # exist yet, and they cannot take a command.
+      - name: Start the S3 store
         run: |
           set -euo pipefail
 
-          docker run -d --name minio \
-            -p 9000:9000 \
-            -e MINIO_ROOT_USER=minioadmin \
-            -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+          docker run -d --name s3 \
+            -p 3900:3900 -p 3903:3903 \
+            --tmpfs /var/lib/garage \
+            -v "$PWD/test/support/garage.toml:/etc/garage.toml:ro" \
+            -e GARAGE_DEFAULT_ACCESS_KEY=GK000000000000000000000000 \
+            -e GARAGE_DEFAULT_SECRET_KEY=0000000000000000000000000000000000000000000000000000000000000000 \
+            dxflrs/garage:v2.4.1@sha256:9c96caa2612d3411acc5b0e6701fb238dbfba33e533a6d7d3d811a4b12d0d020 \
+            /garage server --single-node --default-access-key
 
           for _ in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null 2>&1; then
-              echo "MinIO is up"
+            if curl -fsS http://127.0.0.1:3903/health >/dev/null 2>&1; then
+              echo "S3 store is up"
               exit 0
             fi
             sleep 1
           done
 
-          echo "::error::MinIO did not become healthy"
-          docker logs minio
+          echo "::error::S3 store did not become healthy"
+          docker logs s3
           exit 1
 
       # `--include integration` adds the socket-binding tests; `--include
@@ -72,7 +74,7 @@ jobs:
       # (that tag has its own job below).
       - run: mix test --include integration --include minio
         env:
-          AP_TEST_MINIO_ENDPOINT: http://127.0.0.1:9000
+          AP_TEST_MINIO_ENDPOINT: http://127.0.0.1:3900
 
   # ---------------------------------------------------------------------------
   # Image verification, once per published architecture on native runners. QEMU
