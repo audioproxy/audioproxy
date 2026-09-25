@@ -7,8 +7,8 @@ defmodule AudioProxy.Peaks do
   little-endian samples. This module does the arithmetic: reduce those samples
   to `pts` min/max pairs and serialize them in one of audiowaveform's two
   formats, which is the schema decision recorded in CLAUDE.md. There is
-  nothing to invent here; peaks.js and the rest of that ecosystem already read
-  these bytes.
+  nothing to invent here. peaks.js reads only 8-bit data, so it needs
+  `pk_bits:8`. The default width is 16 bits.
 
   ## Streaming, not buffering
 
@@ -51,17 +51,9 @@ defmodule AudioProxy.Peaks do
 
   alias AudioProxy.Options
 
-  # Every sample is 16-bit, so `bits` is a constant rather than a knob. The
-  # dat format carries an 8-bit mode; offering it would mean a second cache
-  # key for a coarser picture nobody asked for.
-  @bits 16
-
   # audiowaveform's data format version. v2 is v1 plus the channel count, and
   # emitting it unconditionally keeps mono and stereo one code path.
   @dat_version 2
-
-  # v2 flag bits: 0 is 16-bit samples, 1 would be 8-bit. See @bits.
-  @dat_flags 0
 
   # Sentinels for an untouched bucket, deliberately at the far end of each
   # bound so the first sample replaces both. A bucket is only ever closed
@@ -86,7 +78,7 @@ defmodule AudioProxy.Peaks do
           channels: 1 | 2,
           sample_rate: pos_integer(),
           samples_per_pixel: pos_integer(),
-          bits: 16,
+          bits: 8 | 16,
           length: pos_integer(),
           data: [integer()]
         }
@@ -96,6 +88,7 @@ defmodule AudioProxy.Peaks do
     :channels,
     :sample_rate,
     :samples_per_pixel,
+    :bits,
     :acc,
     :remaining,
     closed: [],
@@ -116,6 +109,7 @@ defmodule AudioProxy.Peaks do
       Defaults to 1.
     * `:sample_rate` — carried into the serialized output, where consumers use
       it to turn a pixel index into a time. Defaults to 0, meaning unknown.
+    * `:bits` — 8 or 16, the width of each serialized value. Defaults to 16.
   """
   @spec new(non_neg_integer(), keyword()) :: t()
   def new(frames, opts) when is_integer(frames) and frames >= 0 do
@@ -130,21 +124,23 @@ defmodule AudioProxy.Peaks do
       channels: channels,
       sample_rate: Keyword.get(opts, :sample_rate, 0),
       samples_per_pixel: samples_per_pixel,
+      bits: Keyword.get(opts, :bits, 16),
       acc: empty(channels),
       remaining: samples_per_pixel
     }
   end
 
   @doc """
-  A reducer configured from `options` — the `pts` and `ch` half of the URL —
-  plus what only the probe knows.
+  A reducer configured from `options` — the `pts`, `ch` and `pk_bits` half of
+  the URL — plus what only the probe knows.
   """
   @spec new(non_neg_integer(), Options.t(), pos_integer()) :: t()
   def new(frames, %Options{} = options, sample_rate) do
     new(frames,
       count: Options.peak_count(options),
       channels: Options.peak_channels(options),
-      sample_rate: sample_rate
+      sample_rate: sample_rate,
+      bits: Options.peak_bits(options)
     )
   end
 
@@ -222,13 +218,14 @@ defmodule AudioProxy.Peaks do
       |> Enum.reverse()
       |> Enum.flat_map(&Tuple.to_list/1)
       |> pad(state.count * 2 * state.channels)
+      |> narrow(state.bits)
 
     %{
       version: @dat_version,
       channels: state.channels,
       sample_rate: state.sample_rate,
       samples_per_pixel: state.samples_per_pixel,
-      bits: @bits,
+      bits: state.bits,
       length: state.count,
       data: data
     }
@@ -250,7 +247,7 @@ defmodule AudioProxy.Peaks do
 
   @doc """
   audiowaveform's binary serialization: a little-endian v2 header followed by
-  the same integers as `int16`.
+  the same integers as `int16`, or as `int8` when `bits` is 8.
 
   The header is version, flags, sample rate, samples per pixel, length and
   channel count, in that order — six 32-bit fields, and then the data. A
@@ -261,14 +258,14 @@ defmodule AudioProxy.Peaks do
   def to_dat(result) do
     header = <<
       @dat_version::little-signed-32,
-      @dat_flags::little-unsigned-32,
+      dat_flags(result.bits)::little-unsigned-32,
       result.sample_rate::little-signed-32,
       result.samples_per_pixel::little-signed-32,
       result.length::little-unsigned-32,
       result.channels::little-signed-32
     >>
 
-    body = for value <- result.data, do: <<value::little-signed-16>>
+    body = for value <- result.data, do: <<value::little-signed-size(result.bits)>>
 
     IO.iodata_to_binary([header | body])
   end
@@ -366,6 +363,18 @@ defmodule AudioProxy.Peaks do
       _complete -> data
     end
   end
+
+  # The reduction always runs at 16 bits, and 8-bit output is that result
+  # narrowed. Thus the two widths are one waveform by construction.
+  # `div/2` truncates toward zero, which is audiowaveform's own rule for
+  # `-b 8`. An int16 divided by 256 is always inside -128..127.
+  defp narrow(data, 16), do: data
+  defp narrow(data, 8), do: Enum.map(data, &div(&1, 256))
+
+  # audiowaveform's flags field. Bit 0 set means 8-bit values. Bits 1-31 are
+  # unused.
+  defp dat_flags(16), do: 0
+  defp dat_flags(8), do: 1
 
   defp ceil_div(_numerator, 0), do: 0
   defp ceil_div(numerator, denominator), do: div(numerator + denominator - 1, denominator)
