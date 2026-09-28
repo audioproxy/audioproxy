@@ -433,8 +433,8 @@ equivalent for anyone who needs one, and it is an image.
 
 The two artifacts cannot disagree about what they contain. The publish job
 asserts `mix.exs` matches the tag before it does anything, and both are built
-from that same commit — so `ghcr.io/audioproxy/audioproxy:0.7.2` and
-`audio_proxy 0.7.2` are the same code by construction, not by discipline.
+from that same commit — so `ghcr.io/audioproxy/audioproxy:0.8.0` and
+`audio_proxy 0.8.0` are the same code by construction, not by discipline.
 
 **The image is published first, then the package, then the docs** — three
 steps, and the order is what makes a partial failure recoverable:
@@ -550,18 +550,6 @@ the cache key is the same, and a warm CDN and a cold one will disagree about
 what they serve until the old objects age out. This section is where such a
 line waits between merging and being cut, and an entry is deleted by the
 release that carries it — an empty section is the normal state.
-
-- **Every peaks cache key changes once (`add-peaks-bit-depth`).** The new
-  `pk_bits` option materializes its default, `pk_bits:16`, into the canonical
-  options string. So every `f:peaks` URL has a new cache key, although its bytes
-  do not change. Each cached peaks variant misses once after the upgrade and
-  renders again. The objects under the old keys stay in the variant bucket until
-  a lifecycle rule or an operator removes them. *What bumps what* makes a
-  cache-key change major, but this one ships in a minor release: no deployment
-  had a peaks cache to orphan when it merged. Check: `AudioProxy.OptionsTest`,
-  "the default pk_bits and an explicit pk_bits:16 are one cache key". Also note
-  that `pk_bits:8` makes peaks output loadable by peaks.js, checked byte for
-  byte against audiowaveform in `AudioProxy.PeaksEndpointFfmpegTest`.
 
 **Release notes are claims, and claims name their checks.** Before publishing
 notes, every Highlight must point at the automated check that demonstrates it —

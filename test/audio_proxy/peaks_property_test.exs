@@ -83,7 +83,7 @@ defmodule AudioProxy.PeaksPropertyTest do
       result = reduce([pcm_of(samples)], frames, count: count, channels: channels, bits: bits)
 
       <<_header::binary-size(24), body::binary>> = Peaks.to_dat(result)
-      from_dat = for <<value::little-signed-size(bits) <- body>>, do: value
+      from_dat = for <<value::little-signed-size(^bits) <- body>>, do: value
 
       assert from_dat == JSON.decode!(Peaks.to_json(result))["data"]
     end

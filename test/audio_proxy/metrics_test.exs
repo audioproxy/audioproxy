@@ -323,6 +323,11 @@ defmodule AudioProxy.MetricsTest do
 
       assert is_pid(restarted) and restarted != before
 
+      # The name is registered before init/1 runs, so the pid above can exist
+      # while init/1 is between detach and attach. An event in that window is
+      # lost. :sys.get_state/1 answers only after init/1 returns.
+      _ = :sys.get_state(restarted)
+
       # Attached exactly once per event, not twice — a restart that attached
       # without detaching would double-count everything it saw.
       events = for h <- :telemetry.list_handlers([]), h.id == Metrics, do: h.event_name
